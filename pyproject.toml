@@ -1,0 +1,25 @@
+[project]
+name = "benchmark"
+version = "0.1.0"
+description = "Dagster pipeline for scope, ingestion, discovery, tracing and evaluation of defects in code reviews."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "dagster==1.11",
+    "dagit==1.11",
+    "dagster-gcp",
+    "google-cloud-bigquery",
+    "google-cloud-storage",
+    "tqdm==4.67"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.3",
+    "ruff==0.6.4",
+    "ipykernel==6.29.5",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,45 @@
+services:
+    daemon:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        profiles: [development]
+        environment:
+            DAGSTER_DEPLOYMENT_MODE: local
+            DAGSTER_HOME: /var/lib/dagster
+            PYTHONPATH: /usr/local/src
+        command: >
+            dagster-daemon run -w /etc/dagster/workspace.yaml
+        volumes:
+            - .dagster/local/storage:/var/lib/dagster
+            - .dagster/local/dagster.yaml:/etc/dagster/dagster.yaml:ro
+            - .dagster/local/workspace.yaml:/etc/dagster/workspace.yaml:ro
+            - .dagster/local/logs:/var/log/dagster
+            - ./src:/usr/local/src/benchmark
+
+    interface:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        profiles: [development, production]
+        environment:
+            DAGSTER_HOME: /var/lib/dagster
+            PYTHONPATH: /usr/local/src
+        ports:
+            - 3000:3000
+        command: >
+            dagster-webserver -h 0.0.0.0 -p 3000 -w /etc/dagster/workspace.${WORKSPACE:-local}.yaml
+        volumes:
+            - .dagster/local/workspace.yaml:/etc/dagster/workspace.local.yaml:ro
+            - .dagster/cloud/workspace.yaml:/etc/dagster/workspace.cloud.yaml:ro
+            - ./src:/usr/local/src/benchmark
+
+    lock:
+        image: python:3.11-slim
+        working_dir: /usr/local/src
+        profiles: [dependencies]
+        command: >
+            sh -c "
+              pip install --no-cache-dir pip-tools &&
+              pip-compile pyproject.toml --output-file requirements.lock
+            "

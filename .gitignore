@@ -1,0 +1,10 @@
+*.egg-info/
+.DS_Store
+.env
+.eggs/
+.idea/
+.vscode/
+__pycache__/
+build/
+pytest_cache/
+compose.override.yml

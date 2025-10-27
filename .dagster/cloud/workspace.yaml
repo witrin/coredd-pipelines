@@ -1,0 +1,6 @@
+load_from:
+    - grpc_server:
+          host: ${GRPC_HOST}
+          port: ${GRPC_PORT:-443}
+          ssl: true
+          location_name: cloud-code-location

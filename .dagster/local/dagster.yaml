@@ -1,0 +1,20 @@
+storage:
+    sqlite:
+        base_dir: /var/lib/dagster
+
+run_storage:
+    sqlite:
+        base_dir: /var/lib/dagster
+
+event_log_storage:
+    sqlite:
+        base_dir: /var/lib/dagster
+
+compute_logs:
+    base_dir: /var/log/dagster
+
+local_artifact_storage:
+    base_dir: /var/lib/dagster
+
+telemetry:
+    enabled: false

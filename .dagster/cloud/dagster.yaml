@@ -1,0 +1,32 @@
+storage:
+    postgres:
+        postgres_db:
+            username: dagster
+            password: ${PG_PASSWORD}
+            hostname: ${PG_HOST}
+            db_name: dagster
+
+run_storage:
+    postgres:
+        postgres_db:
+            username: dagster
+            password: ${PG_PASSWORD}
+            hostname: ${PG_HOST}
+            db_name: dagster
+
+event_log_storage:
+    postgres:
+        postgres_db:
+            username: dagster
+            password: ${PG_PASSWORD}
+            hostname: ${PG_HOST}
+            db_name: dagster
+
+telemetry:
+    enabled: false
+
+compute_logs:
+    base_dir: /var/log/dagster
+
+local_artifact_storage:
+    base_dir: /var/lib/dagster
