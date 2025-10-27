@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: pipeline
+  IMAGE: bug-request/benchmark
 
 jobs:
   build-and-push:
