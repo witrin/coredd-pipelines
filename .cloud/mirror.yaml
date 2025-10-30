@@ -1,0 +1,28 @@
+serviceAccount: projects/$PROJECT_ID/serviceAccounts/cloud-build-trigger@$PROJECT_ID.iam.gserviceaccount.com
+steps:
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - auth
+      - configure-docker
+      - "${_AR_HOST}"
+      - --quiet
+  - name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        echo "$$GHCR_TOKEN" | docker login ghcr.io -u "${_GHCR_USER}" --password-stdin
+    secretEnv:
+      - GHCR_TOKEN
+  - name: gcr.io/cloud-builders/docker
+    args: ["pull", "${_GHCR_IMAGE}"]
+  - name: gcr.io/cloud-builders/docker
+    args: ["tag", "${_GHCR_IMAGE}", "${_AR_IMAGE}"]
+  - name: gcr.io/cloud-builders/docker
+    args: ["push", "${_AR_IMAGE}"]
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/ghcr-token/versions/latest
+      env: GHCR_TOKEN

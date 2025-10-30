@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS dagster
 
 ENV DAGSTER_HOME=/etc/dagster \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -22,3 +22,21 @@ USER dagster
 EXPOSE 8080
 
 CMD ["dagster", "api", "grpc", "-h", "0.0.0.0", "-p", "8080", "-f", "/usr/local/src/benchmark/definitions.py"]
+
+FROM google/cloud-sdk:slim AS cloud
+
+RUN apt-get update -y && \
+    apt-get install -y wget gpg lsb-release && \
+    wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
+    https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list && \
+    apt-get update -y && \
+    apt-get install -y terraform && \
+    terraform -version && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+COPY .cloud/ /workspace/
+
+ENTRYPOINT ["/bin/bash"]

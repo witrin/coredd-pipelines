@@ -2,8 +2,9 @@ services:
     daemon:
         build:
             context: .
+            target: dagster
             dockerfile: Dockerfile
-        profiles: [development]
+        profiles: [ development ]
         environment:
             DAGSTER_DEPLOYMENT_MODE: local
             DAGSTER_HOME: /var/lib/dagster
@@ -20,8 +21,9 @@ services:
     interface:
         build:
             context: .
+            target: dagster
             dockerfile: Dockerfile
-        profiles: [development, production]
+        profiles: [ development, production ]
         environment:
             DAGSTER_HOME: /var/lib/dagster
             PYTHONPATH: /usr/local/src
@@ -37,9 +39,20 @@ services:
     lock:
         image: python:3.11-slim
         working_dir: /usr/local/src
-        profiles: [dependencies]
+        profiles: [ dependencies ]
         command: >
             sh -c "
               pip install --no-cache-dir pip-tools &&
               pip-compile pyproject.toml --output-file requirements.lock
             "
+
+    cloud:
+        build:
+            context: .
+            dockerfile: Dockerfile
+            target: cloud
+        stdin_open: true
+        tty: true
+        volumes:
+            - ./.cloud:/workspace
+            - ~/.config/gcloud:/root/.config/gcloud

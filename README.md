@@ -56,16 +56,74 @@ docker compose --profile production --env-file .env.production up --build interf
 
 Shut the service down with `docker compose stop interface` or remove containers entirely using `docker compose down`.
 
-## Tips
+## Cloud Infrastructure
 
-Use the development profile with only the interface service when you just need to verify the UI.
-
-Rebuild interface images when dependencies change so Docker Compose does not reuse stale layers.
-
-Pass `--env-file` whenever you switch between environment files to make sure Compose loads the expected credentials.
-
-Regenerate `requirements.lock` whenever you need to update dependencies.
+The Terraform configuration in this repository manages the Google Cloud deployment for the bug-report pipelines. Authenticate and set the active project before running any Terraform workflow.
 
 ```bash
-docker compose --profile dependencies run --rm lock
+gcloud auth login
+gcloud auth application-default login
+gcloud config set project bug-request
+terraform init
+```
+
+### Terraform Lifecycle
+
+Plan and apply infrastructure changes as needed.
+
+```bash
+terraform plan
+terraform apply
+```
+
+When you need to remove infrastructure, prefer targeted destroys to avoid accidental data loss. `terraform destroy` without targets removes every managed resource—use it only when you are certain that no data needs to be retained.
+
+```bash
+terraform destroy
+```
+
+Destroy only the Cloud Run service if you want to keep stateful resources online.
+
+```bash
+terraform destroy -target=google_cloud_run_v2_service.bug_request_daemon
+```
+
+Before tearing down the database, capture a backup. The export target bucket must already exist and the caller must have the necessary Cloud SQL export permissions.
+
+```bash
+gcloud sql export sql bug-request-db \
+  gs://bug-request-storage/backups/backup-$(date +%Y%m%dT%H%M%S).sql.gz \
+  --database=dagster_meta \
+  --project=bug-request
+```
+
+Use a targeted destroy with auto-approval when decommissioning the Cloud Run service, Cloud SQL instance, individual database, and VPC connector together. This command is irreversible and may lead to permanent data loss if backups are missing or incomplete.
+
+```bash
+terraform destroy \
+  -target=google_cloud_run_v2_service.bug_request_daemon \
+  -target=google_sql_database_instance.bug_request_database \
+  -target=google_sql_database.bug_request_dagster \
+  -target=google_vpc_access_connector.bug_request_connector \
+  -auto-approve
+```
+
+### Storage Layout
+
+Backups, assets, and scratch data live in the `bug-request-storage` bucket with the following structure.
+
+```
+gs://bug-request-storage/
+├── backups/
+│   └── databases/
+│       └── <key>/<YYYYMMDD>.sql.gz
+│
+├── assets/
+│   └── {stage}/
+│       └── {key}/({partition}/)
+│           └── {version}/
+│               ├── data/
+│               └── meta.json
+│
+└── scratch/
 ```
