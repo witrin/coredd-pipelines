@@ -1,8 +1,9 @@
 services:
+
     daemon:
         build:
             context: .
-            target: dagster
+            target: pipelines
             dockerfile: Dockerfile
         profiles: [ development ]
         environment:
@@ -21,12 +22,14 @@ services:
     interface:
         build:
             context: .
-            target: dagster
+            target: pipelines
             dockerfile: Dockerfile
-        profiles: [ development, production ]
+        profiles: [ development ]
         environment:
             DAGSTER_HOME: /var/lib/dagster
             PYTHONPATH: /usr/local/src
+            GRPC_PORT: 9090
+            GRPC_HOST: ${GRPC_HOST}
         ports:
             - 3000:3000
         command: >
@@ -46,13 +49,14 @@ services:
               pip-compile pyproject.toml --output-file requirements.lock
             "
 
-    cloud:
+    console:
         build:
             context: .
             dockerfile: Dockerfile
-            target: cloud
+            target: console
         stdin_open: true
         tty: true
+        profiles: [ deployment ]
         volumes:
             - ./.cloud:/workspace
             - ~/.config/gcloud:/root/.config/gcloud

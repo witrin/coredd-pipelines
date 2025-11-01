@@ -1,4 +1,4 @@
-FROM python:3.11-slim AS dagster
+FROM python:3.11-slim AS pipelines
 
 ENV DAGSTER_HOME=/etc/dagster \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -23,7 +23,7 @@ EXPOSE 8080
 
 CMD ["dagster", "api", "grpc", "-h", "0.0.0.0", "-p", "8080", "-f", "/usr/local/src/benchmark/definitions.py"]
 
-FROM google/cloud-sdk:slim AS cloud
+FROM google/cloud-sdk:slim AS console
 
 RUN apt-get update -y && \
     apt-get install -y wget gpg lsb-release && \

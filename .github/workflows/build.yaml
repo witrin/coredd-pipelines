@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: Build and Push Docker Images
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: bug-request/benchmark
+  IMAGE: bug-request/pipelines
 
 jobs:
   build-and-push:
@@ -28,11 +28,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push
+      - name: Build and Push Pipelines Image
         uses: docker/build-push-action@v6
         with:
           context: .
-          target: dagster
+          target: pipelines
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE }}:latest
