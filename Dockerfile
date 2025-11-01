@@ -5,6 +5,10 @@ ENV DAGSTER_HOME=/etc/dagster \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/usr/local/lib/python3.11/site-packages:/usr/local/src
 
+RUN apt-get update -y && \
+    apt-get install -y supervisor && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 RUN adduser --disabled-password --gecos "" dagster \
    && mkdir -p /srv/bug-request/src /etc/dagster /var/lib/dagster /var/log/dagster \
    && chown -R dagster:dagster /srv/bug-request /etc/dagster /var/lib/dagster /var/log/dagster
@@ -14,6 +18,7 @@ WORKDIR /usr/local/src/
 COPY pyproject.toml requirements.lock ./
 COPY src/ ./benchmark/
 COPY .dagster/cloud/dagster.yaml /etc/dagster/dagster.yaml
+COPY .supervisor/dagster.conf /etc/supervisor/conf.d/dagster.conf
 
 RUN pip install --no-cache-dir -r requirements.lock
 
@@ -21,7 +26,7 @@ USER dagster
 
 EXPOSE 8080
 
-CMD ["dagster", "api", "grpc", "-h", "0.0.0.0", "-p", "8080", "-f", "/usr/local/src/benchmark/definitions.py"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/dagster.conf", "-n"]
 
 FROM google/cloud-sdk:slim AS console
 

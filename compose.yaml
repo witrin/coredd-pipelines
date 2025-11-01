@@ -1,6 +1,6 @@
 services:
 
-    daemon:
+    pipelines:
         build:
             context: .
             target: pipelines
@@ -11,32 +11,14 @@ services:
             DAGSTER_HOME: /var/lib/dagster
             PYTHONPATH: /usr/local/src
         command: >
-            dagster-daemon run -w /etc/dagster/workspace.yaml
+            dagster dev -h 0.0.0.0 -p 3000 -w /etc/dagster/workspace.yaml
+        ports:
+            - 3000:3000
         volumes:
             - .dagster/local/storage:/var/lib/dagster
             - .dagster/local/dagster.yaml:/etc/dagster/dagster.yaml:ro
             - .dagster/local/workspace.yaml:/etc/dagster/workspace.yaml:ro
             - .dagster/local/logs:/var/log/dagster
-            - ./src:/usr/local/src/benchmark
-
-    interface:
-        build:
-            context: .
-            target: pipelines
-            dockerfile: Dockerfile
-        profiles: [ development ]
-        environment:
-            DAGSTER_HOME: /var/lib/dagster
-            PYTHONPATH: /usr/local/src
-            GRPC_PORT: 9090
-            GRPC_HOST: ${GRPC_HOST}
-        ports:
-            - 3000:3000
-        command: >
-            dagster-webserver -h 0.0.0.0 -p 3000 -w /etc/dagster/workspace.${WORKSPACE:-local}.yaml
-        volumes:
-            - .dagster/local/workspace.yaml:/etc/dagster/workspace.local.yaml:ro
-            - .dagster/cloud/workspace.yaml:/etc/dagster/workspace.cloud.yaml:ro
             - ./src:/usr/local/src/benchmark
 
     lock:
