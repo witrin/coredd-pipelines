@@ -6,20 +6,53 @@ services:
             target: pipelines
             dockerfile: Dockerfile
         profiles: [ development ]
-        environment:
-            DAGSTER_DEPLOYMENT_MODE: local
-            DAGSTER_HOME: /var/lib/dagster
-            PYTHONPATH: /usr/local/src
+        env_file:
+            - .env
         command: >
-            dagster dev -h 0.0.0.0 -p 3000 -w /etc/dagster/workspace.yaml
+            dagster-daemon run -f /usr/local/src/benchmark/definitions.py -w /etc/dagster/workspace.yaml
         ports:
             - 3000:3000
         volumes:
             - .dagster/local/storage:/var/lib/dagster
-            - .dagster/local/dagster.yaml:/etc/dagster/dagster.yaml:ro
-            - .dagster/local/workspace.yaml:/etc/dagster/workspace.yaml:ro
             - .dagster/local/logs:/var/log/dagster
             - ./src:/usr/local/src/benchmark
+
+    redis:
+        image: redis:7
+        command: ["redis-server", "--appendonly", "no"]
+
+    elasticsearch:
+        image: elasticsearch:8.17.0
+        environment:
+            - ES_JAVA_OPTS=-Xms512m -Xmx512m -XX:UseSVE=0
+            - CLI_JAVA_OPTS=-XX:UseSVE=0
+            - node.name=elasticsearch
+            - cluster.name=es-argilla-local
+            - discovery.type=single-node
+            - cluster.routing.allocation.disk.threshold_enabled=false
+            - xpack.security.enabled=false
+        ulimits:
+            memlock:
+                soft: 671088640
+                hard: 671088640
+
+    evaluation:
+        build: .
+        depends_on:
+            - redis
+            - elasticsearch
+        env_file:
+            - .env
+        environment:
+            USERNAME: argilla
+            PASSWORD: 12345678
+            ARGILLA_DATABASE_URL: sqlite+aiosqlite:///./argilla.db
+            ARGILLA_REDIS_URL: redis://redis:6379/0
+            ARGILLA_ELASTICSEARCH: http://elasticsearch:9200
+        ports:
+            - "6900:6900"
+        volumes:
+            - ./.argilla/oauth.yml://opt/venv/lib/python3.13/site-packages/argilla_server/.oauth.yml
 
     lock:
         image: python:3.11-slim
@@ -30,6 +63,8 @@ services:
               pip install --no-cache-dir pip-tools &&
               pip-compile pyproject.toml --output-file requirements.lock
             "
+        volumes:
+            - ./:/usr/local/src
 
     console:
         build:
@@ -42,3 +77,4 @@ services:
         volumes:
             - ./.cloud:/workspace
             - ~/.config/gcloud:/root/.config/gcloud
+

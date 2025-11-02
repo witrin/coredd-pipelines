@@ -2,18 +2,16 @@ storage:
     sqlite:
         base_dir: /var/lib/dagster
 
-run_storage:
-    sqlite:
-        base_dir: /var/lib/dagster
-
-event_log_storage:
-    sqlite:
-        base_dir: /var/lib/dagster
-
 compute_logs:
+  module: dagster._core.storage.local_compute_log_manager
+  class: LocalComputeLogManager
+  config:
     base_dir: /var/log/dagster
 
 local_artifact_storage:
+  module: dagster._core.storage.root
+  class: LocalArtifactStorage
+  config:
     base_dir: /var/lib/dagster
 
 telemetry:

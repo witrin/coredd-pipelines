@@ -31,22 +31,25 @@ click==8.1.8
 coloredlogs==14.0
     # via dagster
 dagit==1.11.0
-    # via bug-request (pyproject.toml)
+    # via benchmark (pyproject.toml)
 dagster==1.11.0
     # via
-    #   bug-request (pyproject.toml)
+    #   benchmark (pyproject.toml)
     #   dagster-gcp
     #   dagster-graphql
     #   dagster-pandas
+    #   dagster-postgres
     #   dagster-webserver
 dagster-gcp==0.27.0
-    # via bug-request (pyproject.toml)
+    # via benchmark (pyproject.toml)
 dagster-graphql==1.11.0
     # via dagster-webserver
 dagster-pandas==0.27.0
     # via dagster-gcp
 dagster-pipes==1.11.0
     # via dagster
+dagster-postgres==0.27.0
+    # via benchmark (pyproject.toml)
 dagster-shared==1.11.0
     # via dagster
 dagster-webserver==1.11.0
@@ -79,7 +82,7 @@ google-auth-httplib2==0.2.0
     # via google-api-python-client
 google-cloud-bigquery==3.38.0
     # via
-    #   bug-request (pyproject.toml)
+    #   benchmark (pyproject.toml)
     #   dagster-gcp
 google-cloud-core==2.4.3
     # via
@@ -87,7 +90,7 @@ google-cloud-core==2.4.3
     #   google-cloud-storage
 google-cloud-storage==3.4.1
     # via
-    #   bug-request (pyproject.toml)
+    #   benchmark (pyproject.toml)
     #   dagster-gcp
 google-crc32c==1.7.1
     # via
@@ -183,6 +186,8 @@ protobuf==5.29.5
     #   grpcio-health-checking
     #   grpcio-status
     #   proto-plus
+psycopg2-binary==2.9.11
+    # via dagster-postgres
 pyarrow==22.0.0
     # via db-dtypes
 pyasn1==0.6.1
@@ -263,7 +268,7 @@ toposort==1.10
     # via dagster
 tqdm==4.67.0
     # via
-    #   bug-request (pyproject.toml)
+    #   benchmark (pyproject.toml)
     #   dagster
 typing-extensions==4.15.0
     # via

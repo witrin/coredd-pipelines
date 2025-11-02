@@ -1,0 +1,35 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+substitutions:
+  _REGION: europe-west1
+  _GITHUB_ORG: bug-request
+  _BUILD_BUCKET: bug-request-build
+steps:
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        apt-get update -y
+        apt-get install -y zip
+        cd .cloud/identity/signup
+
+        artifact="/workspace/signup.zip"
+        rm -f "${artifact}"
+        zip -r "${artifact}" .
+        gsutil cp "${artifact}" "gs://${_BUILD_BUCKET}/functions/signup.zip"
+
+        gcloud functions deploy signup \
+          --no-gen2 \
+          --region="${_REGION}" \
+          --runtime=nodejs22 \
+          --entry-point=handler \
+          --trigger-http \
+          --source=. \
+          --stage-bucket="${_BUILD_BUCKET}" \
+          --set-env-vars="GITHUB_ORG=${_GITHUB_ORG}" \
+          --set-secrets="GITHUB_GUARD_TOKEN=github-guard-token:latest" \
+          --allow-unauthenticated \
+          --project="${PROJECT_ID}"

@@ -1,0 +1,601 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+packages:
+  - docker.io
+  - google-osconfig-agent
+  - google-cloud-sdk
+  - jq
+
+write_files:
+
+  - path: /root/.docker/config.json
+    permissions: '0600'
+    owner: root:root
+    content: |
+      {
+        "credHelpers": {
+          "${artifact_registry_host}": "gcloud"
+        }
+      }
+
+  - path: /usr/local/bin/dagster-synchronize
+    permissions: '0755'
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      PIPELINES_IMAGE_REPOSITORY="${pipelines_code_image_repository}"
+      ENV_DIR="/etc/dagster"
+      WORKSPACE_FILE="/etc/dagster/workspace.yaml"
+      SYSTEMD_TEMPLATE_NAME="dagster-code"
+      LOCKFILE="/run/dagster-synchronize.lock"
+      PORT_START=${branches_port_start}
+      PORT_END=${branches_port_end}
+      PROJECT_ID="${project_id}"
+
+      mkdir -p "$(dirname "$LOCKFILE")"
+      exec 9>"$LOCKFILE"
+      if ! flock -n 9; then
+        exit 0
+      fi
+
+      ensure_dirs() {
+        mkdir -p "$ENV_DIR"
+      }
+
+      assign_port() {
+        local used_ports
+        used_ports=$(grep -h '^GRPC_PORT=' "$ENV_DIR"/*.env 2>/dev/null | cut -d= -f2 || true)
+        local port="$PORT_START"
+        while true; do
+          if [[ -n "$PORT_END" && "$port" -gt "$PORT_END" ]]; then
+            echo ""
+            return 1
+          fi
+          if ! grep -qx "$port" <<<"$used_ports" 2>/dev/null; then
+            echo "$port"
+            return 0
+          fi
+          port=$((port + 1))
+        done
+      }
+
+      get_env_digest() {
+        local env_file=$1
+        local digest_line
+        if [[ -f "$env_file" ]]; then
+          digest_line=$(grep -m1 '^# DIGEST=' "$env_file" || true)
+          if [[ -n "$digest_line" ]]; then
+            echo "$${digest_line#*=}"
+          fi
+        fi
+      }
+
+      set_env_digest() {
+        local env_file=$1
+        local digest=$2
+        local tmp
+        if [[ -f "$env_file" ]]; then
+          if grep -q '^# DIGEST=' "$env_file"; then
+            sed -i "s|^# DIGEST=.*|# DIGEST=$digest|" "$env_file"
+            return
+          fi
+        fi
+        tmp=$(mktemp)
+        {
+          printf '# DIGEST=%s\n' "$digest"
+          if [[ -f "$env_file" ]]; then
+            cat "$env_file"
+          fi
+        } >"$tmp"
+        mv "$tmp" "$env_file"
+      }
+
+      update_workspace() {
+        local tmp branch port env_file
+        local -a workspace_branches=()
+        tmp=$(mktemp)
+        {
+          echo "load_from:"
+          mapfile -t workspace_branches < <(
+            printf '%s\n' $${!active_digests[@]} | sort
+          )
+          for branch in "$${workspace_branches[@]}"; do
+            env_file="$ENV_DIR/$branch.env"
+            [ -f "$env_file" ] || continue
+            if ! grep -q '^GRPC_PORT=' "$env_file"; then
+              continue
+            fi
+            port=$(grep '^GRPC_PORT=' "$env_file" | tail -n1 | cut -d= -f2)
+            printf '  - grpc_server:\n'
+            printf '      host: 127.0.0.1\n'
+            printf '      port: %s\n' "$port"
+            printf '      location_name: %s\n' "$branch"
+          done
+        } >"$tmp"
+
+        if [[ ! -f "$WORKSPACE_FILE" ]] || ! cmp -s "$tmp" "$WORKSPACE_FILE"; then
+          install -m 644 "$tmp" "$WORKSPACE_FILE"
+          systemctl restart dagster-interface.service
+        else
+          rm -f "$tmp"
+        fi
+      }
+
+      images_json=$(
+        gcloud artifacts docker images list "$PIPELINES_IMAGE_REPOSITORY" \
+          --include-tags \
+          --format=json \
+          --project="$PROJECT_ID"
+      )
+
+      declare -A active_digests
+      while IFS=':' read -r branch digest; do
+        active_digests["$branch"]="$digest"
+      done < <(
+        echo "$images_json" | jq -r '
+          .[]
+          | select(.tags != null)
+          | .digest as $d
+          | .tags[]
+          | select(test("^[A-Za-z0-9._-]+$"))
+          | . + ":" + $d
+        '
+      )
+
+      ensure_dirs
+
+      for branch in "$${!active_digests[@]}"; do
+        digest="$${active_digests[$branch]}"
+        env_file="$ENV_DIR/$branch.env"
+
+        if [[ ! -f "$env_file" ]]; then
+          echo "CREATE $branch"
+          port=$(assign_port) || true
+          if [[ -z "$port" ]]; then
+            echo "SKIP $branch"
+            continue
+          fi
+          cat >"$env_file" <<EOF
+      # DIGEST=$digest
+      BRANCH=$branch
+      IMAGE_TAG=$branch
+      GRPC_PORT=$port
+      IMAGE_REPOSITORY=${pipelines_code_image_repository}
+      EOF
+          systemctl enable --now "$SYSTEMD_TEMPLATE_NAME@$branch.service"
+          continue
+        fi
+
+        current_digest=$(get_env_digest "$env_file")
+        if [[ "$current_digest" != "$digest" ]]; then
+          echo "UPDATE $branch"
+          if grep -q '^IMAGE_TAG=' "$env_file"; then
+            sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=$branch/" "$env_file"
+          else
+            echo "IMAGE_TAG=$branch" >>"$env_file"
+          fi
+          if grep -q '^IMAGE_REPOSITORY=' "$env_file"; then
+            sed -i "s|^IMAGE_REPOSITORY=.*|IMAGE_REPOSITORY=${pipelines_code_image_repository}|" "$env_file"
+          else
+            echo "IMAGE_REPOSITORY=${pipelines_code_image_repository}" >>"$env_file"
+          fi
+          set_env_digest "$env_file" "$digest"
+          if ! systemctl restart "$SYSTEMD_TEMPLATE_NAME@$branch.service"; then
+            systemctl enable --now "$SYSTEMD_TEMPLATE_NAME@$branch.service"
+          fi
+        else
+          echo "NO CHANGE $branch"
+        fi
+      done
+
+      for env_file in "$ENV_DIR"/*.env; do
+        [ -e "$env_file" ] || continue
+        branch=$(basename "$env_file" .env)
+        if [[ -n "$${active_digests[$branch]+x}" ]]; then
+          continue
+        fi
+        echo "DELETE $branch"
+        systemctl stop "$SYSTEMD_TEMPLATE_NAME@$branch.service" || true
+        systemctl disable "$SYSTEMD_TEMPLATE_NAME@$branch.service" || true
+        rm -f "$env_file"
+      done
+
+      mapfile -t running_images < <(
+        docker ps --format '{{.Image}}' --filter "name=$SYSTEMD_TEMPLATE_NAME-"
+      )
+
+      declare -A active_images
+      for branch in "$${!active_digests[@]}"; do
+        active_images["$PIPELINES_IMAGE_REPOSITORY:$branch"]=1
+      done
+
+      mapfile -t repo_images < <(
+        docker images "$PIPELINES_IMAGE_REPOSITORY" --format '{{.Repository}}:{{.Tag}}'
+      )
+
+      for img in "$${repo_images[@]}"; do
+        if printf '%s\n' "$${running_images[@]}" | grep -qx "$img"; then
+          continue
+        fi
+        if [[ -n "$${active_images[$img]+x}" ]]; then
+          continue
+        fi
+        echo "GC $img"
+        docker rmi "$img" || true
+      done
+      update_workspace
+      echo "done"
+
+  - path: /etc/systemd/system/dagster-code@.service
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Dagster code container (%i)
+      After=docker.service
+      Requires=docker.service
+      # Unit-Version: ${unit_version}
+
+      [Service]
+      Type=simple
+      RemainAfterExit=yes
+      Restart=on-failure
+      RestartSec=5
+      TimeoutStartSec=600
+      EnvironmentFile=-/etc/release.env
+      EnvironmentFile=-/etc/dagster/%i.env
+      ExecStartPre=-/usr/bin/docker rm -f dagster-code-%i
+      ExecStartPre=/usr/bin/docker pull $${IMAGE_REPOSITORY}:$${IMAGE_TAG}
+      ExecStart=/usr/bin/docker run \
+        --rm \
+        --network host \
+        --name dagster-code-%i \
+        --env-file /etc/code.env \
+        $${IMAGE_REPOSITORY}:$${IMAGE_TAG} \
+        dagster api grpc -h 127.0.0.1 -p $${GRPC_PORT} -f /usr/local/src/benchmark/definitions.py
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/dagster-daemon.service
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Dagster daemon container
+      After=docker.service
+      Requires=docker.service
+      # Unit-Version: ${unit_version}
+
+      [Service]
+      Type=simple
+      RemainAfterExit=yes
+      Restart=on-failure
+      RestartSec=5
+      TimeoutStartSec=600
+      EnvironmentFile=-/etc/release.env
+      ExecStartPre=-/usr/bin/docker rm -f dagster-daemon
+      ExecStartPre=/bin/sh -c "docker image ls ${pipelines_image_repository} --format '{{.Repository}}:{{.Tag}}' | grep -v ':$${IMAGE_TAG}$' | grep -v ':<none>$' | xargs -r docker image rm"
+      ExecStartPre=/usr/bin/docker pull ${pipelines_image_repository}:$${IMAGE_TAG}
+      ExecStart=/usr/bin/docker run \
+        --rm \
+        --network host \
+        --name dagster-daemon \
+        --env-file /etc/daemon.env \
+        -v /etc/dagster/workspace.yaml:/etc/dagster/workspace.yaml:ro \
+        ${pipelines_image_repository}:$${IMAGE_TAG} \
+        dagster-daemon run -w /etc/dagster/workspace.yaml
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/dagster-interface.service
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Dagster interface container
+      After=docker.service
+      Requires=docker.service
+      # Unit-Version: ${unit_version}
+
+      [Service]
+      Type=simple
+      RemainAfterExit=yes
+      Restart=on-failure
+      RestartSec=5
+      TimeoutStartSec=600
+      EnvironmentFile=-/etc/release.env
+      ExecStartPre=-/usr/bin/docker rm -f dagster-interface
+      ExecStartPre=/bin/sh -c "docker image ls ${pipelines_image_repository} --format '{{.Repository}}:{{.Tag}}' | grep -v ':$${IMAGE_TAG}$' | grep -v ':<none>$' | xargs -r docker image rm"
+      ExecStartPre=/usr/bin/docker pull ${pipelines_image_repository}:$${IMAGE_TAG}
+      ExecStart=/usr/bin/docker run \
+        --rm \
+        --network host \
+        --name dagster-interface \
+        --env-file /etc/interface.env \
+        -v /etc/dagster/workspace.yaml:/etc/dagster/workspace.yaml:ro \
+        ${pipelines_image_repository}:$${IMAGE_TAG} \
+        dagster-webserver -h 0.0.0.0 -p 3000 -w /etc/dagster/workspace.yaml
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/argilla-server.service
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Argilla data labeling container
+      After=argilla-elastisearch.service argilla-redis.service docker.service
+      Requires=argilla-elastisearch.service argilla-redis.service docker.service
+      # Unit-Version: ${unit_version}
+
+      [Service]
+      Type=simple
+      RemainAfterExit=yes
+      Restart=on-failure
+      RestartSec=5
+      TimeoutStartSec=600
+      EnvironmentFile=-/etc/release.env
+      ExecStartPre=-/usr/bin/docker rm -f argilla-server
+      ExecStartPre=/bin/sh -c "docker image ls ${evaluation_image_repository} --format '{{.Repository}}:{{.Tag}}' | grep -v ':$${IMAGE_TAG}$' | grep -v ':<none>$' | xargs -r docker image rm"
+      ExecStartPre=/usr/bin/docker pull ${evaluation_image_repository}:$${IMAGE_TAG}
+      ExecStart=/usr/bin/docker run \
+        --rm \
+        --network host \
+        --name argilla-server \
+        --env-file /etc/argilla.env \
+        -v /etc/argilla/oauth.yml:/etc/argilla/oauth.yml:ro \
+        ${evaluation_image_repository}:$${IMAGE_TAG}
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/argilla-elastisearch.service
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Elasticsearch for Argilla
+      After=docker.service
+      Requires=docker.service
+      # Unit-Version: ${unit_version}
+
+      [Service]
+      Type=simple
+      RemainAfterExit=yes
+      Restart=on-failure
+      RestartSec=5
+      TimeoutStartSec=600
+      EnvironmentFile=-/etc/release.env
+      ExecStartPre=-/usr/bin/docker rm -f argilla-elastisearch
+      ExecStartPre=/usr/bin/docker pull elasticsearch:8.17.0
+      ExecStart=/usr/bin/docker run \
+        --rm \
+        --network host \
+        --name argilla-elastisearch \
+        --ulimit memlock=671088640:671088640 \
+        --env-file /etc/argilla/elasticsearch.env \
+        elasticsearch:8.17.0
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/argilla-redis.service
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Redis cache for Argilla
+      After=docker.service
+      Requires=docker.service
+      # Unit-Version: ${unit_version}
+
+      [Service]
+      Type=simple
+      RemainAfterExit=yes
+      Restart=on-failure
+      RestartSec=5
+      TimeoutStartSec=600
+      EnvironmentFile=-/etc/release.env
+      ExecStartPre=-/usr/bin/docker rm -f argilla-redis
+      ExecStartPre=/usr/bin/docker pull redis:7
+      ExecStart=/usr/bin/docker run \
+        --rm \
+        --network host \
+        --name argilla-redis \
+        redis:7 \
+        redis-server --appendonly no
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/release.service
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Restart release containers when tag changes
+      After=docker.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/systemctl restart \
+        dagster-code@release.service \
+        dagster-daemon.service \
+        dagster-interface.service \
+        argilla-server.service
+
+  - path: /etc/systemd/system/release.path
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Trigger release restarts when /etc/release.env changes
+
+      [Path]
+      PathModified=/etc/release.env
+      Unit=release.service
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/dagster-branches.service
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Synchronize Dagster branch deployments
+      After=network-online.target docker.service
+      Requires=docker.service
+      # Unit-Version: ${unit_version}
+
+      [Service]
+      Type=oneshot
+      Environment="CLOUDSDK_CORE_PROJECT=${project_id}"
+      Environment="CLOUDSDK_COMPUTE_REGION=${region}"
+      ExecStart=/usr/local/bin/dagster-synchronize
+
+  - path: /etc/systemd/system/dagster-branches.timer
+    permissions: '0644'
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Schedule Dagster branch synchronization
+      # Unit-Version: ${unit_version}
+
+      [Timer]
+      OnBootSec=2m
+      OnUnitActiveSec=5m
+      AccuracySec=1s
+      Persistent=true
+      Unit=dagster-branches.service
+
+      [Install]
+      WantedBy=timers.target
+
+  - path: /etc/dagster/release.env
+    permissions: '0600'
+    owner: root:root
+    content: |
+      BRANCH=release
+      GRPC_PORT=${branches_port_start}
+      IMAGE_REPOSITORY=${pipelines_image_repository}
+
+  - path: /etc/dagster/workspace.yaml
+    permissions: '0644'
+    owner: root:root
+    content: |
+      load_from:
+        - grpc_server:
+            host: 127.0.0.1
+            port: ${branches_port_start}
+            location_name: main
+
+  - path: /etc/code.env
+    permissions: '0600'
+    owner: root:root
+    content: |
+      DATABASE_HOST=${database_host}
+      DATABASE_PORT=${database_port}
+      DATABASE_SSLMODE=${database_sslmode}
+      DATABASE_USER=${database_user}
+      DATABASE_PASSWORD=${database_password}
+      DATABASE_NAME=dagster
+      GCS_BUCKET=${gcs_bucket}
+
+  - path: /etc/daemon.env
+    permissions: '0600'
+    owner: root:root
+    content: |
+      DATABASE_HOST=${database_host}
+      DATABASE_PORT=${database_port}
+      DATABASE_SSLMODE=${database_sslmode}
+      DATABASE_USER=${database_user}
+      DATABASE_PASSWORD=${database_password}
+      DATABASE_NAME=dagster
+      GCS_BUCKET=${gcs_bucket}
+      GRPC_HOST=127.0.0.1
+      GRPC_PORT=${branches_port_start}
+
+  - path: /etc/interface.env
+    permissions: '0600'
+    owner: root:root
+    content: |
+      DATABASE_HOST=${database_host}
+      DATABASE_PORT=${database_port}
+      DATABASE_SSLMODE=${database_sslmode}
+      DATABASE_USER=${database_user}
+      DATABASE_PASSWORD=${database_password}
+      DATABASE_NAME=dagster
+      GCS_BUCKET=${gcs_bucket}
+
+  - path: /etc/argilla.env
+    permissions: '0600'
+    owner: root:root
+    content: |
+      ARGILLA_HOST=0.0.0.0
+      ARGILLA_PORT=6900
+      ARGILLA_DATABASE_HOST=${database_host}
+      ARGILLA_DATABASE_PORT=${database_port}
+      ARGILLA_DATABASE_SSLMODE=${database_sslmode}
+      ARGILLA_DATABASE_USER=${database_user}
+      ARGILLA_DATABASE_PASSWORD=${database_password}
+      ARGILLA_DATABASE_NAME=argilla
+      ARGILLA_DATABASE_URL=postgresql+asyncpg://${database_user}:${database_password}@${database_host}:${database_port}/argilla
+      ARGILLA_ELASTICSEARCH=http://127.0.0.1:9200
+      ARGILLA_REDIS_URL=redis://127.0.0.1:6379/0
+      ARGILLA_AUTHENTICATION_METHOD=oauth2
+      ARGILLA_OAUTH_PROVIDER=github
+      ARGILLA_AUTH_OAUTH_CFG=/etc/argilla/oauth.yml
+      ARGILLA_OAUTH2_GITHUB_CLIENT_ID=${argilla_github_client_id}
+      ARGILLA_OAUTH2_GITHUB_CLIENT_SECRET=${argilla_github_client_secret}
+      SOCIAL_AUTH_GITHUB_SCOPE=read:user,user:email
+      SOCIAL_AUTH_GITHUB_ORG_NAME=bug-request
+
+  - path: /etc/argilla/oauth.yml
+    permissions: '0644'
+    owner: root:root
+    content: |
+      providers:
+        - name: github
+          client_id: ${argilla_github_client_id}
+          client_secret: ${argilla_github_client_secret}
+          scope: "read:user,user:email"
+      allowed_workspaces:
+        - name: bug-request
+      allow_http_redirect: false
+
+  - path: /etc/argilla/elasticsearch.env
+    permissions: '0644'
+    owner: root:root
+    content: |
+      ES_JAVA_OPTS=-Xms512m -Xmx512m
+      node.name=elasticsearch
+      cluster.name=es-argilla-local
+      discovery.type=single-node
+      cluster.routing.allocation.disk.threshold_enabled=false
+      xpack.security.enabled=false
+
+  - path: /etc/release.env
+    permissions: '0644'
+    owner: root:root
+    content: |
+      IMAGE_TAG=${default_image_tag}
+
+runcmd:
+  - [ systemctl, daemon-reload ]
+  - [ systemctl, enable, --now, docker.service ]
+  - [ systemctl, enable, --now, dagster-code@release.service ]
+  - [ systemctl, enable, --now, dagster-daemon.service ]
+  - [ systemctl, enable, --now, dagster-interface.service ]
+  - [ systemctl, enable, --now, argilla-elastisearch.service ]
+  - [ systemctl, enable, --now, argilla-server.service ]
+  - [ systemctl, enable, --now, argilla-redis.service ]
+  - [ systemctl, enable, --now, release.path ]
+  - [ systemctl, enable, --now, dagster-branches.timer ]
+  - [ systemctl, start, dagster-branches.service ]

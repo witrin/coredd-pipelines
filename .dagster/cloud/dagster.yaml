@@ -1,32 +1,22 @@
 storage:
     postgres:
         postgres_db:
-            username: ${PG_USER}
-            password: ${PG_PASSWORD}
-            hostname: ${PG_HOST}
-            db_name: ${PG_DATABASE}
-
-run_storage:
-    postgres:
-        postgres_db:
-            username: ${PG_USER}
-            password: ${PG_PASSWORD}
-            hostname: ${PG_HOST}
-            db_name: ${PG_DATABASE}
-
-event_log_storage:
-    postgres:
-        postgres_db:
-            username: dagster
-            password: ${PG_PASSWORD}
-            hostname: ${PG_HOST}
-            db_name: ${PG_DATABASE}
+            username: {"env": "DATABASE_USER"}
+            password: {"env": "DATABASE_PASSWORD"}
+            hostname: {"env": "DATABASE_HOST"}
+            db_name: {"env": "DATABASE_NAME"}
 
 telemetry:
     enabled: false
 
 compute_logs:
+  module: dagster._core.storage.local_compute_log_manager
+  class: LocalComputeLogManager
+  config:
     base_dir: /var/log/dagster
 
 local_artifact_storage:
+  module: dagster._core.storage.root
+  class: LocalArtifactStorage
+  config:
     base_dir: /var/lib/dagster

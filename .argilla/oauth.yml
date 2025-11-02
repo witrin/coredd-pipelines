@@ -1,0 +1,8 @@
+providers:
+  - name: github
+    client_id: 
+    client_secret:
+    scope: "read:user user:email"
+allowed_workspaces:
+  - name: bug-request
+allow_http_redirect: false

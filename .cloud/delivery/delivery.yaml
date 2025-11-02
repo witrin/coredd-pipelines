@@ -1,0 +1,148 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+substitutions:
+  _REGION: europe-west1
+  _REPOSITORY: containers
+steps:
+  - id: analyze
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        echo "PROJECT_ID=${PROJECT_ID}"
+        echo "COMMIT_SHA=${COMMIT_SHA}"
+        echo "TRIGGER_NAME=${TRIGGER_NAME:-}"
+        echo "TRIGGER_BUILD_CONFIG_PATH=${TRIGGER_BUILD_CONFIG_PATH:-}"
+        echo "ENV BRANCH_NAME=${BRANCH_NAME}"
+        echo "ENV REF_NAME=${REF_NAME}"
+
+        action="build"
+        if [[ "${COMMIT_SHA}" =~ ^0+$ ]]; then
+          action="delete"
+        fi
+
+        branch=""
+        if [[ -n "${BRANCH_NAME}" ]]; then
+          branch="${BRANCH_NAME}"
+        elif [[ -n "${REF_NAME}" ]]; then
+          branch="${REF_NAME}"
+        fi
+
+        echo "BRANCH_NAME=${branch}"
+
+        if [[ -z "${branch}" ]]; then
+          echo "Unable to determine branch; ensure Cloud Build trigger passes BRANCH_NAME/REF_NAME." >&2
+          exit 1
+        fi
+
+        if [[ ! "${branch}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+          echo "Skipping unsupported branch ${branch}" >&2
+          action="skip"
+        fi
+
+        should_build=0
+        if [[ "${action}" == "build" ]]; then
+          pattern='^(src/|Dockerfile$|pyproject\.toml$|requirements\.lock$)'
+          target="${COMMIT_SHA}"
+
+          if git rev-parse --is-shallow-repository >/dev/null 2>&1 && \
+             git rev-parse --is-shallow-repository | grep -q "true"; then
+            git fetch --unshallow >/dev/null 2>&1 || true
+          fi
+
+          if ! git rev-parse "${target}" >/dev/null 2>&1; then
+            target="HEAD"
+          fi
+
+          changed="$(git show --pretty='' --name-only "$target" | tr -d '\r' || true)"
+
+          if echo "$changed" | grep -E "$pattern" >/dev/null 2>&1; then
+            should_build=1
+          else
+            echo "No relevant delivery changes detected; skipping build."
+          fi
+        fi
+
+        cat <<EOF >/workspace/delivery.env
+        ACTION=${action}
+        BRANCH_NAME=${branch}
+        SHOULD_BUILD=${should_build}
+        EOF
+  - id: delete
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        source /workspace/delivery.env
+
+        if [[ "$${ACTION}" != "delete" ]]; then
+          exit 0
+        fi
+
+        image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/pipelines/code:$${BRANCH_NAME}"
+        gcloud artifacts docker images delete "${image}" \
+          --project="${PROJECT_ID}" \
+          --quiet \
+          --delete-tags || true
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        source /workspace/delivery.env
+
+        if [[ "$${ACTION}" != "build" || "$${SHOULD_BUILD:-0}" != "1" ]]; then
+          exit 0
+        fi
+
+        image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/pipelines/code:$${BRANCH_NAME}"
+
+        docker build --target pipelines \
+          --tag "${image}" \
+          .
+
+        docker push "${image}"
+  - id: synchronize-engine
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        source /workspace/delivery.env
+
+        should_sync=0
+        if [[ "$${ACTION}" == "delete" ]]; then
+          should_sync=1
+        elif [[ "$${ACTION}" == "build" && "$${SHOULD_BUILD:-0}" == "1" ]]; then
+          should_sync=1
+        fi
+
+        if [[ "$should_sync" != "1" ]]; then
+          exit 0
+        fi
+
+        zone="$(gcloud compute instances list \
+          --project="${PROJECT_ID}" \
+          --filter='name=engine' \
+          --format='value(zone)' | head -n1)"
+
+        if [[ -z "$zone" ]]; then
+          echo "Unable to determine engine instance zone." >&2
+          exit 1
+        fi
+
+        gcloud compute ssh engine \
+          --project="${PROJECT_ID}" \
+          --zone="$zone" \
+          --command='sudo systemctl start dagster-branches.service'

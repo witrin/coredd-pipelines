@@ -1,0 +1,122 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+substitutions:
+  _REGION: europe-west1
+  _REPOSITORY: containers
+  _TAG: $SHORT_SHA
+  _ZONE: europe-west1-b
+steps:
+  - id: detect-changes
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        pattern='^(\.argilla/|\.dagster/|\.cloud/|Dockerfile$|pyproject\.toml$|requirements\.lock$)'
+        target="${COMMIT_SHA:-HEAD}"
+
+        if git rev-parse --is-shallow-repository >/dev/null 2>&1 && \
+           git rev-parse --is-shallow-repository | grep -q "true"; then
+          git fetch --unshallow >/dev/null 2>&1 || true
+        fi
+
+        if ! git rev-parse "${target}" >/dev/null 2>&1; then
+          target="HEAD"
+        fi
+
+        changed="$(git show --pretty='' --name-only "$target" | tr -d '\r' || true)"
+
+        if echo "$changed" | grep -E "$pattern" >/dev/null 2>&1; then
+          echo "SHOULD_BUILD=1" >/workspace/change.env
+        else
+          echo "No relevant computation changes detected; skipping build."
+          echo "SHOULD_BUILD=0" >/workspace/change.env
+        fi
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        source /workspace/change.env || true
+        if [[ "${SHOULD_BUILD:-1}" != "1" ]]; then
+          exit 0
+        fi
+
+        docker build --target pipelines \
+          --tag ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/pipelines:${_TAG} \
+          --tag ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/pipelines:latest \
+          .
+
+        docker build --target evaluation \
+          --tag ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/evaluation:${_TAG} \
+          --tag ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/evaluation:latest \
+          .
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        source /workspace/change.env || true
+        if [[ "${SHOULD_BUILD:-1}" != "1" ]]; then
+          exit 0
+        fi
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/pipelines:${_TAG}
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/pipelines:latest
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/evaluation:${_TAG}
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/evaluation:latest
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        source /workspace/change.env || true
+        if [[ "${SHOULD_BUILD:-1}" != "1" ]]; then
+          exit 0
+        fi
+
+        export PROJECT_ID
+        export IMAGE_TAG="${_TAG}"
+        export POLICY_VERSION="$(date +%Y%m%d%H%M%S)"
+
+        if ! command -v envsubst >/dev/null 2>&1; then
+          apt-get update -y >/dev/null
+          apt-get install -y gettext-base >/dev/null
+        fi
+
+        envsubst \
+          < .cloud/computation/update.yaml \
+          > /workspace/images.yaml
+
+        if gcloud beta compute os-config guest-policies describe images \
+          --project="${PROJECT_ID}" >/dev/null 2>&1; then
+          gcloud beta compute os-config guest-policies update images \
+            --project="${PROJECT_ID}" \
+            --file=/workspace/images.yaml
+        else
+          gcloud beta compute os-config guest-policies create images \
+            --project="${PROJECT_ID}" \
+            --file=/workspace/images.yaml
+        fi
+
+        image_root="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}"
+        base_image="${image_root}/pipelines"
+
+        digest=$(gcloud artifacts docker images describe "${base_image}:${_TAG}" \
+          --format='get(image_summary.digest)')
+        if [ -z "${digest:-}" ]; then
+          echo "Could not resolve digest for ${base_image}:${_TAG}" >&2
+          exit 1
+        fi
+        image_reference="${base_image}@${digest}"
+
+        gcloud run jobs update pipelines-job \
+          --region="${_REGION}" \
+          --image="${image_reference}"

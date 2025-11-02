@@ -7,7 +7,8 @@ requires-python = ">=3.10"
 dependencies = [
     "dagster==1.11",
     "dagit==1.11",
-    "dagster-gcp",
+    "dagster-postgres==0.27.0",
+    "dagster-gcp==0.27.0",
     "google-cloud-bigquery",
     "google-cloud-storage",
     "tqdm==4.67"

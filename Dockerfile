@@ -3,45 +3,56 @@ FROM python:3.11-slim AS pipelines
 ENV DAGSTER_HOME=/etc/dagster \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/usr/local/lib/python3.11/site-packages:/usr/local/src
-
-RUN apt-get update -y && \
-    apt-get install -y supervisor && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+    PYTHONPATH=/usr/local/lib/python3.11/site-packages:/usr/local/src \
+    LOG_FORMAT=json \
+    LOG_LEVEL=INFO
 
 RUN adduser --disabled-password --gecos "" dagster \
-   && mkdir -p /srv/bug-request/src /etc/dagster /var/lib/dagster /var/log/dagster \
-   && chown -R dagster:dagster /srv/bug-request /etc/dagster /var/lib/dagster /var/log/dagster
+    && mkdir -p /srv/bug-request/src /etc/dagster /var/lib/dagster /var/log/dagster \
+    && chown -R dagster:dagster /srv/bug-request /etc/dagster /var/lib/dagster /var/log/dagster
 
 WORKDIR /usr/local/src/
 
 COPY pyproject.toml requirements.lock ./
-COPY src/ ./benchmark/
-COPY .dagster/cloud/dagster.yaml /etc/dagster/dagster.yaml
-COPY .supervisor/dagster.conf /etc/supervisor/conf.d/dagster.conf
 
-RUN pip install --no-cache-dir -r requirements.lock
+RUN pip install uv \
+    && uv pip sync --system requirements.lock
+
+RUN printf "/usr/local/src/benchmark\nimport logs\n" > \
+    /usr/local/lib/python3.11/site-packages/99-logging.pth \
+    && printf "/usr/local/src/benchmark\nimport exceptions\n" > \
+    /usr/local/lib/python3.11/site-packages/99-exceptions.pth
+
+COPY .dagster/cloud/dagster.yaml .dagster/cloud/workspace.yaml /etc/dagster/
+
+COPY src/ ./benchmark/
 
 USER dagster
 
 EXPOSE 8080
 
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/dagster.conf", "-n"]
+ENTRYPOINT []
 
 FROM google/cloud-sdk:slim AS console
 
-RUN apt-get update -y && \
-    apt-get install -y wget gpg lsb-release && \
+RUN apt update -y && \
+    apt install -y wget gpg lsb-release && \
     wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
     https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list && \
-    apt-get update -y && \
-    apt-get install -y terraform && \
+    apt update -y && \
+    apt install -y terraform && \
     terraform -version && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+    apt clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
 COPY .cloud/ /workspace/
 
 ENTRYPOINT ["/bin/bash"]
+
+FROM argilla/argilla-server:v2.8.0 AS evaluation
+
+COPY .argilla/oauth.yml /etc/argilla/oauth.yml
+
+

@@ -1,0 +1,20 @@
+name: projects/$PROJECT_ID/guestPolicies/images
+description: Update image tag
+assignment:
+  groupLabels:
+    - labels:
+        role: computation
+recipes:
+  - name: images-release-tag
+    version: "${POLICY_VERSION}"
+    desiredState: INSTALLED
+    installSteps:
+      - scriptRun:
+          interpreter: SHELL
+          script: |
+            printf 'IMAGE_TAG=%s\n' "${IMAGE_TAG}" >/etc/release.env
+    updateSteps:
+      - scriptRun:
+          interpreter: SHELL
+          script: |
+            printf 'IMAGE_TAG=%s\n' "${IMAGE_TAG}" >/etc/release.env
