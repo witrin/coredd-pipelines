@@ -191,15 +191,35 @@ write_files:
         fi
       done
 
+      mapfile -t managed_units < <(
+        systemctl list-units --full --all "$SYSTEMD_TEMPLATE_NAME@*.service" --no-legend 2>/dev/null | awk '{print $1}'
+      )
+
+      if [[ $${#managed_units[@]} -eq 0 ]]; then
+        mapfile -t managed_units < <(
+          systemctl list-unit-files "$SYSTEMD_TEMPLATE_NAME@*.service" --no-legend 2>/dev/null | awk '{print $1}'
+        )
+      fi
+
+      for unit in "$${managed_units[@]}"; do
+        [[ -n "$unit" ]] || continue
+        branch="$${unit#*@}"
+        branch="$${branch%.service}"
+        if [[ -n "$${active_digests[$branch]+x}" ]]; then
+          continue
+        fi
+        echo "DELETE UNIT $branch"
+        systemctl stop "$unit" || true
+        systemctl disable "$unit" || true
+      done
+
       for env_file in "$ENV_DIR"/*.env; do
         [ -e "$env_file" ] || continue
         branch=$(basename "$env_file" .env)
         if [[ -n "$${active_digests[$branch]+x}" ]]; then
           continue
         fi
-        echo "DELETE $branch"
-        systemctl stop "$SYSTEMD_TEMPLATE_NAME@$branch.service" || true
-        systemctl disable "$SYSTEMD_TEMPLATE_NAME@$branch.service" || true
+        echo "DELETE ENV $branch"
         rm -f "$env_file"
       done
 
