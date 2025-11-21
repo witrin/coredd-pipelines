@@ -111,38 +111,4 @@ steps:
           .
 
         docker push "${image}"
-  - id: synchronize-engine
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        set -euo pipefail
 
-        source /workspace/delivery.env
-
-        should_sync=0
-        if [[ "$${ACTION}" == "delete" ]]; then
-          should_sync=1
-        elif [[ "$${ACTION}" == "build" && "$${SHOULD_BUILD:-0}" == "1" ]]; then
-          should_sync=1
-        fi
-
-        if [[ "$should_sync" != "1" ]]; then
-          exit 0
-        fi
-
-        zone="$(gcloud compute instances list \
-          --project="${PROJECT_ID}" \
-          --filter='name=engine' \
-          --format='value(zone)' | head -n1)"
-
-        if [[ -z "$zone" ]]; then
-          echo "Unable to determine engine instance zone." >&2
-          exit 1
-        fi
-
-        gcloud compute ssh engine \
-          --project="${PROJECT_ID}" \
-          --zone="$zone" \
-          --command='sudo systemctl start dagster-branches.service'
