@@ -26,14 +26,19 @@ write_files:
       #!/usr/bin/env bash
       set -euo pipefail
 
-      PIPELINES_IMAGE_REPOSITORY="${pipelines_code_image_repository}"
       ENV_DIR="/etc/dagster"
       WORKSPACE_FILE="/etc/dagster/workspace.yaml"
-      SYSTEMD_TEMPLATE_NAME="dagster-code"
+      UNIT_TEMPLATE="dagster-code"
       LOCKFILE="/run/dagster-synchronize.lock"
       PORT_START=${branches_port_start}
       PORT_END=${branches_port_end}
-      PROJECT_ID="${project_id}"
+      PROJECT="${project}"
+      REGION="${region}"
+      SERVICE_ACCOUNT="${service_account}"
+      CLOUD_RUN_TIMEOUT="3600s"
+      CLOUD_RUN_MEMORY="4Gi"
+      CLOUD_RUN_MAX_RETRIES=0
+      TRUNK="${trunk}"
 
       mkdir -p "$(dirname "$LOCKFILE")"
       exec 9>"$LOCKFILE"
@@ -93,6 +98,105 @@ write_files:
         mv "$tmp" "$env_file"
       }
 
+      slugify_branch() {
+        local branch=$1
+        local slug
+        slug=$(echo "$branch" | tr '[:upper:]' '[:lower:]')
+        slug=$(echo "$slug" | sed 's/[^a-z0-9-]/-/g')
+        slug=$(echo "$slug" | sed 's/-\{2,\}/-/g')
+        slug="$${slug#-}"
+        slug="$${slug%-}"
+        if [[ -z "$slug" ]]; then
+          return 1
+        fi
+        printf '%s\n' "$slug"
+      }
+
+      cloud_run_job_name() {
+        local branch=$1
+        local slug base max_length
+        slug=$(slugify_branch "$branch") || return 1
+        base="pipelines"
+        max_length=$((63 - $${#base} - 1))
+        if (( max_length < 1 )); then
+          echo "Skip job $branch (job name too long)" >&2
+          return 1
+        fi
+        slug=$${slug:0:max_length}
+        slug="$${slug%-}"
+        if [[ -z "$slug" ]]; then
+          echo "Skip job $branch (slug empty)" >&2
+          return 1
+        fi
+
+        printf '%s-%s\n' "$base" "$slug"
+      }
+
+      ensure_cloud_run_job() {
+        local branch=$1
+        local job image current_image
+        job=$(cloud_run_job_name "$branch") || {
+          echo "Skip job $branch (invalid name)"
+          return 0
+        }
+        image="${job_image_repository}:$branch"
+        active_jobs["$job"]=1
+        current_image=$(gcloud run jobs describe "$job" \
+          --project="$PROJECT" \
+          --region="$REGION" \
+          --format='value(template.template.containers[0].image)' 2>/dev/null || true)
+        if [[ "$current_image" == "$image" ]]; then
+          echo "Job ok $branch ($job)"
+          return 0
+        fi
+        echo "Deploy job $branch ($job)"
+        gcloud run jobs deploy "$job" \
+          --project="$PROJECT" \
+          --region="$REGION" \
+          --image="$image" \
+          --service-account="$SERVICE_ACCOUNT" \
+          --tasks=1 \
+          --parallelism=1 \
+          --max-retries="$CLOUD_RUN_MAX_RETRIES" \
+          --task-timeout="$CLOUD_RUN_TIMEOUT" \
+          --memory="$CLOUD_RUN_MEMORY" \
+          --set-cloudsql-instances="${cloud_sql_instance}" \
+          --set-env-vars="DAGSTER_HOME=/etc/dagster" \
+          --set-env-vars="DATABASE_HOST=/cloudsql/${cloud_sql_instance}" \
+          --set-env-vars="DATABASE_USER=${database_user}" \
+          --set-env-vars="DATABASE_NAME=${database_name}" \
+          --set-secrets="DATABASE_PASSWORD=dagster-database-password:latest" \
+          --set-env-vars="CLOUD_BUCKET=${bucket}" \
+          --set-env-vars="BUILD_BRANCH=$branch" \
+          --set-env-vars="BUILD_MAIN=$TRUNK" \
+          --quiet
+      }
+
+      cleanup_cloud_run_jobs() {
+        local -a existing_jobs=()
+        local job prefix regex
+        prefix="pipelines"
+        regex=$(printf '%s\n' "$prefix" | sed -e 's/[][(){}.+?^$\\|-]/\\&/g')
+        mapfile -t existing_jobs < <(
+          gcloud run jobs list \
+            --project="$PROJECT" \
+            --region="$REGION" \
+            --format='value(name)' \
+            --filter="name~^$${regex}" 2>/dev/null || true
+        )
+        for job in "$${existing_jobs[@]}"; do
+          [[ -n "$job" ]] || continue
+          if [[ -n "$${active_jobs[$job]+x}" ]]; then
+            continue
+          fi
+          echo "Delete job $job"
+          gcloud run jobs delete "$job" \
+            --project="$PROJECT" \
+            --region="$REGION" \
+            --quiet || true
+        done
+      }
+
       update_workspace() {
         local tmp branch port env_file
         local -a workspace_branches=()
@@ -125,13 +229,14 @@ write_files:
       }
 
       images_json=$(
-        gcloud artifacts docker images list "$PIPELINES_IMAGE_REPOSITORY" \
+        gcloud artifacts docker images list "${code_image_repository}" \
           --include-tags \
           --format=json \
-          --project="$PROJECT_ID"
+          --project="$PROJECT"
       )
 
       declare -A active_digests
+      declare -A active_jobs
       while IFS=':' read -r branch digest; do
         active_digests["$branch"]="$digest"
       done < <(
@@ -152,52 +257,67 @@ write_files:
         env_file="$ENV_DIR/$branch.env"
 
         if [[ ! -f "$env_file" ]]; then
-          echo "CREATE $branch"
+          echo "Create $branch"
           port=$(assign_port) || true
           if [[ -z "$port" ]]; then
-            echo "SKIP $branch"
+            echo "Skip $branch"
             continue
           fi
           cat >"$env_file" <<EOF
       # DIGEST=$digest
-      BRANCH=$branch
+      BUILD_BRANCH=$branch
+      BUILD_MAIN=$TRUNK
       IMAGE_TAG=$branch
       GRPC_PORT=$port
-      IMAGE_REPOSITORY=${pipelines_code_image_repository}
+      IMAGE_REPOSITORY=${code_image_repository}
       EOF
-          systemctl enable --now "$SYSTEMD_TEMPLATE_NAME@$branch.service"
-          continue
+          systemctl enable --now "$UNIT_TEMPLATE@$branch.service"
+        else
+          current_digest=$(get_env_digest "$env_file")
+          if [[ "$current_digest" != "$digest" ]]; then
+            echo "Update $branch"
+            if grep -q '^IMAGE_TAG=' "$env_file"; then
+              sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=$branch/" "$env_file"
+            else
+              echo "IMAGE_TAG=$branch" >>"$env_file"
+            fi
+            if grep -q '^IMAGE_REPOSITORY=' "$env_file"; then
+              sed -i "s|^IMAGE_REPOSITORY=.*|IMAGE_REPOSITORY=${code_image_repository}|" "$env_file"
+            else
+              echo "IMAGE_REPOSITORY=${code_image_repository}" >>"$env_file"
+            fi
+            set_env_digest "$env_file" "$digest"
+            if ! systemctl restart "$UNIT_TEMPLATE@$branch.service"; then
+              systemctl enable --now "$UNIT_TEMPLATE@$branch.service"
+            fi
+          else
+            echo "Keep $branch without change"
+          fi
         fi
 
-        current_digest=$(get_env_digest "$env_file")
-        if [[ "$current_digest" != "$digest" ]]; then
-          echo "UPDATE $branch"
-          if grep -q '^IMAGE_TAG=' "$env_file"; then
-            sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=$branch/" "$env_file"
+        if [[ -f "$env_file" ]]; then
+          if grep -q '^BUILD_BRANCH=' "$env_file"; then
+            sed -i "s/^BUILD_BRANCH=.*/BUILD_BRANCH=$branch/" "$env_file"
           else
-            echo "IMAGE_TAG=$branch" >>"$env_file"
+            echo "BUILD_BRANCH=$branch" >>"$env_file"
           fi
-          if grep -q '^IMAGE_REPOSITORY=' "$env_file"; then
-            sed -i "s|^IMAGE_REPOSITORY=.*|IMAGE_REPOSITORY=${pipelines_code_image_repository}|" "$env_file"
-          else
-            echo "IMAGE_REPOSITORY=${pipelines_code_image_repository}" >>"$env_file"
-          fi
-          set_env_digest "$env_file" "$digest"
-          if ! systemctl restart "$SYSTEMD_TEMPLATE_NAME@$branch.service"; then
-            systemctl enable --now "$SYSTEMD_TEMPLATE_NAME@$branch.service"
-          fi
-        else
-          echo "NO CHANGE $branch"
+            if grep -q '^BUILD_MAIN=' "$env_file"; then
+              sed -i "s/^BUILD_MAIN=.*/BUILD_MAIN=$TRUNK/" "$env_file"
+            else
+              echo "BUILD_MAIN=$TRUNK" >>"$env_file"
+            fi
         fi
+
+        ensure_cloud_run_job "$branch"
       done
 
       mapfile -t managed_units < <(
-        systemctl list-units --full --all "$SYSTEMD_TEMPLATE_NAME@*.service" --no-legend 2>/dev/null | awk '{print $1}'
+        systemctl list-units --full --all "$UNIT_TEMPLATE@*.service" --no-legend 2>/dev/null | awk '{print $1}'
       )
 
       if [[ $${#managed_units[@]} -eq 0 ]]; then
         mapfile -t managed_units < <(
-          systemctl list-unit-files "$SYSTEMD_TEMPLATE_NAME@*.service" --no-legend 2>/dev/null | awk '{print $1}'
+          systemctl list-unit-files "$UNIT_TEMPLATE@*.service" --no-legend 2>/dev/null | awk '{print $1}'
         )
       fi
 
@@ -208,7 +328,7 @@ write_files:
         if [[ -n "$${active_digests[$branch]+x}" ]]; then
           continue
         fi
-        echo "DELETE UNIT $branch"
+        echo "Delete unit $branch"
         systemctl stop "$unit" || true
         systemctl disable "$unit" || true
       done
@@ -219,21 +339,23 @@ write_files:
         if [[ -n "$${active_digests[$branch]+x}" ]]; then
           continue
         fi
-        echo "DELETE ENV $branch"
+        echo "Delete environment $branch"
         rm -f "$env_file"
       done
 
+      cleanup_cloud_run_jobs
+
       mapfile -t running_images < <(
-        docker ps --format '{{.Image}}' --filter "name=$SYSTEMD_TEMPLATE_NAME-"
+        docker ps --format '{{.Image}}' --filter "name=$UNIT_TEMPLATE-"
       )
 
       declare -A active_images
       for branch in "$${!active_digests[@]}"; do
-        active_images["$PIPELINES_IMAGE_REPOSITORY:$branch"]=1
+        active_images["${code_image_repository}:$branch"]=1
       done
 
       mapfile -t repo_images < <(
-        docker images "$PIPELINES_IMAGE_REPOSITORY" --format '{{.Repository}}:{{.Tag}}'
+        docker images "${code_image_repository}" --format '{{.Repository}}:{{.Tag}}'
       )
 
       for img in "$${repo_images[@]}"; do
@@ -275,7 +397,7 @@ write_files:
         --name dagster-code-%i \
         --env-file /etc/code.env \
         $${IMAGE_REPOSITORY}:$${IMAGE_TAG} \
-        dagster api grpc -h 127.0.0.1 -p $${GRPC_PORT} -f /usr/local/src/benchmark/definitions.py
+        dagster api grpc -h 127.0.0.1 -p $${GRPC_PORT} -f /usr/local/src/components/bootstrap.py
 
       [Install]
       WantedBy=multi-user.target
@@ -476,7 +598,7 @@ write_files:
 
       [Service]
       Type=oneshot
-      Environment="CLOUDSDK_CORE_PROJECT=${project_id}"
+      Environment="CLOUDSDK_CORE_PROJECT=${project}"
       Environment="CLOUDSDK_COMPUTE_REGION=${region}"
       ExecStart=/usr/local/bin/dagster-synchronize
 
@@ -502,7 +624,7 @@ write_files:
     permissions: '0600'
     owner: root:root
     content: |
-      BRANCH=release
+      BUILD_MAIN=release
       GRPC_PORT=${branches_port_start}
       IMAGE_REPOSITORY=${pipelines_image_repository}
 
@@ -521,24 +643,23 @@ write_files:
     owner: root:root
     content: |
       DATABASE_HOST=${database_host}
-      DATABASE_PORT=${database_port}
-      DATABASE_SSLMODE=${database_sslmode}
       DATABASE_USER=${database_user}
       DATABASE_PASSWORD=${database_password}
-      DATABASE_NAME=dagster
-      GCS_BUCKET=${gcs_bucket}
+      DATABASE_NAME=${database_name}
+      CLOUD_BUCKET=${bucket}
 
   - path: /etc/daemon.env
     permissions: '0600'
     owner: root:root
     content: |
       DATABASE_HOST=${database_host}
-      DATABASE_PORT=${database_port}
-      DATABASE_SSLMODE=${database_sslmode}
       DATABASE_USER=${database_user}
       DATABASE_PASSWORD=${database_password}
-      DATABASE_NAME=dagster
-      GCS_BUCKET=${gcs_bucket}
+      DATABASE_NAME=${database_name}
+      CLOUD_BUCKET=${bucket}
+      CLOUD_RUN_PROJECT=${project}
+      CLOUD_RUN_REGION=${region}
+      CLOUD_RUN_JOB=pipelines
       GRPC_HOST=127.0.0.1
       GRPC_PORT=${branches_port_start}
 
@@ -547,12 +668,10 @@ write_files:
     owner: root:root
     content: |
       DATABASE_HOST=${database_host}
-      DATABASE_PORT=${database_port}
-      DATABASE_SSLMODE=${database_sslmode}
       DATABASE_USER=${database_user}
       DATABASE_PASSWORD=${database_password}
-      DATABASE_NAME=dagster
-      GCS_BUCKET=${gcs_bucket}
+      DATABASE_NAME=${database_name}
+      CLOUD_BUCKET=${bucket}
 
   - path: /etc/argilla.env
     permissions: '0600'
@@ -572,8 +691,8 @@ write_files:
       ARGILLA_AUTHENTICATION_METHOD=oauth2
       ARGILLA_OAUTH_PROVIDER=github
       ARGILLA_AUTH_OAUTH_CFG=/etc/argilla/oauth.yml
-      ARGILLA_OAUTH2_GITHUB_CLIENT_ID=${argilla_github_client_id}
-      ARGILLA_OAUTH2_GITHUB_CLIENT_SECRET=${argilla_github_client_secret}
+      ARGILLA_OAUTH2_GITHUB_CLIENT_ID=${github_argilla_id}
+      ARGILLA_OAUTH2_GITHUB_CLIENT_SECRET=${github_argilla_secret}
       SOCIAL_AUTH_GITHUB_SCOPE=read:user,user:email
       SOCIAL_AUTH_GITHUB_ORG_NAME=bug-request
 
@@ -583,8 +702,8 @@ write_files:
     content: |
       providers:
         - name: github
-          client_id: ${argilla_github_client_id}
-          client_secret: ${argilla_github_client_secret}
+          client_id: ${github_argilla_id}
+          client_secret: ${github_argilla_secret}
           scope: "read:user,user:email"
       allowed_workspaces:
         - name: bug-request

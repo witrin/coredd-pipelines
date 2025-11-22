@@ -27,10 +27,16 @@ variable "github_org" {
   default     = "bug-request"
 }
 
-variable "evaluation_github_callback_url" {
+variable "github_argilla_callback" {
   description = "OAuth callback URL registered in GitHub for evaluation sign-in."
   type        = string
   default     = "https://evaluation.bug-request.dev/oauth/callback"
+}
+
+variable "log_retention_days" {
+  description = "Number of days to retain logs in the default project logging bucket."
+  type        = number
+  default     = 30
 }
 
 provider "google" {
@@ -105,9 +111,11 @@ locals {
   artifact_registry_host             = format("%s-docker.pkg.dev", local.region)
   artifact_registry_repository       = "${local.artifact_registry_host}/${data.google_project.current.project_id}/containers"
   pipelines_image_repository         = "${local.artifact_registry_repository}/pipelines"
-  pipelines_code_image_repository    = "${local.pipelines_image_repository}/code"
+  code_image_repository              = "${local.artifact_registry_repository}/pipelines/code"
+  job_image_repository              = "${local.artifact_registry_repository}/pipelines/job"
   evaluation_image_repository        = "${local.artifact_registry_repository}/evaluation"
   default_image_tag                  = "latest"
+  trunk                              = "main"
   pipelines_image                    = "${local.pipelines_image_repository}:${local.default_image_tag}"
   unit_version                       = formatdate("2006-01-02", timestamp())
   cloud_build_service_account        = "${data.google_project.current.number}@cloudbuild.gserviceaccount.com"
@@ -115,6 +123,7 @@ locals {
   app_engine_default_service_account = data.google_app_engine_default_service_account.app_engine.email
   cloud_build_repository_resource    = var.cloudbuild_repository
   developer_connect_service_account  = google_project_service_identity.developer_connect.email
+  cloud_sql_instance                 = google_sql_database_instance.database.connection_name
   required_services = [
     "run.googleapis.com",
     "artifactregistry.googleapis.com",
@@ -124,6 +133,7 @@ locals {
     "bigquerydatatransfer.googleapis.com",
     "cloudbuild.googleapis.com",
     "cloudfunctions.googleapis.com",
+    "logging.googleapis.com",
     "dataform.googleapis.com",
     "dataplex.googleapis.com",
     "deploymentmanager.googleapis.com",
@@ -153,6 +163,17 @@ resource "google_project_service" "required" {
   disable_on_destroy         = false
   disable_dependent_services = false
 }
+
+# resource "google_logging_project_bucket_config" "default" {
+#   project        = data.google_project.current.project_id
+#   bucket_id      = "_Default"
+#   location       = "global"
+#   retention_days = var.log_retention_days
+
+#   depends_on = [
+#     google_project_service.required["logging.googleapis.com"]
+#   ]
+# }
 
 resource "google_storage_bucket" "build" {
   name                        = "${data.google_project.current.project_id}-build"

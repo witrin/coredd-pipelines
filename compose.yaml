@@ -1,21 +1,61 @@
 services:
 
+    postgresql:
+        image: postgres:11
+        environment:
+            POSTGRES_USER: dagster
+            POSTGRES_PASSWORD: password
+            POSTGRES_DB: dagster
+        healthcheck:
+            test: ['CMD-SHELL', 'pg_isready -U dagster -d dagster']
+            interval: 10s
+            timeout: 8s
+            retries: 5
+
     pipelines:
         build:
             context: .
             target: pipelines
             dockerfile: Dockerfile
+        working_dir: /usr/local/src
         profiles: [ development ]
+        depends_on:
+            - postgresql
+        user: 0:0
         env_file:
             - .env
         command: >
-            dagster-daemon run -f /usr/local/src/benchmark/definitions.py -w /etc/dagster/workspace.yaml
+            dagster dev --host 0.0.0.0 -w /etc/dagster/workspace.yaml
         ports:
             - 3000:3000
         volumes:
-            - .dagster/local/storage:/var/lib/dagster
-            - .dagster/local/logs:/var/log/dagster
+            - ./.dagster/local/storage:/var/lib/dagster
+            - ./.dagster/local/logs:/var/log/dagster
+            - ./.dagster/components:/usr/local/src/components
+            # - ./.dagster/local/dagster.yaml:/etc/dagster/dagster.yaml
+            - ./.dagster/local/workspace.yaml:/etc/dagster/workspace.yaml
             - ./src:/usr/local/src/benchmark
+            - ./pyproject.toml:/usr/local/src/pyproject.toml
+            - ~/.config/gcloud:/root/.config/gcloud
+
+    job:
+        build:
+            context: .
+            target: job
+            dockerfile: Dockerfile
+        working_dir: /usr/local/src
+        entrypoint: bash
+        depends_on:
+            - postgresql
+        profiles: [ development ]
+        user: 0:0
+        env_file:
+            - .env
+        volumes:
+            - ./.dagster/components:/usr/local/src/components
+            - ./src:/usr/local/src/benchmark
+            - ./pyproject.toml:/usr/local/src/pyproject.toml
+            - ~/.config/gcloud:/root/.config/gcloud
 
     redis:
         image: redis:7

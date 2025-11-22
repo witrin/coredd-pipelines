@@ -11,6 +11,13 @@ resource "google_cloudbuild_trigger" "delivery" {
     }
   }
 
+  included_files = [
+    "src/**",
+    "Dockerfile",
+    "pyproject.toml",
+    "requirements.lock"
+  ]
+
   substitutions = {
     "_REGION"     = local.region
     "_REPOSITORY" = google_artifact_registry_repository.containers.repository_id

@@ -1,13 +1,17 @@
 storage:
     postgres:
         postgres_db:
-            username: {"env": "DATABASE_USER"}
-            password: {"env": "DATABASE_PASSWORD"}
-            hostname: {"env": "DATABASE_HOST"}
-            db_name: {"env": "DATABASE_NAME"}
+            username:
+              env: DATABASE_USER
+            password:
+              env: DATABASE_PASSWORD
+            hostname:
+              env: DATABASE_HOST
+            db_name:
+              env: DATABASE_NAME
 
 telemetry:
-    enabled: false
+  enabled: false
 
 compute_logs:
   module: dagster._core.storage.local_compute_log_manager
@@ -20,3 +24,14 @@ local_artifact_storage:
   class: LocalArtifactStorage
   config:
     base_dir: /var/lib/dagster
+
+run_launcher:
+  module: components.cloud_run_launcher
+  class: CloudRunJobRunLauncher
+  config:
+    project:
+      env: CLOUD_RUN_PROJECT
+    region:
+      env: CLOUD_RUN_REGION
+    job:
+      env: CLOUD_RUN_JOB

@@ -14,10 +14,10 @@ steps:
 
         echo "PROJECT_ID=${PROJECT_ID}"
         echo "COMMIT_SHA=${COMMIT_SHA}"
-        echo "TRIGGER_NAME=${TRIGGER_NAME:-}"
-        echo "TRIGGER_BUILD_CONFIG_PATH=${TRIGGER_BUILD_CONFIG_PATH:-}"
-        echo "ENV BRANCH_NAME=${BRANCH_NAME}"
-        echo "ENV REF_NAME=${REF_NAME}"
+        echo "TRIGGER_NAME=${TRIGGER_NAME}"
+        echo "TRIGGER_BUILD_CONFIG_PATH=${TRIGGER_BUILD_CONFIG_PATH}"
+        echo "BRANCH_NAME=${BRANCH_NAME}"
+        echo "REF_NAME=${REF_NAME}"
 
         action="build"
         if [[ "${COMMIT_SHA}" =~ ^0+$ ]]; then
@@ -43,33 +43,9 @@ steps:
           action="skip"
         fi
 
-        should_build=0
-        if [[ "${action}" == "build" ]]; then
-          pattern='^(src/|Dockerfile$|pyproject\.toml$|requirements\.lock$)'
-          target="${COMMIT_SHA}"
-
-          if git rev-parse --is-shallow-repository >/dev/null 2>&1 && \
-             git rev-parse --is-shallow-repository | grep -q "true"; then
-            git fetch --unshallow >/dev/null 2>&1 || true
-          fi
-
-          if ! git rev-parse "${target}" >/dev/null 2>&1; then
-            target="HEAD"
-          fi
-
-          changed="$(git show --pretty='' --name-only "$target" | tr -d '\r' || true)"
-
-          if echo "$changed" | grep -E "$pattern" >/dev/null 2>&1; then
-            should_build=1
-          else
-            echo "No relevant delivery changes detected; skipping build."
-          fi
-        fi
-
         cat <<EOF >/workspace/delivery.env
         ACTION=${action}
         BRANCH_NAME=${branch}
-        SHOULD_BUILD=${should_build}
         EOF
   - id: delete
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
@@ -100,7 +76,7 @@ steps:
 
         source /workspace/delivery.env
 
-        if [[ "$${ACTION}" != "build" || "$${SHOULD_BUILD:-0}" != "1" ]]; then
+        if [[ "$${ACTION}" != "build" ]]; then
           exit 0
         fi
 
@@ -112,3 +88,10 @@ steps:
 
         docker push "${image}"
 
+        image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/pipelines/job:$${BRANCH_NAME}"
+
+        docker build --target job \
+          --tag "${image}" \
+          .
+
+        docker push "${image}"

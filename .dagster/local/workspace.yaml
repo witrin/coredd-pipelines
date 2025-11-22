@@ -1,2 +1,4 @@
 load_from:
-    - python_file: /usr/local/src/benchmark/definitions.py
+  - python_file:
+      relative_path: /usr/local/src/components/bootstrap.py
+      location_name: main

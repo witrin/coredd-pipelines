@@ -24,6 +24,15 @@ resource "google_cloudbuild_trigger" "deploy" {
     }
   }
 
+  included_files = [
+    ".argilla/**",
+    ".dagster/**",
+    ".cloud/**",
+    "Dockerfile",
+    "pyproject.toml",
+    "requirements.lock"
+  ]
+
   substitutions = {
     "_REGION"     = local.region
     "_REPOSITORY" = google_artifact_registry_repository.containers.repository_id
@@ -77,14 +86,14 @@ locals {
 
   iam_secret_access = {
     runtime = [
-      "dagster-database-password",
+      data.google_secret_manager_secret_version.pipelines_database_password.secret,
       data.google_secret_manager_secret_version.oauth_cookie_secret.secret,
       data.google_secret_manager_secret_version.github_dagster_client_id.secret,
       data.google_secret_manager_secret_version.github_dagster_client_secret.secret,
       data.google_secret_manager_secret_version.github_guard_token.secret
     ]
     compute_default = [
-      "dagster-database-password",
+      data.google_secret_manager_secret_version.pipelines_database_password.secret,
       data.google_secret_manager_secret_version.oauth_cookie_secret.secret,
       data.google_secret_manager_secret_version.github_dagster_client_id.secret,
       data.google_secret_manager_secret_version.github_dagster_client_secret.secret,
@@ -93,7 +102,7 @@ locals {
       data.google_secret_manager_secret_version.github_guard_token.secret
     ]
     app_engine_default = [
-      "dagster-database-password",
+      data.google_secret_manager_secret_version.pipelines_database_password.secret,
       data.google_secret_manager_secret_version.oauth_cookie_secret.secret,
       data.google_secret_manager_secret_version.github_dagster_client_id.secret,
       data.google_secret_manager_secret_version.github_dagster_client_secret.secret,
@@ -206,78 +215,6 @@ resource "google_service_account_iam_member" "allow_impersonation" {
   member             = "serviceAccount:${data.google_compute_default_service_account.compute_default.email}"
 }
 
-resource "google_cloud_run_v2_job" "job" {
-  name     = "pipelines-job"
-  location = local.region
-
-  deletion_protection = false
-
-  template {
-    template {
-      containers {
-        name  = "job"
-        image = local.pipelines_image
-
-        command = ["/bin/sh", "-c"]
-        args = [
-          "dagster api execute_run --run-id \"$DAGSTER_RUN_ID\""
-        ]
-
-        env {
-          name  = "DAGSTER_HOME"
-          value = "/etc/dagster"
-        }
-
-        env {
-          name  = "DATABASE_HOST"
-          value = "127.0.0.1"
-        }
-        env {
-          name  = "DATABASE_PORT"
-          value = "5432"
-        }
-        env {
-          name  = "DATABASE_SSLMODE"
-          value = "disable"
-        }
-        env {
-          name  = "DATABASE_USER"
-          value = google_sql_user.pipelines_user.name
-        }
-        env {
-          name = "DATABASE_PASSWORD"
-          value_source {
-            secret_key_ref {
-              secret  = data.google_secret_manager_secret_version.pipelines_database_password.secret
-              version = "latest"
-            }
-          }
-        }
-        env {
-          name  = "DATABASE_NAME"
-          value = google_sql_database.pipelines_meta.name
-        }
-
-        env {
-          name  = "DAGSTER_RUN_ID"
-          value = "dummy"
-        }
-      }
-
-      service_account = google_service_account.cloud_run_runtime.email
-      timeout         = "3600s"
-    }
-  }
-
-  launch_stage = "GA"
-
-  lifecycle {
-    ignore_changes = [
-      template[0].template[0].containers[0].image
-    ]
-  }
-}
-
 resource "google_compute_address" "engine" {
   name   = "engine"
   region = local.region
@@ -334,26 +271,30 @@ resource "google_compute_instance" "engine" {
     "enable-osconfig"           = "TRUE"
     "unit-version"              = local.unit_version
       "user-data" = templatefile("${path.module}/computation/initialize.yaml", {
-        pipelines_image_repository  = local.pipelines_image_repository
-        pipelines_code_image_repository = local.pipelines_code_image_repository
-        evaluation_image_repository = local.evaluation_image_repository
-        default_image_tag           = local.default_image_tag
-        unit_version                = local.unit_version
-        artifact_registry_host      = local.artifact_registry_host
-        project_id                  = data.google_project.current.project_id
-        region                      = local.region
-        database_host               = google_sql_database_instance.database.public_ip_address
-        database_port               = 5432
-        database_sslmode            = "require"
-        database_user               = google_sql_user.pipelines_user.name
-        database_password           = google_sql_user.pipelines_user.password
-        database_name               = google_sql_database.pipelines_meta.name
-        gcs_bucket                  = google_storage_bucket.bucket.name
-        argilla_github_client_id    = data.google_secret_manager_secret_version.github_argilla_client_id.secret_data
-        argilla_github_client_secret = data.google_secret_manager_secret_version.github_argilla_client_secret.secret_data
-        github_oauth_callback_url   = var.evaluation_github_callback_url
-        branches_port_start         = 4100
-        branches_port_end           = 4109
+        pipelines_image_repository      = local.pipelines_image_repository
+        code_image_repository           = local.code_image_repository
+        job_image_repository            = local.job_image_repository
+        evaluation_image_repository     = local.evaluation_image_repository
+        default_image_tag               = local.default_image_tag
+        unit_version                    = local.unit_version
+        artifact_registry_host          = local.artifact_registry_host
+        project                         = data.google_project.current.project_id
+        region                          = local.region
+        database_host                   = google_sql_database_instance.database.public_ip_address
+        database_port                   = 5432
+        database_sslmode                = "require"
+        database_user                   = google_sql_user.pipelines_user.name
+        database_password               = google_sql_user.pipelines_user.password
+        database_name                   = google_sql_database.pipelines_meta.name
+        bucket                          = google_storage_bucket.bucket.name
+        github_argilla_id               = data.google_secret_manager_secret_version.github_argilla_client_id.secret_data
+        github_argilla_secret           = data.google_secret_manager_secret_version.github_argilla_client_secret.secret_data
+        github_oauth_callback_url       = var.github_argilla_callback
+        branches_port_start             = 4100
+        branches_port_end               = 4109
+        service_account                 = google_service_account.cloud_run_runtime.email
+        trunk                           = local.trunk
+        cloud_sql_instance              = local.cloud_sql_instance
       })
     }
   resource_policies = [

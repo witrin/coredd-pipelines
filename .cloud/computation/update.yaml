@@ -1,4 +1,4 @@
-name: projects/$PROJECT_ID/guestPolicies/images
+name: projects/$PROJECT/guestPolicies/images
 description: Update image tag
 assignment:
   groupLabels:
