@@ -33,14 +33,6 @@ resource "google_compute_instance_group" "engine_group" {
   name = "engine-group"
   zone = local.zone
 
-  instances = [
-    google_compute_instance.engine.self_link
-  ]
-
-  lifecycle {
-    replace_triggered_by = [google_compute_instance.engine.id]
-  }
-
   named_port {
     name = "pipelines"
     port = 3000
@@ -50,6 +42,12 @@ resource "google_compute_instance_group" "engine_group" {
     name = "evaluation"
     port = 6900
   }
+}
+
+resource "google_compute_instance_group_membership" "engine_group_membership" {
+  zone           = local.zone
+  instance_group = google_compute_instance_group.engine_group.name
+  instance       = google_compute_instance.engine.self_link
 }
 
 resource "google_compute_health_check" "pipelines_health" {
