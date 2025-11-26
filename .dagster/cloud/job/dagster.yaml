@@ -10,10 +10,10 @@ compute_logs:
   module: dagster._core.storage.local_compute_log_manager
   class: LocalComputeLogManager
   config:
-    base_dir: /var/log/dagster
+    base_dir: /tmp/dagster/logs/
 
 local_artifact_storage:
   module: dagster._core.storage.root
   class: LocalArtifactStorage
   config:
-    base_dir: /var/lib/dagster
+    base_dir: /tmp/dagster/artifacts/
