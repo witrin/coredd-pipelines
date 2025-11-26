@@ -12,6 +12,7 @@ resource "google_cloudbuild_trigger" "delivery" {
   }
 
   included_files = [
+    ".dagster/**",
     "src/**",
     "Dockerfile",
     "pyproject.toml",
