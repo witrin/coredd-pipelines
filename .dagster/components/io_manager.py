@@ -67,7 +67,7 @@ class BranchPartitionedGCSIOManager(IOManager):
         )
 
     def _branch(self, context: InputContext | OutputContext) -> str:
-        return context.asset_spec.tags.get("branch") or self._paths.main
+        return context.asset_spec.tags.get("branch") or self._paths.branch or self._paths.main
 
     def _version(self, context: InputContext | OutputContext) -> str:
         return context.asset_spec.tags.get("version") or "none"
@@ -86,7 +86,7 @@ class BranchPartitionedGCSIOManager(IOManager):
     def _blob_path(
         self, context: InputContext | OutputContext, branch: Optional[str] = None
     ) -> str:
-        key = "/".join(self._asset_segments(context))
+        key = "/".join(self._asset_segments(context)).replace("_", "-")
         version = self._version(context)
         branch_value = branch or self._branch(context)
         partition = self._partition(context)
