@@ -243,7 +243,9 @@ write_files:
         echo "$images_json" | jq -r '
           .[]
           | select(.tags != null)
-          | .digest as $d
+          | (.version // .name // "") as $v
+          | ($v | try (match("sha256:[a-f0-9]+") | .string) catch "") as $d
+          | select($d != "")
           | .tags[]
           | select(test("^[A-Za-z0-9._-]+$"))
           | . + ":" + $d
@@ -331,7 +333,12 @@ write_files:
         echo "Delete unit $branch"
         systemctl stop "$unit" || true
         systemctl disable "$unit" || true
+        systemctl reset-failed "$unit" || true
+        if [[ -d "/etc/systemd/system/$unit.d" ]]; then
+          rm -rf "/etc/systemd/system/$unit.d"
+        fi
       done
+      systemctl daemon-reload || true
 
       for env_file in "$ENV_DIR"/*.env; do
         [ -e "$env_file" ] || continue
@@ -355,7 +362,7 @@ write_files:
       done
 
       mapfile -t repo_images < <(
-        docker images "${code_image_repository}" --format '{{.Repository}}:{{.Tag}}'
+        docker images "${code_image_repository}" --format '{{.Repository}}:{{.Tag}}' | grep -v ':<none>$'
       )
 
       for img in "$${repo_images[@]}"; do
