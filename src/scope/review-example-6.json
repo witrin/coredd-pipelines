@@ -1,0 +1,66 @@
+{
+    "review": {
+        "id": 3462167799,
+        "node_id": "PRR_kwDOQVT3I87OXHz3",
+        "user": {
+            "login": "hfu",
+            "id": 18297,
+            "node_id": "MDQ6VXNlcjE4Mjk3",
+            "avatar_url": "https://avatars.githubusercontent.com/u/18297?v=4",
+            "gravatar_id": "",
+            "url": "https://api.github.com/users/hfu",
+            "html_url": "https://github.com/hfu",
+            "followers_url": "https://api.github.com/users/hfu/followers",
+            "following_url": "https://api.github.com/users/hfu/following{/other_user}",
+            "gists_url": "https://api.github.com/users/hfu/gists{/gist_id}",
+            "starred_url": "https://api.github.com/users/hfu/starred{/owner}{/repo}",
+            "subscriptions_url": "https://api.github.com/users/hfu/subscriptions",
+            "organizations_url": "https://api.github.com/users/hfu/orgs",
+            "repos_url": "https://api.github.com/users/hfu/repos",
+            "events_url": "https://api.github.com/users/hfu/events{/privacy}",
+            "received_events_url": "https://api.github.com/users/hfu/received_events",
+            "type": "User",
+            "user_view_type": "public",
+            "site_admin": false
+        },
+        "body": null,
+        "commit_id": "5d29f49f1c6da297127c85a3f7a7d41b4d36269c",
+        "submitted_at": "2025-11-13T23:38:00Z",
+        "state": "approved",
+        "html_url": "https://github.com/hfu/fusite/pull/1#pullrequestreview-3462167799",
+        "pull_request_url": "https://api.github.com/repos/hfu/fusite/pulls/1",
+        "_links": {
+            "html": {
+                "href": "https://github.com/hfu/fusite/pull/1#pullrequestreview-3462167799"
+            },
+            "pull_request": {
+                "href": "https://api.github.com/repos/hfu/fusite/pulls/1"
+            }
+        },
+        "updated_at": "2025-11-13T23:38:00Z"
+    },
+    "pull_request": {
+        "url": "https://api.github.com/repos/hfu/fusite/pulls/1",
+        "id": 3008729615,
+        "number": 1,
+        "head": {
+            "ref": "copilot/create-terrain-visualization-site",
+            "sha": "5d29f49f1c6da297127c85a3f7a7d41b4d36269c",
+            "repo": {
+                "id": 1096087331,
+                "url": "https://api.github.com/repos/hfu/fusite",
+                "name": "fusite"
+            }
+        },
+        "base": {
+            "ref": "main",
+            "sha": "b0daf163a1a90f6717a1fa83f2a0e14b15f63819",
+            "repo": {
+                "id": 1096087331,
+                "url": "https://api.github.com/repos/hfu/fusite",
+                "name": "fusite"
+            }
+        }
+    },
+    "action": "created"
+}

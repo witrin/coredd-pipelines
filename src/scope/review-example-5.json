@@ -1,0 +1,47 @@
+{
+    "action": "labeled",
+    "number": 24,
+    "pull_request": {
+        "url": "https://api.github.com/repos/josh/plex-index/pulls/24",
+        "id": 3004957712,
+        "number": 24,
+        "head": {
+            "ref": "codex/gracefully-skip-remotedisconnected-error",
+            "sha": "da73d20a1e8fa24f3507f67dd13ed3c521592db8",
+            "repo": {
+                "id": 1041051846,
+                "url": "https://api.github.com/repos/josh/plex-index",
+                "name": "plex-index"
+            }
+        },
+        "base": {
+            "ref": "main",
+            "sha": "0c16c119be75b93a38ca2f530930560f83295274",
+            "repo": {
+                "id": 1041051846,
+                "url": "https://api.github.com/repos/josh/plex-index",
+                "name": "plex-index"
+            }
+        }
+    },
+    "label": {
+        "id": 9233864565,
+        "node_id": "LA_kwDOPg0wxs8AAAACJmGXdQ",
+        "url": "https://api.github.com/repos/josh/plex-index/labels/codex",
+        "name": "codex",
+        "color": "ededed",
+        "default": false,
+        "description": null
+    },
+    "labels": [
+        {
+            "id": 9233864565,
+            "node_id": "LA_kwDOPg0wxs8AAAACJmGXdQ",
+            "url": "https://api.github.com/repos/josh/plex-index/labels/codex",
+            "name": "codex",
+            "color": "ededed",
+            "default": false,
+            "description": null
+        }
+    ]
+}
