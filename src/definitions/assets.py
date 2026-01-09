@@ -12,7 +12,7 @@ class BigQueryQueryConfig(Config):
     location: str | None = None
 
 
-@asset(tags={"version": "1.0.0"})
+@asset(tags={"version": "1.0.2"})
 def scope_raw(
     context: AssetExecutionContext, config: BigQueryQueryConfig
 ) -> pa.Table:
