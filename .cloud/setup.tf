@@ -105,6 +105,17 @@ data "google_app_engine_default_service_account" "app_engine" {
   project = data.google_project.current.project_id
 }
 
+resource "google_service_account" "build" {
+  account_id   = "pipelines-build"
+  display_name = "Pipelines Cloud Build"
+}
+
+resource "google_service_account_iam_member" "build_act_as" {
+  service_account_id = google_service_account.build.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-cloudbuild.iam.gserviceaccount.com"
+}
+
 locals {
   region                             = "europe-west1"
   zone                               = "${local.region}-b"
@@ -118,7 +129,7 @@ locals {
   trunk                              = "main"
   pipelines_image                    = "${local.pipelines_image_repository}:${local.default_image_tag}"
   unit_version                       = formatdate("2006-01-02", timestamp())
-  cloud_build_service_account        = "${data.google_project.current.number}@cloudbuild.gserviceaccount.com"
+  build_service_account              = google_service_account.build.email
   compute_default_service_account    = data.google_compute_default_service_account.compute_default.email
   app_engine_default_service_account = data.google_app_engine_default_service_account.app_engine.email
   cloud_build_repository_resource    = var.cloudbuild_repository
@@ -182,14 +193,14 @@ resource "google_storage_bucket" "build" {
   force_destroy               = true
 }
 
-resource "google_storage_bucket_iam_member" "cloudbuild_writer" {
+resource "google_storage_bucket_iam_member" "build_writer" {
   bucket = google_storage_bucket.build.name
   role   = "roles/storage.admin"
-  member = "serviceAccount:${local.cloud_build_service_account}"
+  member = "serviceAccount:${local.build_service_account}"
 }
 
 resource "google_storage_bucket_iam_member" "pipelines_runtime_writer" {
   bucket = google_storage_bucket.build.name
   role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.cloud_run_runtime.email}"
+  member = "serviceAccount:${google_service_account.runtime.email}"
 }
