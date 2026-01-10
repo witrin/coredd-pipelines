@@ -12,6 +12,8 @@ asset has been recomputed for their branch.
 from __future__ import annotations
 
 import io
+import json
+import hashlib
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
@@ -67,7 +69,11 @@ class BranchPartitionedGCSIOManager(IOManager):
         )
 
     def _branch(self, context: InputContext | OutputContext) -> str:
-        return context.asset_spec.tags.get("branch") or self._paths.branch or self._paths.main
+        return (
+            context.asset_spec.tags.get("branch")
+            or self._paths.branch
+            or self._paths.main
+        )
 
     def _version(self, context: InputContext | OutputContext) -> str:
         return context.asset_spec.tags.get("version") or "none"
@@ -75,7 +81,7 @@ class BranchPartitionedGCSIOManager(IOManager):
     def _partition(self, context: InputContext | OutputContext) -> str:
         return context.partition_key if context.has_partition_key else "default"
 
-    def _asset_segments(self, context: InputContext | OutputContext) -> Sequence[str]:
+    def _key(self, context: InputContext | OutputContext) -> Sequence[str]:
         asset_key = context.asset_key if context.has_asset_key else None
         if asset_key:
             return asset_key.path
@@ -83,16 +89,14 @@ class BranchPartitionedGCSIOManager(IOManager):
         identifier = context.get_identifier()
         return tuple(str(part) for part in identifier)
 
-    def _blob_path(
+    def _path(
         self, context: InputContext | OutputContext, branch: Optional[str] = None
     ) -> str:
-        key = "/".join(self._asset_segments(context)).replace("_", "-")
+        key = "/".join(self._key(context)).replace("_", "-")
         version = self._version(context)
-        branch_value = branch or self._branch(context)
         partition = self._partition(context)
-        return (
-            f"assets/{key}/version={version}/branch={branch_value}/partition={partition}/{DEFAULT_FILENAME}"
-        )
+        configuration = self._configruation(context)
+        return f"assets/{key}/version={version}/branch={branch or self._branch(context)}/partition={partition}/{DEFAULT_FILENAME}"
 
     def handle_output(self, context: OutputContext, obj) -> None:
         table = self._ensure_table(obj)
@@ -101,13 +105,13 @@ class BranchPartitionedGCSIOManager(IOManager):
         pq.write_table(table, buffer)
         buffer.seek(0)
 
-        blob = self._bucket.blob(self._blob_path(context))
+        blob = self._bucket.blob(self._path(context))
         blob.upload_from_file(buffer, rewind=True)
 
         context.log.info("Wrote %s rows to %s", table.num_rows, blob.name)
 
     def load_input(self, context: InputContext):
-        blob = self._resolve_blob_with_fallback(context)
+        blob = self._resolve(context)
         if blob is None:
             raise FileNotFoundError(
                 f"No object found for {context.asset_key} in branches "
@@ -119,8 +123,8 @@ class BranchPartitionedGCSIOManager(IOManager):
         context.log.info("Loaded %s rows from %s", table.num_rows, blob.name)
         return table
 
-    def _resolve_blob_with_fallback(self, context: InputContext):
-        preferred_path = self._blob_path(context)
+    def _resolve(self, context: InputContext):
+        preferred_path = self._path(context)
         blob = self._bucket.blob(preferred_path)
 
         if blob.exists():
@@ -128,7 +132,7 @@ class BranchPartitionedGCSIOManager(IOManager):
 
         main = self._paths.main
         if main and main != self._branch(context):
-            fallback_path = self._blob_path(context, branch=main)
+            fallback_path = self._path(context, branch=main)
             fallback_blob = self._bucket.blob(fallback_path)
             if fallback_blob.exists():
                 return fallback_blob
@@ -148,7 +152,9 @@ class BranchPartitionedGCSIOManager(IOManager):
             if isinstance(obj, pd.DataFrame):
                 return pa.Table.from_pandas(obj, preserve_index=False)
         except ImportError as exc:
-            raise ValueError("pandas is required when passing a DataFrame to the IOManager") from exc
+            raise ValueError(
+                "pandas is required when passing a DataFrame to the IOManager"
+            ) from exc
 
         raise ValueError(
             f"Unsupported object type {type(obj)!r}; expected pyarrow.Table, RecordBatch, or pandas.DataFrame."
