@@ -24,14 +24,13 @@ resource "google_cloudbuild_trigger" "delivery" {
     "_REPOSITORY" = google_artifact_registry_repository.containers.repository_id
   }
 
-  service_account = "projects/${data.google_project.current.project_id}/serviceAccounts/${google_service_account.cloud_run_runtime.email}"
+  service_account = "projects/${data.google_project.current.project_id}/serviceAccounts/${local.build_service_account}"
 
   depends_on = [google_project_service.required["cloudbuild.googleapis.com"]]
 
   lifecycle {
     ignore_changes = [
-      repository_event_config,
-      service_account
+      repository_event_config
     ]
   }
 }

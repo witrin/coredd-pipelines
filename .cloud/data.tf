@@ -12,7 +12,7 @@ resource "google_storage_bucket" "bucket" {
 resource "google_storage_bucket_iam_member" "pipelines_runtime_bucket_writer" {
   bucket = google_storage_bucket.bucket.name
   role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.cloud_run_runtime.email}"
+  member = "serviceAccount:${google_service_account.runtime.email}"
 }
 
 resource "google_sql_database_instance" "database" {

@@ -1,6 +1,6 @@
-resource "google_service_account" "cloud_run_runtime" {
+resource "google_service_account" "runtime" {
   account_id   = "pipelines-runtime"
-  display_name = "Pipelines Cloud Run runtime"
+  display_name = "Pipelines Cloud Run"
 }
 
 resource "google_artifact_registry_repository" "containers" {
@@ -41,22 +41,21 @@ resource "google_cloudbuild_trigger" "deploy" {
     "_ZONE"       = local.zone
   }
 
-  service_account = "projects/${data.google_project.current.project_id}/serviceAccounts/${google_service_account.cloud_run_runtime.email}"
+  service_account = "projects/${data.google_project.current.project_id}/serviceAccounts/${local.build_service_account}"
 
   depends_on = [google_project_service.required["cloudbuild.googleapis.com"]]
 
   lifecycle {
     ignore_changes = [
-      repository_event_config,
-      service_account
+      repository_event_config
     ]
   }
 }
 
 locals {
   iam_service_accounts = {
-    runtime            = google_service_account.cloud_run_runtime.email
-    cloud_build        = local.cloud_build_service_account
+    runtime            = google_service_account.runtime.email
+    build              = local.build_service_account
     compute_default    = local.compute_default_service_account
     app_engine_default = local.app_engine_default_service_account
   }
@@ -64,18 +63,16 @@ locals {
   iam_project_roles = {
     runtime = [
       "roles/artifactregistry.reader",
+      "roles/bigquery.jobUser",
+      "roles/cloudsql.client",
+      "roles/logging.logWriter"
+    ]
+    build = [
       "roles/artifactregistry.writer",
       "roles/cloudfunctions.developer",
-      "roles/cloudsql.client",
       "roles/logging.logWriter",
       "roles/run.admin",
       "roles/osconfig.guestPolicyAdmin",
-      "roles/compute.instanceAdmin.v1"
-    ]
-    cloud_build = [
-      "roles/artifactregistry.writer",
-      "roles/cloudfunctions.developer",
-      "roles/run.admin",
       "roles/compute.instanceAdmin.v1"
     ]
     compute_default = [
@@ -112,16 +109,16 @@ locals {
 
   iam_service_account_impersonation = {
     runtime = {
-      service_account = google_service_account.cloud_run_runtime.name
+      service_account = google_service_account.runtime.name
       members = [
-        local.iam_service_accounts.cloud_build,
+        local.iam_service_accounts.build,
         local.iam_service_accounts.runtime
       ]
     }
     compute_default = {
       service_account = data.google_compute_default_service_account.compute_default.name
       members = [
-        local.iam_service_accounts.cloud_build,
+        local.iam_service_accounts.build,
         local.iam_service_accounts.runtime
       ]
     }
@@ -210,7 +207,7 @@ resource "google_project_iam_member" "engine_run_jobs" {
 }
 
 resource "google_service_account_iam_member" "allow_impersonation" {
-  service_account_id = google_service_account.cloud_run_runtime.name
+  service_account_id = google_service_account.runtime.name
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${data.google_compute_default_service_account.compute_default.email}"
 }
@@ -292,7 +289,7 @@ resource "google_compute_instance" "engine" {
         github_oauth_callback_url       = var.github_argilla_callback
         branches_port_start             = 4100
         branches_port_end               = 4109
-        service_account                 = google_service_account.cloud_run_runtime.email
+        service_account                 = google_service_account.runtime.email
         trunk                           = local.trunk
         cloud_sql_instance              = local.cloud_sql_instance
       })
