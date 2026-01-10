@@ -12,7 +12,7 @@ class BigQueryQueryConfig(Config):
     location: str | None = None
 
 
-@asset(tags={"version": "1.0.2"})
+@asset(tags={"version": "1.1.0"})
 def scope_raw(
     context: AssetExecutionContext, config: BigQueryQueryConfig
 ) -> pa.Table:
@@ -38,10 +38,10 @@ def scope_raw(
                     "since", "TIMESTAMP", "2025-07-01T00:00:00Z"
                 ),
                 bigquery.ScalarQueryParameter(
-                    "until", "TIMESTAMP", "2025-07-03T00:00:00Z"
+                    "until", "TIMESTAMP", "2025-07-31T00:00:00Z"
                 ),
                 bigquery.ArrayQueryParameter(
-                    "languages", "STRING", ["TypeScript", "Python", "JavaScript"]
+                    "languages", "STRING", ["JavaScript", "Python", "TypeScript"]
                 ),
             ]
         ),
