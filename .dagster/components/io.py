@@ -12,8 +12,6 @@ asset has been recomputed for their branch.
 from __future__ import annotations
 
 import io
-import json
-import hashlib
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
