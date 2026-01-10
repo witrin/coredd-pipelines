@@ -95,7 +95,6 @@ class BranchPartitionedGCSIOManager(IOManager):
         key = "/".join(self._key(context)).replace("_", "-")
         version = self._version(context)
         partition = self._partition(context)
-        configuration = self._configruation(context)
         return f"assets/{key}/version={version}/branch={branch or self._branch(context)}/partition={partition}/{DEFAULT_FILENAME}"
 
     def handle_output(self, context: OutputContext, obj) -> None:
