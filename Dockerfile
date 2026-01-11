@@ -9,7 +9,8 @@ WORKDIR /usr/local/src/
 COPY pyproject.toml requirements.lock ./
 
 RUN pip install uv \
-    && uv pip sync --system requirements.lock
+    && uv pip sync --system requirements.lock \
+    && pip install debugpy
 
 ENV DAGSTER_HOME=/etc/dagster \
     PYTHONDONTWRITEBYTECODE=1 \

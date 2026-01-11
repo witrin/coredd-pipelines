@@ -1,6 +1,7 @@
 from pathlib import Path
-from dagster import AssetExecutionContext, Config, asset
+from dagster import AssetExecutionContext, Config
 from google.cloud import bigquery
+from components.decorator import asset
 
 import pyarrow as pa
 
@@ -38,7 +39,7 @@ def scope_raw(
                     "since", "TIMESTAMP", "2025-07-01T00:00:00Z"
                 ),
                 bigquery.ScalarQueryParameter(
-                    "until", "TIMESTAMP", "2025-07-31T00:00:00Z"
+                    "until", "TIMESTAMP", "2025-07-02T00:00:00Z"
                 ),
                 bigquery.ArrayQueryParameter(
                     "languages", "STRING", ["JavaScript", "Python", "TypeScript"]

@@ -6,7 +6,7 @@ from typing import Mapping, MutableMapping, Optional
 
 from dagster import IOManager, fs_io_manager
 
-from components.io_manager import BranchPartitionedGCSIOManager
+from components.io import BranchPartitionedGCSIOManager
 
 
 def build_resources(overrides: Optional[Mapping[str, IOManager]] = None) -> MutableMapping[str, IOManager]:
