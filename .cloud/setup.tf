@@ -126,7 +126,6 @@ locals {
   job_image_repository              = "${local.artifact_registry_repository}/pipelines/job"
   evaluation_image_repository        = "${local.artifact_registry_repository}/evaluation"
   default_image_tag                  = "latest"
-  trunk                              = "main"
   pipelines_image                    = "${local.pipelines_image_repository}:${local.default_image_tag}"
   unit_version                       = formatdate("2006-01-02", timestamp())
   build_service_account              = google_service_account.build.email

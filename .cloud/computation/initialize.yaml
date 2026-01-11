@@ -38,7 +38,6 @@ write_files:
       CLOUD_RUN_TIMEOUT="3600s"
       CLOUD_RUN_MEMORY="4Gi"
       CLOUD_RUN_MAX_RETRIES=0
-      TRUNK="${trunk}"
 
       mkdir -p "$(dirname "$LOCKFILE")"
       exec 9>"$LOCKFILE"
@@ -167,8 +166,7 @@ write_files:
           --set-env-vars="DATABASE_NAME=${database_name}" \
           --set-secrets="DATABASE_PASSWORD=dagster-database-password:latest" \
           --set-env-vars="CLOUD_BUCKET=${bucket}" \
-          --set-env-vars="BUILD_BRANCH=$branch" \
-          --set-env-vars="BUILD_MAIN=$TRUNK" \
+          --set-env-vars="DAGSTER_LOCATION=$branch" \
           --quiet
       }
 
@@ -267,8 +265,7 @@ write_files:
           fi
           cat >"$env_file" <<EOF
       # DIGEST=$digest
-      BUILD_BRANCH=$branch
-      BUILD_MAIN=$TRUNK
+      DAGSTER_LOCATION=$branch
       IMAGE_TAG=$branch
       GRPC_PORT=$port
       IMAGE_REPOSITORY=${code_image_repository}
@@ -298,16 +295,11 @@ write_files:
         fi
 
         if [[ -f "$env_file" ]]; then
-          if grep -q '^BUILD_BRANCH=' "$env_file"; then
-            sed -i "s/^BUILD_BRANCH=.*/BUILD_BRANCH=$branch/" "$env_file"
+          if grep -q '^DAGSTER_LOCATION=' "$env_file"; then
+            sed -i "s/^DAGSTER_LOCATION=.*/DAGSTER_LOCATION=$branch/" "$env_file"
           else
-            echo "BUILD_BRANCH=$branch" >>"$env_file"
+            echo "DAGSTER_LOCATION=$branch" >>"$env_file"
           fi
-            if grep -q '^BUILD_MAIN=' "$env_file"; then
-              sed -i "s/^BUILD_MAIN=.*/BUILD_MAIN=$TRUNK/" "$env_file"
-            else
-              echo "BUILD_MAIN=$TRUNK" >>"$env_file"
-            fi
         fi
 
         ensure_cloud_run_job "$branch"
@@ -632,7 +624,6 @@ write_files:
     permissions: '0600'
     owner: root:root
     content: |
-      BUILD_MAIN=release
       GRPC_PORT=${branches_port_start}
       IMAGE_REPOSITORY=${pipelines_image_repository}
 

@@ -7,8 +7,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from google.cloud import storage
 
+from components.location import Location
 
-class BranchingAssetCache:
+
+class AssetCache:
     """Utility object for resolving the GCS blob path for a given asset."""
 
     def __init__(self, context: dg.AssetExecutionContext):
@@ -16,18 +18,15 @@ class BranchingAssetCache:
 
         self._bucket = os.environ["CLOUD_BUCKET"]
         self._project = os.environ.get("CLOUD_PROJECT")
-        self._branch = os.environ.get("BUILD_BRANCH", "")
-        self._default = os.environ.get("BUILD_MAIN", "main")
+        self._location = Location.load()
 
         client = storage.Client(project=self._project)
         self._bucket = client.bucket(self._bucket)
 
-    def _blob(self, branch: str) -> storage.Blob:
+    def _blob(self, location: str) -> storage.Blob:
         parts: Sequence[str] = list(self._context.asset_key.path)
-        if len(parts) > 1:
-            parts = parts[1:]
 
-        key = "/".join(parts).replace("_", "-")
+        key = parts[-1].replace("_", "-")
 
         version = self._context.assets_def.tags_by_key.get(
             self._context.asset_key, {}
@@ -42,7 +41,7 @@ class BranchingAssetCache:
         blob = (
             f"assets/{key}/"
             f"version={version}/"
-            f"branch={branch}/"
+            f"location={location}/"
             f"partition={partition}/"
             "data.parquet"
         )
@@ -50,25 +49,26 @@ class BranchingAssetCache:
         return self._bucket.blob(blob)
 
     def load(self) -> Optional[pa.Table]:
-        branch = self._blob(self._branch)
+        branch = self._blob(self._location.current)
+
         if branch.exists():
             data = branch.download_as_bytes()
             table = pq.read_table(pa.BufferReader(data))
             self._context.log.info(
                 "Reusing cached data from branch %s (%s)",
-                self._branch,
+                self._location.current,
                 branch.name,
             )
             return table
 
-        if self._default and self._default != self._branch:
-            default = self._blob(self._default)
+        if self._location.current != self._location.default:
+            default = self._blob(self._location.default)
             if default.exists():
                 data = default.download_as_bytes()
                 table = pq.read_table(pa.BufferReader(data))
                 self._context.log.info(
                     "Reusing cached data from default branch %s (%s)",
-                    self._default,
+                    self._location.default,
                     default.name,
                 )
                 return table
@@ -81,16 +81,17 @@ def asset(*asset_args, **asset_kwargs):
 
     def outer(fn):
         local = asset_kwargs.pop("key", None)
-        branch = os.environ.get("BUILD_BRANCH", "")
+        location = Location.load().current
 
+        # See https://github.com/dagster-io/dagster/issues/18534
         if local is None:
-            full = [branch, fn.__name__]
+            full = [location, fn.__name__.replace("_", "-")]
         elif isinstance(local, str):
-            full = [branch, local]
+            full = [location, local.replace("_", "-")]
         else:
-            full = [branch, *local]
+            full = [location, *local]
 
-        full = [part.replace("_", "-") for part in full]
+        full = [part for part in full if part]
 
         @dg.asset(*asset_args, key=full, **asset_kwargs)
         @wraps(fn)
@@ -104,7 +105,7 @@ def asset(*asset_args, **asset_kwargs):
                 context.log.info("Forced compute for %s", context.asset_key)
                 return fn(context, configuration, *args, **kwargs)
 
-            cache = BranchingAssetCache(context)
+            cache = AssetCache(context)
             cached = cache.load()
 
             if cached is not None:

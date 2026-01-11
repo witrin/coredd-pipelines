@@ -6,7 +6,7 @@ from typing import Mapping, MutableMapping, Optional
 
 from dagster import IOManager, fs_io_manager
 
-from components.io import BranchPartitionedGCSIOManager
+from components.io import LocationPartitionedGCSIOManager
 
 
 def build_resources(overrides: Optional[Mapping[str, IOManager]] = None) -> MutableMapping[str, IOManager]:
@@ -20,6 +20,6 @@ def build_resources(overrides: Optional[Mapping[str, IOManager]] = None) -> Muta
 def _select_io_manager() -> IOManager:
     """Use the branch-aware GCS IO manager when env metadata is available."""
     try:
-        return BranchPartitionedGCSIOManager.from_environment()
+        return LocationPartitionedGCSIOManager.from_environment()
     except KeyError:
         return fs_io_manager

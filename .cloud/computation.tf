@@ -290,7 +290,6 @@ resource "google_compute_instance" "engine" {
         branches_port_start             = 4100
         branches_port_end               = 4109
         service_account                 = google_service_account.runtime.email
-        trunk                           = local.trunk
         cloud_sql_instance              = local.cloud_sql_instance
       })
     }

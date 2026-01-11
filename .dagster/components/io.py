@@ -1,76 +1,50 @@
 """
 Dagster IOManager that stores Parquet files on GCS using branch + version semantics.
 
-The IOManager resolves the run's ``branch`` and ``version`` tags and writes assets at:
-``gs://<bucket>/<base>/<asset>/version=<version>/branch=<branch>/partition=<partition>/data.parquet``.
+The IOManager resolves the run's ``location`` and ``version`` tags and writes assets at:
+``gs://<bucket>/<asset>/version=<version>/location=<location>/partition=<partition>/data.parquet``.
 
-When loading inputs it first looks at the requested branch and falls back to ``BUILD_MAIN`` if
-no object exists. This lets experiments reuse the last successful output from ``main`` until an
-asset has been recomputed for their branch.
+When loading inputs it first looks at the requested branch and falls back to ``main`` if
+no object exists. This lets experiments reuse the last successful output until an asset 
+has been recomputed for their branch.
 """
 
 from __future__ import annotations
 
 import io
-from dataclasses import dataclass
-from typing import Optional, Sequence
+import os
+from typing import Optional
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 from dagster import IOManager, InputContext, OutputContext
 from google.cloud import storage
 
-DEFAULT_FILENAME = "data.parquet"
+from components.location import Location
 
 
-@dataclass(frozen=True)
-class IOPaths:
-    bucket: str
-    branch: str
-    main: str
-
-
-class BranchPartitionedGCSIOManager(IOManager):
-    """Parquet IOManager that scopes data by (asset, version, branch, partition)."""
+class LocationPartitionedGCSIOManager(IOManager):
+    """Parquet IOManager that scopes data by (asset, version, location, partition)."""
 
     def __init__(
         self,
+        location: Location,
         bucket: str,
-        branch: Optional[str] = None,
-        main: Optional[str] = None,
         project: Optional[str] = None,
         client: Optional[storage.Client] = None,
     ) -> None:
-        normalized_branch = (branch or "").strip("/")
-        normalized_main = main or "main"
-        self._paths = IOPaths(
-            bucket=bucket,
-            branch=normalized_branch,
-            main=normalized_main,
-        )
+        self._location = location
         self._client = client or storage.Client(project=project)
         self._bucket = self._client.bucket(bucket)
 
     @staticmethod
-    def from_environment() -> "BranchPartitionedGCSIOManager":
-        import os
-
+    def from_environment() -> "LocationPartitionedGCSIOManager":
         bucket = os.environ["CLOUD_BUCKET"]
-        branch = os.environ.get("BUILD_BRANCH", "")
-        trunk = os.environ.get("BUILD_MAIN", "main")
         project = os.environ.get("CLOUD_PROJECT")
-        return BranchPartitionedGCSIOManager(
+        return LocationPartitionedGCSIOManager(
+            location=Location.load(),
             bucket=bucket,
-            branch=branch,
-            main=trunk,
             project=project,
-        )
-
-    def _branch(self, context: InputContext | OutputContext) -> str:
-        return (
-            context.asset_spec.tags.get("branch")
-            or self._paths.branch
-            or self._paths.main
         )
 
     def _version(self, context: InputContext | OutputContext) -> str:
@@ -79,60 +53,39 @@ class BranchPartitionedGCSIOManager(IOManager):
     def _partition(self, context: InputContext | OutputContext) -> str:
         return context.partition_key if context.has_partition_key else "default"
 
-    def _key(self, context: InputContext | OutputContext) -> Sequence[str]:
-        asset_key = context.asset_key if context.has_asset_key else None
-        if asset_key:
-            return asset_key.path
+    def _key(self, context: InputContext | OutputContext) -> str:
+        key = context.asset_key if context.has_asset_key else None
+
+        if key:
+            return key.path[-1].replace("_", "-")
 
         identifier = context.get_identifier()
-        return tuple(str(part) for part in identifier)
+
+        return identifier[-1].replace("_", "-")
 
     def _path(
-        self, context: InputContext | OutputContext, branch: Optional[str] = None
+        self, context: InputContext | OutputContext, location: Optional[str] = None
     ) -> str:
-        key = "/".join(self._key(context)).replace("_", "-")
+        if location is None:
+            location = self._location.current
+
+        key: str = self._key(context)
         version = self._version(context)
         partition = self._partition(context)
-        return f"assets/{key}/version={version}/branch={branch or self._branch(context)}/partition={partition}/{DEFAULT_FILENAME}"
 
-    def handle_output(self, context: OutputContext, obj) -> None:
-        table = self._ensure_table(obj)
-
-        buffer = io.BytesIO()
-        pq.write_table(table, buffer)
-        buffer.seek(0)
-
-        blob = self._bucket.blob(self._path(context))
-        blob.upload_from_file(buffer, rewind=True)
-
-        context.log.info("Wrote %s rows to %s", table.num_rows, blob.name)
-
-    def load_input(self, context: InputContext):
-        blob = self._resolve(context)
-        if blob is None:
-            raise FileNotFoundError(
-                f"No object found for {context.asset_key} in branches "
-                f"{self._branch(context)} or {self._paths.main}"
-            )
-
-        data = blob.download_as_bytes()
-        table = pq.read_table(pa.BufferReader(data))
-        context.log.info("Loaded %s rows from %s", table.num_rows, blob.name)
-        return table
+        return f"assets/{key}/version={version}/location={location}/partition={partition}/data.parquet"
 
     def _resolve(self, context: InputContext):
-        preferred_path = self._path(context)
-        blob = self._bucket.blob(preferred_path)
+        blob = self._bucket.blob(self._path(context))
 
         if blob.exists():
             return blob
 
-        main = self._paths.main
-        if main and main != self._branch(context):
-            fallback_path = self._path(context, branch=main)
-            fallback_blob = self._bucket.blob(fallback_path)
-            if fallback_blob.exists():
-                return fallback_blob
+        if self._location.current != self._location.default:
+            blob = self._bucket.blob(self._path(context, location=self._location.default))
+
+            if blob.exists():
+                return blob
 
         return None
 
@@ -156,3 +109,30 @@ class BranchPartitionedGCSIOManager(IOManager):
         raise ValueError(
             f"Unsupported object type {type(obj)!r}; expected pyarrow.Table, RecordBatch, or pandas.DataFrame."
         )
+
+    def handle_output(self, context: OutputContext, obj) -> None:
+        table = self._ensure_table(obj)
+
+        buffer = io.BytesIO()
+        pq.write_table(table, buffer)
+        buffer.seek(0)
+
+        blob = self._bucket.blob(self._path(context))
+        blob.upload_from_file(buffer, rewind=True)
+
+        context.log.info("Wrote %s rows to %s", table.num_rows, blob.name)
+
+    def load_input(self, context: InputContext):
+        blob = self._resolve(context)
+        if blob is None:
+            raise FileNotFoundError(
+                f"No object found for {context.asset_key} in branches "
+                f"{self._location.current} or {self._location.default}"
+            )
+
+        data = blob.download_as_bytes()
+        table = pq.read_table(pa.BufferReader(data))
+        
+        context.log.info("Loaded %s rows from %s", table.num_rows, blob.name)
+        
+        return table
