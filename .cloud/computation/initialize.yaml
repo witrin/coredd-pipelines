@@ -403,6 +403,7 @@ write_files:
         --network host \
         --name dagster-code-%i \
         --env-file /etc/code.env \
+        --env-file /etc/dagster/%i.env \
         $${IMAGE_REPOSITORY}:$${IMAGE_TAG} \
         dagster api grpc -h 127.0.0.1 -p $${GRPC_PORT} -f /usr/local/src/components/bootstrap.py
 
