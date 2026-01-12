@@ -24,8 +24,8 @@ For production-like tests maintain a dedicated `.env.production` file with the r
 WORKSPACE=cloud
 GRPC_HOST=<your-grpc-endpoint>
 GRPC_PORT=443
-PG_HOST=<postgres-host>
-PG_PASSWORD=<postgres-password>
+DATABASE_HOST=<postgres-host>
+DATABASE_PASSWORD=<postgres-password>
 ```
 
 Keep secret files out of version control via `.gitignore`.
@@ -108,22 +108,49 @@ terraform destroy \
   -auto-approve
 ```
 
-### Storage Layout
 
-Backups, assets, and scratch data live in the `bug-request-storage` bucket with the following structure.
+## Asset Naming Convention
+
+Assets follow a three-part naming scheme:
+
+- **Phase** — methodological step (e.g., `scope`, `extraction`, `backtracing`, `evaluation`)
+- **Entity** — domain object (e.g., `repositories`, `pull_requests`, `reviews`)
+- **Stage** — processing stage (e.g., `raw`, `intermediate`, `final`)
+
+Resulting format:
 
 ```
-gs://bug-request-storage/
-├── backups/
-│   └── databases/
-│       └── <key>/<YYYYMMDD>.sql.gz
-│
-├── assets/
-│   └── {stage}/
-│       └── {key}/({partition}/)
-│           └── {version}/
-│               ├── data/
-│               └── meta.json
-│
-└── scratch/
+<phase>_<entity>_<stage>
 ```
+
+Logical asset names use snake case with underscores, for example:
+
+```
+scope_repositories_raw
+extraction_pull_requests_raw
+```
+
+Due to a current Dagster limitation, the active branch is prepended as the first path segment of the asset key at registration time (e.g. `main/scope_repositories_raw`). The convention above describes the branchless logical name; the branch prefix is a temporary workaround.
+
+
+## Asset Storage Projection
+
+Assets are projected to GCS as versioned Parquet files.  
+The IO layer resolves the current run’s `location` and `version` tags and writes assets at:
+
+```
+gs://<bucket>/assets/<asset>/version=<version>/location=<location>/partition=<partition>/data.parquet
+```
+
+- `<asset>` is derived from the logical asset name by replacing underscores with hyphens.
+- `<location>` encodes the active branch or experiment.
+- `<partition>` is the asset’s partition key (or `default` if unpartitioned).
+
+On load, a branch-aware cache is applied:
+
+1. Determine the active `location` (current branch).
+2. Try to read the projected table for the current location.
+3. If the branch has no cached projection, load trunk if it differs.
+4. If no cached projection exists, compute and write a new one.
+
+Assets can be forced to recompute by passing a configuration with `compute=force`. In that case the cache is ignored and the asset function is always executed before writing a fresh projection.
