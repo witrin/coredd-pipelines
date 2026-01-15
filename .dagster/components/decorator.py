@@ -1,83 +1,77 @@
+import inspect
 import os
 from functools import wraps
-from typing import Optional, Sequence
+from typing import Optional
 
 import dagster as dg
 import pyarrow as pa
-import pyarrow.parquet as pq
-from google.cloud import storage
 
 from components.location import Location
+from components.io import AssetCloudStorage
 
 
 class AssetCache:
-    """Utility object for resolving the GCS blob path for a given asset."""
+    """Branch-aware cache for asset tables backed by AssetCloudStorage."""
 
     def __init__(self, context: dg.AssetExecutionContext):
         self._context = context
-
-        self._bucket = os.environ["CLOUD_BUCKET"]
-        self._project = os.environ.get("CLOUD_PROJECT")
         self._location = Location.load()
+        self._storage = AssetCloudStorage()
 
-        client = storage.Client(project=self._project)
-        self._bucket = client.bucket(self._bucket)
-
-    def _blob(self, location: str) -> storage.Blob:
-        parts: Sequence[str] = list(self._context.asset_key.path)
-
-        key = parts[-1].replace("_", "-")
-
-        version = self._context.assets_def.tags_by_key.get(
-            self._context.asset_key, {}
-        ).get("version", "none")
-
-        partition = (
-            self._context.partition_key
-            if getattr(self._context, "has_partition_key", False)
-            else "default"
+    def _try_load(self, location: str) -> Optional[pa.Table]:
+        self._context.log.info(
+            "Checking cached table for %s at location %s",
+            self._context.asset_key,
+            location,
         )
 
-        blob = (
-            f"assets/{key}/"
-            f"version={version}/"
-            f"location={location}/"
-            f"partition={partition}/"
-            "data.parquet"
+        try:
+            table = self._storage.load(context=self._context, location=location)
+        except Exception as exc:
+            self._context.log.error(
+                "Failed to load cached table for %s at %s: %r",
+                self._context.asset_key,
+                location,
+                exc,
+                exc_info=True,
+            )
+            return None
+
+        if table is None:
+            self._context.log.info(
+                "No cached table for %s at %s",
+                self._context.asset_key,
+                location,
+            )
+            return None
+
+        self._context.log.info(
+            "Cached table for %s at %s: rows=%d cols=%d",
+            self._context.asset_key,
+            location,
+            table.num_rows,
+            table.num_columns,
         )
 
-        return self._bucket.blob(blob)
+        return table
 
     def load(self) -> Optional[pa.Table]:
-        branch = self._blob(self._location.current)
-
-        if branch.exists():
-            data = branch.download_as_bytes()
-            table = pq.read_table(pa.BufferReader(data))
-            self._context.log.info(
-                "Reusing cached data from branch %s (%s)",
-                self._location.current,
-                branch.name,
-            )
+        table = self._try_load(self._location.current)
+        if table is not None:
             return table
 
         if self._location.current != self._location.default:
-            default = self._blob(self._location.default)
-            if default.exists():
-                data = default.download_as_bytes()
-                table = pq.read_table(pa.BufferReader(data))
-                self._context.log.info(
-                    "Reusing cached data from default branch %s (%s)",
-                    self._location.default,
-                    default.name,
-                )
+            table = self._try_load(self._location.default)
+
+            if table is not None:
                 return table
 
+        self._context.log.info("Cache miss for %s", self._context.asset_key)
         return None
 
 
 def asset(*asset_args, **asset_kwargs):
-    """Internal wrapper for custom dagster.asset adjustments."""
+    """Establishes a consistent physical identity for asset definitions."""
 
     def outer(fn):
         local = asset_kwargs.pop("key", None)
@@ -92,6 +86,33 @@ def asset(*asset_args, **asset_kwargs):
             full = [location, *local]
 
         full = [part for part in full if part]
+
+        signature = inspect.signature(fn)
+        inputs = dict(asset_kwargs.get("ins", {}))
+
+        for name, parameter in signature.parameters.items():
+            if name in ("context", "config"):
+                continue
+            if name in inputs:
+                continue
+
+            origin = getattr(parameter.annotation, "__origin__", None)
+
+            if parameter.kind not in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            ) and (
+                origin is dg.ResourceParam
+                or (
+                    inspect.isclass(parameter.annotation)
+                    and issubclass(parameter.annotation, dg.ConfigurableResource)
+                )
+            ):
+                continue
+
+            inputs[name] = dg.AssetIn(key=[location, name.replace("_", "-")])
+
+        asset_kwargs["ins"] = inputs
 
         @dg.asset(*asset_args, key=full, **asset_kwargs)
         @wraps(fn)
@@ -126,5 +147,38 @@ def asset(*asset_args, **asset_kwargs):
 
     if asset_args and callable(asset_args[0]) and not asset_kwargs:
         return outer(asset_args[0])
+
+    return outer
+
+
+def asset_sensor(*sensor_args, **sensor_kwargs):
+    """Establishes a consistent physical identity for sensor dependencies."""
+
+    key = sensor_kwargs.pop("asset_key", None)
+    location = Location.load().current
+
+    if key is not None:
+        if isinstance(key, dg.AssetKey):
+            parts = list(key.path)
+        elif isinstance(key, str):
+            parts = [key]
+        else:
+            parts = list(key)
+
+        parts = [p.replace("_", "-") for p in parts]
+        parts = [location, *parts]
+
+        sensor_kwargs["asset_key"] = dg.AssetKey(parts)
+
+    def outer(fn):
+        @dg.asset_sensor(*sensor_args, **sensor_kwargs)
+        @wraps(fn)
+        def wrapped(
+            context: dg.SensorEvaluationContext,
+            asset_event: dg.EventLogEntry,
+        ):
+            return fn(context, asset_event)
+
+        return wrapped
 
     return outer

@@ -11,7 +11,10 @@ dependencies = [
     "dagster-gcp==0.28.13",
     "google-cloud-bigquery",
     "google-cloud-storage",
-    "tqdm==4.67"
+    "polars==1.37.0",
+    "pyarrow==22.0.0",
+    "tqdm==4.67",
+    "PyGithub==2.8.1"
 ]
 
 [project.optional-dependencies]
