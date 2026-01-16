@@ -6,7 +6,7 @@ from .partitions import (
     scope_repository_partition,
     scope_repository_batch_partition,
     QuarterRange,
-    HashBucket,
+    Shard,
 )
 from components.infrastructure import GithubResource
 
@@ -134,7 +134,7 @@ def ingest_repository_raw(
     column = scope_repository_profile.column("name")
     repositories = [column[i].as_py() for i in range(column.length())]
 
-    bucket = HashBucket.from_key(partition)
+    bucket = Shard.from_key(partition)
     batch = [
         repository for repository in repositories if bucket.key(repository) == partition
     ]
@@ -166,7 +166,7 @@ def ingest_repository_raw(
     tags={"concurrency": "github"},
     partitions_def=scope_repository_batch_partition,
     group_name="ingest",
-    kinds={"github", "bronze"},
+    kinds={"github", "silver"},
 )
 def ingest_repository_profile(
     context: dg.AssetExecutionContext,
@@ -186,13 +186,11 @@ def ingest_repository_profile(
         raw = json.loads(row["payload"]) if row["payload"] is not None else {}
 
         profile = {
-            "repository": row["name"],
+            "name": row["name"],
             "creation": raw.get("created_at"),
             "language": raw.get("language"),
             "license": (
-                (raw.get("license") or {}).get("spdx_id")
-                if raw.get("license")
-                else None
+                (raw.get("license") or {}).get("key") if raw.get("license") else None
             ),
             "changes": None,
             "merges": None,

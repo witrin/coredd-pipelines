@@ -1,7 +1,7 @@
 import hashlib
 from components.decorator import asset_sensor
 from components.io import AssetCloudStorage, CloudCache
-from .partitions import HashBucket
+from .partitions import Shard
 
 import dagster as dg
 
@@ -72,11 +72,10 @@ def scope_repository_batch_sensor(
     # ]
     names = sorted(table["name"].to_pylist())
     batches = set(
-        HashBucket(
+        Shard.fixed_size(
             size=50,
-            items=len(names),
-            prefix="batch",
-            universe=HashBucket.to_universe(names),
+            population=len(names),
+            space=Shard.to_space(names),
         ).keys()
     )
 

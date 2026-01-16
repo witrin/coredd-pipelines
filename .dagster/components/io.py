@@ -99,25 +99,24 @@ class AssetCloudStorage:
         ),
         event: dg.EventLogEntry | None,
     ) -> str:
+        partition = None
+
         if event is not None and isinstance(context, dg.SensorEvaluationContext):
-            return event.asset_materialization.partition or "default"
+            partition = event.asset_materialization.partition
 
-        if isinstance(context, dg.InputContext):
-            if context.has_asset_partitions:
-                return context.asset_partition_key or "default"
+        if isinstance(context, dg.InputContext) and context.has_asset_partitions:
+            partition = context.asset_partition_key
+
+        if isinstance(context, dg.OutputContext) and context.has_partition_key:
+            partition = context.partition_key
+
+        if isinstance(context, dg.AssetExecutionContext) and context.has_partition_key:
+            partition = context.partition_key
+
+        if partition is None:
             return "default"
-
-        if isinstance(context, dg.OutputContext):
-            if context.has_partition_key:
-                return context.partition_key or "default"
-            return "default"
-
-        if isinstance(context, dg.AssetExecutionContext):
-            if context.has_partition_key:
-                return context.partition_key or "default"
-            return "default"
-
-        return "default"
+    
+        return partition.replace("|",";").replace("/","-").replace("_","-")
 
     def _version_from_context(
         self,
