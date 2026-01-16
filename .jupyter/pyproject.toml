@@ -1,0 +1,19 @@
+[project]
+name = "benchmark-notebook"
+version = "0.1.0"
+description = "Notebook helpers for the benchmark project."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "google-cloud-storage",
+    "pyarrow",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["benchmark_notebook*"]
+namespaces = true
