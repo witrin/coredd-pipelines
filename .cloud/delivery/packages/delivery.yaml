@@ -1,0 +1,30 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+substitutions:
+  _REGION: europe-west1
+  _REPOSITORY: benchmark
+steps:
+  - id: build
+    name: python:3.11-slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        python -m pip install --upgrade pip
+        python -m pip install build
+        python -m build .jupyter
+  - id: publish
+    name: python:3.11-slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        python -m pip install --upgrade pip
+        python -m pip install twine keyring keyrings.google-artifactregistry-auth
+        python -m twine upload \
+          --repository-url "https://${_REGION}-python.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/" \
+          /workspace/.jupyter/dist/*
