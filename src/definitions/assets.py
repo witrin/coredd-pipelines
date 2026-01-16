@@ -12,6 +12,7 @@ from components.infrastructure import GithubResource
 
 import pyarrow as pa
 import dagster as dg
+from github.GithubException import UnknownObjectException
 
 
 class BigQueryQueryConfig(dg.Config):
@@ -21,7 +22,11 @@ class BigQueryQueryConfig(dg.Config):
     location: str | None = None
 
 
-@asset(metadata={"version": "1.0.0"})
+@asset(
+    metadata={"version": "1.0.0"},
+    group_name="scope",
+    kinds={"bigquery", "bronze"},
+)
 def scope_repository_candidate(
     context: dg.AssetExecutionContext, config: BigQueryQueryConfig
 ) -> pa.Table:
@@ -64,7 +69,11 @@ def scope_repository_candidate(
     return table
 
 
-@asset(metadata={"version": "1.0.0"})
+@asset(
+    metadata={"version": "1.0.0"},
+    group_name="scope",
+    kinds={"bigquery", "bronze"},
+)
 def scope_repository_profile(
     context: dg.AssetExecutionContext,
     scope_repository_candidate: pa.Table,
@@ -110,6 +119,8 @@ def scope_repository_profile(
     metadata={"version": "1.0.0"},
     tags={"concurrency": "github"},
     partitions_def=scope_repository_batch_partition,
+    group_name="ingest",
+    kinds={"github", "bronze"},
 )
 def ingest_repository_raw(
     context: dg.AssetExecutionContext,
@@ -129,17 +140,18 @@ def ingest_repository_raw(
     ]
 
     payloads = []
+    statuses = []
 
     for repository in batch:
         context.log.info("Ingest repository %s", repository)
-        payloads.append(json.dumps(client.get_repo(repository).raw_data))
+        try:
+            payloads.append(json.dumps(client.get_repo(repository).raw_data))
+            statuses.append("present")
+        except UnknownObjectException:
+            payloads.append(None)
+            statuses.append("absent")
 
-    table = pa.table(
-        {
-            "name": batch,
-            "payload": payloads,
-        }
-    )
+    table = pa.table({"name": batch, "payload": payloads, "status": statuses})
 
     context.log.info(
         "Ingestion completed for %d repositories in %s.",
@@ -153,6 +165,8 @@ def ingest_repository_raw(
     metadata={"version": "1.0.0"},
     tags={"concurrency": "github"},
     partitions_def=scope_repository_batch_partition,
+    group_name="ingest",
+    kinds={"github", "bronze"},
 )
 def ingest_repository_profile(
     context: dg.AssetExecutionContext,
@@ -162,78 +176,67 @@ def ingest_repository_profile(
     """Repository profiles from raw payloads and GraphQL counts."""
     client = github.client()
 
-    column = ingest_repository_raw.column("repository")
+    profiles: list[dict[str, object]] = []
 
-    repositories: list[str] = []
-    names: list[str | None] = []
-    creations: list[str | None] = []
-    languages: list[str | None] = []
-    licenses: list[str | None] = []
-    changes: list[int | None] = []
-    merges: list[int | None] = []
-    issues: list[int | None] = []
-
-    for i in range(column.length()):
-        repository = column[i].as_py()
-        raw = json.loads(ingest_repository_raw.column("payload")[i].as_py())
-
-        repo_name = raw.get("name")
-        creation = raw.get("created_at")
-        language = raw.get("language")
-        license_spdx = (
-            (raw.get("license") or {}).get("spdx_id") if raw.get("license") else None
-        )
-
-        owner, name = repository.split("/", 1)
-
-        query = """
-        query RepoIngestionProfile($owner: String!, $name: String!) {
-          repository(owner: $owner, name: $name) {
-            issues(states: [OPEN, CLOSED]) { totalCount }
-            pullRequests(states: [OPEN, CLOSED, MERGED]) { totalCount }
-            merged: pullRequests(states: [MERGED]) { totalCount }
-          }
+    for i in range(ingest_repository_raw.num_rows):
+        row = {
+            name: ingest_repository_raw[name][i].as_py()
+            for name in ingest_repository_raw.schema.names
         }
-        """
+        raw = json.loads(row["payload"]) if row["payload"] is not None else {}
 
-        result = client.graphql(
-            query,
-            {"owner": owner, "name": name},
-        )
-        counts = result["repository"]
-
-        repositories.append(repository)
-        names.append(repo_name)
-        creations.append(creation)
-        languages.append(language)
-        licenses.append(license_spdx)
-        changes.append(counts["pullRequests"]["totalCount"])
-        merges.append(counts["merged"]["totalCount"])
-        issues.append(counts["issues"]["totalCount"])
-
-        context.log.info(
-            "Profile ingest for %s (PR=%d merged=%d issues=%d)",
-            repository,
-            changes[-1],
-            merges[-1],
-            issues[-1],
-        )
-
-    table = pa.table(
-        {
-            "repository": repositories,
-            "name": names,
-            "creation": creations,
-            "language": languages,
-            "license": licenses,
-            "changes": changes,
-            "merges": merges,
-            "issues": issues,
+        profile = {
+            "repository": row["name"],
+            "creation": raw.get("created_at"),
+            "language": raw.get("language"),
+            "license": (
+                (raw.get("license") or {}).get("spdx_id")
+                if raw.get("license")
+                else None
+            ),
+            "changes": None,
+            "merges": None,
+            "issues": None,
+            "status": "absent",
         }
-    )
+
+        owner, name = row["name"].split("/", 1)
+
+        if row["status"] == "present":
+            query = """
+                query RepositoryProfile($owner: String!, $name: String!) {
+                    repository(owner: $owner, name: $name) {
+                        issues(states: [OPEN, CLOSED]) { totalCount }
+                        pullRequests(states: [OPEN, CLOSED, MERGED]) { totalCount }
+                        merged: pullRequests(states: [MERGED]) { totalCount }
+                    }
+                }
+            """
+
+            try:
+                response = client._Github__requester.graphql_query(
+                    query,
+                    {"owner": owner, "name": name},
+                )
+                result = response[1]["data"]["repository"]
+
+                profile |= {
+                    "changes": result["pullRequests"]["totalCount"],
+                    "merges": result["merged"]["totalCount"],
+                    "issues": result["issues"]["totalCount"],
+                    "status": "present",
+                }
+            except UnknownObjectException:
+                pass
+
+            profiles.append(profile)
+
+            context.log.info("Ingest profile of %s.", name)
+
+    table = pa.Table.from_pylist(profiles)
 
     context.log.info(
-        "Profile ingest completed for %d repositories in batch %s.",
+        "Profile ingestion completed for %d repositories in batch %s.",
         table.num_rows,
         context.partition_key,
     )
@@ -243,6 +246,8 @@ def ingest_repository_profile(
 @asset(
     metadata={"version": "1.0.0"},
     partitions_def=scope_repository_partition,
+    group_name="ingest",
+    kinds={"github", "bronze"},
 )
 def ingest_pull_requests_raw(
     context: dg.AssetExecutionContext,

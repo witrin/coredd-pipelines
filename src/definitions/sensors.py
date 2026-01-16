@@ -1,11 +1,14 @@
+import hashlib
 from components.decorator import asset_sensor
-from components.io import AssetCloudStorage
+from components.io import AssetCloudStorage, CloudCache
 from .partitions import HashBucket
 
 import dagster as dg
 
 
-@asset_sensor(asset_key="scope_repository_profile")
+@asset_sensor(
+    asset_key="scope_repository_profile",
+)
 def scope_repository_partition_sensor(
     context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
 ):
@@ -47,7 +50,9 @@ def scope_repository_partition_sensor(
     return None
 
 
-@asset_sensor(asset_key="scope_repository_profile")
+@asset_sensor(
+    asset_key="scope_repository_profile",
+)
 def scope_repository_batch_sensor(
     context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
 ):
@@ -60,8 +65,20 @@ def scope_repository_batch_sensor(
     if table is None or table.num_rows == 0:
         return None
 
+    # cache = CloudCache()
+    # names = [
+    #     name for name in sorted(table["name"].to_pylist())
+    #     if not cache.has(f"/cache/asset/{hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]}")
+    # ]
     names = sorted(table["name"].to_pylist())
-    batches = HashBucket(size=100, items=len(names)).keys()
+    batches = set(
+        HashBucket(
+            size=50,
+            items=len(names),
+            prefix="batch",
+            universe=HashBucket.to_universe(names),
+        ).keys()
+    )
 
     existing = set(instance.get_dynamic_partitions("scope_repository_batch"))
 

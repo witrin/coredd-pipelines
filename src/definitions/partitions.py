@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import hashlib
-from typing import List
+from typing import Any, List
 
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -12,7 +12,7 @@ import dagster as dg
 
 
 class HashBucket:
-    def __init__(self, size: int, items: int):
+    def __init__(self, size: int, items: int, universe: str, prefix: str):
         if size <= 0:
             raise ValueError("Size must be positive")
         if items <= 0:
@@ -20,29 +20,35 @@ class HashBucket:
 
         self.size = size
         self.items = items
+        self.universe = universe
+        self.prefix = prefix
         self.buckets = max(1, math.ceil(items / size))
 
-    def _idx(self, name: str) -> int:
+    def _index(self, name: str) -> int:
         hash = hashlib.sha256(name.encode("utf-8")).digest()
         return int.from_bytes(hash, "big") % self.buckets
 
     def _key(self, idx: int) -> str:
-        hash = hashlib.sha256(str(idx).encode("utf-8")).hexdigest()[:4]
-        return f"batch-{self.size}:{self.items}-{hash}"
+        bucket = hashlib.sha256(str(idx).encode("utf-8")).hexdigest()[:4]
+
+        return f"batch-{self.size}:{self.items}:{self.universe}-{bucket}"
 
     @classmethod
     def from_key(cls, key: str) -> HashBucket:
-        prefix, _ = key.split("-", 1)
+        prefix, parameter, _ = key.split("-", 2)
+        size, items, universe = parameter.split(":", 2)
 
-        if not prefix.startswith("batch-"):
-            raise ValueError(f"Invalid batch key {key}")
+        return cls(size=int(size), items=int(items), universe=universe, prefix=prefix)
 
-        size, items = prefix[len("batch-"):].split(":", 1)
+    @classmethod
+    def to_universe(cls, items: List[Any]) -> str:
+        items = [repr(item) for item in items]
+        items.sort()
 
-        return cls(size=int(size), items=int(items))
+        return hashlib.sha256("".join(items).encode("utf-8")).hexdigest()[:8]
 
     def key(self, name: str) -> str:
-        return self._key(self._idx(name))
+        return self._key(self._index(name))
 
     def keys(self) -> List[str]:
         return [self._key(i) for i in range(self.buckets)]

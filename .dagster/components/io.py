@@ -29,19 +29,44 @@ Context = Union[
 ]
 
 
+class CloudCache:
+    def __init__(
+        self,
+        bucket: str | None = None,
+        project: str | None = None,
+    ) -> None:
+        client = storage.Client(project=project or os.environ.get("CLOUD_PROJECT"))
+
+        self._bucket = client.bucket(bucket or os.environ["CLOUD_BUCKET"])
+
+    def set(self, path: str, meta: dict | None = None) -> None:
+        blob = self._bucket.blob(path)
+        if meta:
+            blob.metadata = meta
+        blob.upload_from_string(b"", content_type="application/octet-stream")
+
+    def get(self, path: str) -> dict | None:
+        blob = self._bucket.get_blob(path)
+        if blob is None:
+            return None
+        return blob.metadata or {}
+
+    def has(self, path: str) -> bool:
+        blob = self._bucket.blob(path)
+        return blob.exists()
+
+
 class AssetCloudStorage:
     """Provides load and store access for asset tables on cloud storage."""
 
     def __init__(
         self,
-        bucket: Optional[str] = None,
-        project: Optional[str] = None,
+        bucket: str | None = None,
+        project: str | None = None,
     ) -> None:
-        self._bucket_name = bucket or os.environ["CLOUD_BUCKET"]
-        self._project = project or os.environ.get("CLOUD_PROJECT")
+        client = storage.Client(project=project or os.environ.get("CLOUD_PROJECT"))
 
-        client = storage.Client(project=self._project)
-        self._bucket = client.bucket(self._bucket_name)
+        self._bucket = client.bucket(bucket or os.environ["CLOUD_BUCKET"])
 
     def _asset_key(
         self,
@@ -74,11 +99,23 @@ class AssetCloudStorage:
         ),
         event: dg.EventLogEntry | None,
     ) -> str:
-        if event is not None:
+        if event is not None and isinstance(context, dg.SensorEvaluationContext):
             return event.asset_materialization.partition or "default"
 
-        if hasattr(context, "has_partition_key") and context.has_partition_key:
-            return context.partition_key or "default"  # type: ignore[no-any-return]
+        if isinstance(context, dg.InputContext):
+            if context.has_asset_partitions:
+                return context.asset_partition_key or "default"
+            return "default"
+
+        if isinstance(context, dg.OutputContext):
+            if context.has_partition_key:
+                return context.partition_key or "default"
+            return "default"
+
+        if isinstance(context, dg.AssetExecutionContext):
+            if context.has_partition_key:
+                return context.partition_key or "default"
+            return "default"
 
         return "default"
 
@@ -98,7 +135,7 @@ class AssetCloudStorage:
 
             if meta is not None and "version" in meta:
                 return meta.get("version")
-            
+
         definitions = getattr(context, "assets_def", None)
 
         if definitions is not None:
@@ -158,7 +195,7 @@ class AssetCloudStorage:
         self,
         asset_key: dg.AssetKey,
         version: str,
-        location: Optional[str],
+        location: str | None,
         partition: str,
     ) -> str:
         path = list(asset_key.path)
@@ -196,7 +233,7 @@ class AssetCloudStorage:
             | dg.SensorEvaluationContext
         ),
         event: Optional[dg.EventLogEntry] = None,
-        location: Optional[str] = None,
+        location: str | None = None,
     ) -> Optional[pa.Table]:
         """Loads the table for the given context, optionally scoped by a materialization event."""
 
@@ -204,14 +241,14 @@ class AssetCloudStorage:
         partition = self._partition(context=context, event=event)
         version = self._version(context=context, event=event, asset_key=asset_key)
 
-        blob_name = self._blob_name(
+        blob = self._blob_name(
             asset_key=asset_key,
             version=version,
             location=location,
             partition=partition,
         )
 
-        return self._load_parquet(blob_name)
+        return self._load_parquet(blob)
 
     def store(
         self,
@@ -220,7 +257,7 @@ class AssetCloudStorage:
         ),
         table: pa.Table,
         event: Optional[dg.EventLogEntry] = None,
-        location: Optional[str] = None,
+        location: str | None = None,
     ) -> None:
         """Stores the table for the given context, optionally scoped by a materialization event."""
 
@@ -228,14 +265,28 @@ class AssetCloudStorage:
         partition = self._partition(context=context, event=event)
         version = self._version(context=context, event=event, asset_key=asset_key)
 
-        blob_name = self._blob_name(
+        blob = self._blob_name(
             asset_key=asset_key,
             version=version,
             location=location,
             partition=partition,
         )
 
-        self._store_parquet(blob_name, table)
+        self._store_parquet(blob, table)
+
+        context.add_output_metadata(
+            {
+                "console": dg.MetadataValue.url(
+                    (
+                        f"https://console.cloud.google.com/storage/browser/_details/"
+                        f"{self._bucket.name}/{blob}"
+                    )
+                ),
+                "storage": dg.MetadataValue.text(
+                    f"gs://{self._bucket.name}/{blob}"
+                ),
+            }
+        )
 
 
 class CloudStorageManager(dg.IOManager):
