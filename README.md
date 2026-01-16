@@ -1,6 +1,6 @@
-# Bug Reports
+# Bug Request Benchmark
 
-Containerized Dagster environment for testing the bug-reporting pipelines across development and production-like scenarios.
+Containerized environment of the benchmark pipelines across development and production scenarios.
 
 ## Prerequisites
 
