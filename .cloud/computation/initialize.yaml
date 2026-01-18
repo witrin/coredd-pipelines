@@ -9,6 +9,34 @@ packages:
 
 write_files:
 
+  - path: /etc/google-cloud-ops-agent/config.yaml
+    permissions: '0644'
+    owner: root:root
+    content: |
+      logging:
+        receivers:
+          journald:
+            type: journald
+        processors:
+          only_json_lines:
+            type: include_logs
+            match: 'message=~"^\\s*\\{"'
+          non_json_lines:
+            type: exclude_logs
+            match: 'message=~"^\\s*\\{"'
+          parse_json_message:
+            type: parse_json
+            field: message
+            on_error: pass_through
+        service:
+          pipelines:
+            json_lines:
+              receivers: [journald]
+              processors: [only_json_lines, parse_json_message]
+            text_lines:
+              receivers: [journald]
+              processors: [non_json_lines]
+
   - path: /root/.docker/config.json
     permissions: '0600'
     owner: root:root
@@ -718,6 +746,16 @@ write_files:
       discovery.type=single-node
       cluster.routing.allocation.disk.threshold_enabled=false
       xpack.security.enabled=false
+
+runcmd:
+  - |
+      if ! systemctl is-active --quiet google-cloud-ops-agent; then
+        curl -sS https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh \
+          -o /tmp/add-google-cloud-ops-agent-repo.sh
+        bash /tmp/add-google-cloud-ops-agent-repo.sh --also-install
+      fi
+  - |
+      systemctl restart google-cloud-ops-agent
 
   - path: /etc/release.env
     permissions: '0644'

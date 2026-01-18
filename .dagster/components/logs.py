@@ -11,6 +11,8 @@ import json
 import logging
 import os
 import sys
+import io
+import warnings
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -69,6 +71,13 @@ class LoggingBootstrap:
                 payload[key] = value
 
             return json.dumps(payload, ensure_ascii=True)
+        
+    class _NullStream(io.TextIOBase):
+        def write(self, s: str) -> int:
+            return len(s)
+
+        def flush(self) -> None:
+            return
 
     def __init__(self) -> None:
         self._skip_setup = os.getenv("SKIP_DEFAULT_LOGGING_SETUP") == "1"
@@ -78,6 +87,7 @@ class LoggingBootstrap:
         self._emit_json = os.getenv("LOG_FORMAT", "json").lower() == "json"
         self._text_format = os.getenv("LOG_TEXT_FORMAT", "%(asctime)s %(levelname)s [%(name)s] %(message)s")
         self._text_datefmt = os.getenv("LOG_DATE_FORMAT", "%Y-%m-%dT%H:%M:%S%z")
+        self._raw_stdio = os.getenv("LOG_RAW_STDIO", "0") == "1"
 
     def configure(self) -> None:
         if self._skip_setup:
@@ -104,6 +114,13 @@ class LoggingBootstrap:
 
         if not self._allow_basic:
             self._patch_basic_config()
+
+        logging.captureWarnings(True)
+        warnings.filterwarnings("default")
+
+        if not self._raw_stdio:
+            sys.stdout = self._NullStream()
+            sys.stderr = self._NullStream()
 
     def _build_formatter(self) -> logging.Formatter:
         if self._emit_json:
