@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import traceback
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
@@ -67,7 +68,7 @@ class JsonlExceptionHook:
             "stack": traceback.format_exception(exc_type, exc, tb),
         }
 
-    def handle(
+    def _handle(
         self,
         exc_type: Type[BaseException],
         exc: BaseException,
@@ -82,11 +83,25 @@ class JsonlExceptionHook:
         if self._chain_previous and self._previous_hook is not None:
             self._previous_hook(exc_type, exc, tb)
 
+    def _handle_thread_exception(self, args: threading.ExceptHookArgs) -> None:
+        self._handle(args.exc_type, args.exc_value, args.exc_traceback)
+
+    def _handle_unraisable(self, unraisable: sys.UnraisableHookArgs) -> None:
+        if unraisable.exc_value is None:
+            return
+        self._handle(
+            type(unraisable.exc_value),
+            unraisable.exc_value,
+            unraisable.exc_traceback,
+        )
+
     def install(self) -> None:
         if self._installed:
             return
         self._previous_hook = sys.excepthook
-        sys.excepthook = self.handle
+        sys.excepthook = self._handle
+        threading.excepthook = self._handle_thread_exception  # type: ignore[assignment]
+        sys.unraisablehook = self._handle_unraisable  # type: ignore[assignment]
         self._installed = True
 
 

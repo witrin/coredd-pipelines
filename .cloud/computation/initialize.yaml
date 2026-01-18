@@ -9,6 +9,38 @@ packages:
 
 write_files:
 
+  - path: /etc/google-cloud-ops-agent/config.yaml
+    permissions: '0644'
+    owner: root:root
+    content: |
+      logging:
+        receivers:
+          orchestrator:
+            type: systemd_journald
+        processors:
+          orchestrator:
+            type: exclude_logs
+            match_any:
+              - 'NOT jsonPayload._SYSTEMD_UNIT:"dagster-"
+                AND NOT jsonPayload._SYSTEMD_UNIT="release.service"
+                AND NOT jsonPayload._SYSTEMD_UNIT="dagster-branches.service"
+                AND NOT jsonPayload._SYSTEMD_UNIT="dagster-branches.timer"'
+          json:
+            type: parse_json
+            field: MESSAGE
+          severity:
+            type: modify_fields
+            fields:
+              severity:
+                copy_from: jsonPayload.severity
+        service:
+          pipelines:
+            default_pipeline:
+              receivers: []
+            orchestrator:
+              receivers: [orchestrator]
+              processors: [orchestrator, json, severity]
+
   - path: /root/.docker/config.json
     permissions: '0600'
     owner: root:root
@@ -219,11 +251,12 @@ write_files:
         } >"$tmp"
 
         if [[ ! -f "$WORKSPACE_FILE" ]] || ! cmp -s "$tmp" "$WORKSPACE_FILE"; then
-          install -m 644 "$tmp" "$WORKSPACE_FILE"
+          cat "$tmp" > "$WORKSPACE_FILE"
+          chmod 644 "$WORKSPACE_FILE"
           systemctl restart dagster-interface.service
-        else
-          rm -f "$tmp"
         fi
+        
+        rm -f "$tmp"
       }
 
       images_json=$(
@@ -726,6 +759,14 @@ write_files:
       IMAGE_TAG=${default_image_tag}
 
 runcmd:
+  - |
+      if ! systemctl is-active --quiet google-cloud-ops-agent; then
+        curl -sS https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh \
+          -o /tmp/add-google-cloud-ops-agent-repo.sh
+        bash /tmp/add-google-cloud-ops-agent-repo.sh
+        apt -y -o Dpkg::Options::="--force-confold" install google-cloud-ops-agent
+      fi
+  - [ systemctl, restart, google-cloud-ops-agent ]
   - [ systemctl, daemon-reload ]
   - [ systemctl, enable, --now, docker.service ]
   - [ systemctl, enable, --now, dagster-code@release.service ]
