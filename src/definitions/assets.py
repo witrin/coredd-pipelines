@@ -25,7 +25,7 @@ class BigQueryQueryConfig(dg.Config):
 @asset(
     metadata={"version": "1.0.0"},
     group_name="scope",
-    kinds={"bigquery", "bronze"},
+    kinds={"bigquery"},
 )
 def scope_repository_candidate(
     context: dg.AssetExecutionContext, config: BigQueryQueryConfig
@@ -72,7 +72,6 @@ def scope_repository_candidate(
 @asset(
     metadata={"version": "1.0.0"},
     group_name="scope",
-    kinds={"bigquery", "bronze"},
 )
 def scope_repository_profile(
     context: dg.AssetExecutionContext,
@@ -117,10 +116,10 @@ def scope_repository_profile(
 
 @asset(
     metadata={"version": "1.0.0"},
-    tags={"concurrency": "github"},
     partitions_def=scope_repository_batch_partition,
     group_name="ingest",
-    kinds={"github", "bronze"},
+    kinds={"github"},
+    pool="github",
 )
 def ingest_repository_raw(
     context: dg.AssetExecutionContext,
@@ -166,7 +165,8 @@ def ingest_repository_raw(
     tags={"concurrency": "github"},
     partitions_def=scope_repository_batch_partition,
     group_name="ingest",
-    kinds={"github", "silver"},
+    kinds={"github"},
+    pool="github",
 )
 def ingest_repository_profile(
     context: dg.AssetExecutionContext,
@@ -245,7 +245,8 @@ def ingest_repository_profile(
     metadata={"version": "1.0.0"},
     partitions_def=scope_repository_partition,
     group_name="ingest",
-    kinds={"github", "bronze"},
+    kinds={"github"},
+    pool="github",
 )
 def ingest_pull_requests_raw(
     context: dg.AssetExecutionContext,
