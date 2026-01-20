@@ -1,0 +1,7 @@
+Package: dagster-cloud
+Version: __VERSION__
+Section: utils
+Priority: optional
+Architecture: all
+Maintainer: bug-request
+Description: Dagster services for GCP compute hosts

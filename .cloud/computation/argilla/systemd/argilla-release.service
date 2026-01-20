@@ -1,0 +1,11 @@
+[Unit]
+Description=Restart Argilla containers when tag changes
+After=docker.service
+# Unit-Version: ${unit_version}
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart \
+  argilla-elastisearch.service \
+  argilla-redis.service \
+  argilla-server.service

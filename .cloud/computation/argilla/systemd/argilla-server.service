@@ -1,0 +1,26 @@
+[Unit]
+Description=Argilla data labeling container
+After=argilla-elastisearch.service argilla-redis.service docker.service
+Requires=argilla-elastisearch.service argilla-redis.service docker.service
+# Unit-Version: ${unit_version}
+
+[Service]
+Type=simple
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=600
+EnvironmentFile=-/etc/argilla/release.env
+ExecStartPre=-/usr/bin/docker rm -f argilla-server
+ExecStartPre=/bin/sh -c "docker image ls ${IMAGE_REPOSITORY} --format '{{.Repository}}:{{.Tag}}' | grep -v ':${IMAGE_TAG}$' | grep -v ':<none>$' | xargs -r docker image rm"
+ExecStartPre=/usr/bin/docker pull ${IMAGE_REPOSITORY}:${IMAGE_TAG}
+ExecStart=/usr/bin/docker run \
+  --rm \
+  --network host \
+  --name argilla-server \
+  --env-file /etc/argilla.env \
+  -v /etc/argilla/oauth.yml:/etc/argilla/oauth.yml:ro \
+  ${IMAGE_REPOSITORY}:${IMAGE_TAG}
+
+[Install]
+WantedBy=multi-user.target

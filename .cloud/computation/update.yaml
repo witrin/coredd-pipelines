@@ -1,5 +1,5 @@
 name: projects/$PROJECT/guestPolicies/images
-description: Update image tag
+description: Update image tag and install packages
 assignment:
   groupLabels:
     - labels:
@@ -12,9 +12,75 @@ recipes:
       - scriptRun:
           interpreter: SHELL
           script: |
+            if [ -f /etc/dagster/release.env ]; then
+              if grep -q '^IMAGE_TAG=' /etc/dagster/release.env; then
+                sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${IMAGE_TAG}/" /etc/dagster/release.env
+              else
+                printf 'IMAGE_TAG=%s\n' "${IMAGE_TAG}" >>/etc/dagster/release.env
+              fi
+            else
+              printf 'IMAGE_TAG=%s\n' "${IMAGE_TAG}" >/etc/dagster/release.env
+            fi
+            if [ -f /etc/argilla/release.env ]; then
+              if grep -q '^IMAGE_TAG=' /etc/argilla/release.env; then
+                sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${IMAGE_TAG}/" /etc/argilla/release.env
+              else
+                printf 'IMAGE_TAG=%s\n' "${IMAGE_TAG}" >>/etc/argilla/release.env
+              fi
+            else
+              printf 'IMAGE_TAG=%s\n' "${IMAGE_TAG}" >/etc/argilla/release.env
+            fi
             printf 'IMAGE_TAG=%s\n' "${IMAGE_TAG}" >/etc/release.env
     updateSteps:
       - scriptRun:
           interpreter: SHELL
           script: |
+            if [ -f /etc/dagster/release.env ]; then
+              if grep -q '^IMAGE_TAG=' /etc/dagster/release.env; then
+                sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${IMAGE_TAG}/" /etc/dagster/release.env
+              else
+                printf 'IMAGE_TAG=%s\n' "${IMAGE_TAG}" >>/etc/dagster/release.env
+              fi
+            else
+              printf 'IMAGE_TAG=%s\n' "${IMAGE_TAG}" >/etc/dagster/release.env
+            fi
+            if [ -f /etc/argilla/release.env ]; then
+              if grep -q '^IMAGE_TAG=' /etc/argilla/release.env; then
+                sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${IMAGE_TAG}/" /etc/argilla/release.env
+              else
+                printf 'IMAGE_TAG=%s\n' "${IMAGE_TAG}" >>/etc/argilla/release.env
+              fi
+            else
+              printf 'IMAGE_TAG=%s\n' "${IMAGE_TAG}" >/etc/argilla/release.env
+            fi
             printf 'IMAGE_TAG=%s\n' "${IMAGE_TAG}" >/etc/release.env
+  - name: cloud-packages
+    version: "${POLICY_VERSION}"
+    desiredState: INSTALLED
+    installSteps:
+      - scriptRun:
+          interpreter: SHELL
+          script: |
+            set -euo pipefail
+
+            list_file="/etc/apt/sources.list.d/${PACKAGES}.list"
+            if [[ ! -f "$list_file" ]]; then
+              gcloud artifacts print-settings apt \
+                --project="${PROJECT}" \
+                --location="${REGION}" \
+                --repository="${PACKAGES}" \
+                --quiet \
+                | sed -e 's/^sudo //g' -e 's/^sudo -E //g' \
+                | /bin/sh
+            fi
+
+            apt-get update -y
+            apt-get install -y dagster-cloud argilla-cloud
+    updateSteps:
+      - scriptRun:
+          interpreter: SHELL
+          script: |
+            set -euo pipefail
+
+            apt-get update -y
+            apt-get install -y dagster-cloud argilla-cloud

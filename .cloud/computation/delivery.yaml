@@ -2,7 +2,8 @@ options:
   logging: CLOUD_LOGGING_ONLY
 substitutions:
   _REGION: europe-west1
-  _REPOSITORY: containers
+  _IMAGES: containers
+  _PACKAGES: apt
   _TAG: $SHORT_SHA
   _ZONE: europe-west1-b
 steps:
@@ -15,13 +16,13 @@ steps:
         set -euo pipefail
 
         docker build --target pipelines \
-          --tag ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/pipelines:${_TAG} \
-          --tag ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/pipelines:latest \
+          --tag ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_IMAGES}/pipelines:${_TAG} \
+          --tag ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_IMAGES}/pipelines:latest \
           .
 
         docker build --target evaluation \
-          --tag ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/evaluation:${_TAG} \
-          --tag ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/evaluation:latest \
+          --tag ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_IMAGES}/evaluation:${_TAG} \
+          --tag ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_IMAGES}/evaluation:latest \
           .
   - id: push
     name: gcr.io/cloud-builders/docker
@@ -30,10 +31,79 @@ steps:
       - -c
       - |
         set -euo pipefail
-        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/pipelines:${_TAG}
-        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/pipelines:latest
-        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/evaluation:${_TAG}
-        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/evaluation:latest
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_IMAGES}/pipelines:${_TAG}
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_IMAGES}/pipelines:latest
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_IMAGES}/evaluation:${_TAG}
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_IMAGES}/evaluation:latest
+  - id: package
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        if ! command -v dpkg-deb >/dev/null 2>&1 || ! command -v envsubst >/dev/null 2>&1; then
+          apt-get update -y
+          apt-get install -y dpkg-dev gettext-base
+        fi
+
+        version="$(date -u +%Y%m%d%H%M%S)"
+        export unit_version="$version"
+        package_root="/workspace/dagster-cloud"
+
+        rm -rf "$package_root"
+        mkdir -p "$package_root/DEBIAN" "$package_root/usr/local/bin" "$package_root/lib/systemd/system"
+
+        cp -R .cloud/computation/dagster/package/DEBIAN/* "$package_root/DEBIAN/"
+        sed -i "s/__VERSION__/$version/" "$package_root/DEBIAN/control"
+
+        systemd_tmp="/workspace/dagster-cloud-systemd"
+        rm -rf "$systemd_tmp"
+        mkdir -p "$systemd_tmp"
+
+        for unit in .cloud/computation/dagster/systemd/*; do
+          envsubst '${unit_version}' < "$unit" > "$systemd_tmp/$(basename "$unit")"
+        done
+
+        install -m 0755 .cloud/computation/dagster/synchronize-code.sh "$package_root/usr/local/bin/dagster-locations-synchronize"
+        install -m 0644 "$systemd_tmp"/*.service "$package_root/lib/systemd/system/"
+        install -m 0644 "$systemd_tmp"/*.path "$package_root/lib/systemd/system/"
+        install -m 0644 "$systemd_tmp"/*.timer "$package_root/lib/systemd/system/"
+
+        dpkg-deb --build "$package_root" "/workspace/dagster-cloud_${version}_all.deb"
+
+        gcloud artifacts apt upload \
+          --project="${PROJECT_ID}" \
+          --location="${_REGION}" \
+          --repository="${_PACKAGES}" \
+          --source="/workspace/dagster-cloud_${version}_all.deb"
+
+        argilla_root="/workspace/argilla-cloud"
+        rm -rf "$argilla_root"
+        mkdir -p "$argilla_root/DEBIAN" "$argilla_root/lib/systemd/system"
+
+        cp -R .cloud/computation/argilla/package/DEBIAN/* "$argilla_root/DEBIAN/"
+        sed -i "s/__VERSION__/$version/" "$argilla_root/DEBIAN/control"
+
+        argilla_systemd_tmp="/workspace/argilla-cloud-systemd"
+        rm -rf "$argilla_systemd_tmp"
+        mkdir -p "$argilla_systemd_tmp"
+
+        for unit in .cloud/computation/argilla/systemd/*; do
+          envsubst '${unit_version}' < "$unit" > "$argilla_systemd_tmp/$(basename "$unit")"
+        done
+
+        install -m 0644 "$argilla_systemd_tmp"/*.service "$argilla_root/lib/systemd/system/"
+        install -m 0644 "$argilla_systemd_tmp"/*.path "$argilla_root/lib/systemd/system/"
+
+        dpkg-deb --build "$argilla_root" "/workspace/argilla-cloud_${version}_all.deb"
+
+        gcloud artifacts apt upload \
+          --project="${PROJECT_ID}" \
+          --location="${_REGION}" \
+          --repository="${_PACKAGES}" \
+          --source="/workspace/argilla-cloud_${version}_all.deb"
   - id: deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: bash
@@ -43,6 +113,9 @@ steps:
         set -euo pipefail
 
         export PROJECT_ID
+        export PROJECT="$PROJECT_ID"
+        export REGION="${_REGION}"
+        export PACKAGES="${_PACKAGES}"
         export IMAGE_TAG="${_TAG}"
         export POLICY_VERSION="$(date +%Y%m%d%H%M%S)"
 
@@ -54,6 +127,7 @@ steps:
         envsubst \
           < .cloud/computation/update.yaml \
           > /workspace/images.yaml
+
 
         if gcloud beta compute os-config guest-policies describe images \
           --project="${PROJECT_ID}" >/dev/null 2>&1; then

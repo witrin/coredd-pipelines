@@ -1,0 +1,13 @@
+[Unit]
+Description=Schedule Dagster location synchronization
+# Unit-Version: ${unit_version}
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=1m
+AccuracySec=1s
+Persistent=true
+Unit=dagster-locations.service
+
+[Install]
+WantedBy=timers.target

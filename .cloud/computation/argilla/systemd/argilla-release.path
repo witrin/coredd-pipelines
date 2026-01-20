@@ -1,0 +1,10 @@
+[Unit]
+Description=Trigger Argilla restarts when /etc/argilla/release.env changes
+# Unit-Version: ${unit_version}
+
+[Path]
+PathModified=/etc/argilla/release.env
+Unit=argilla-release.service
+
+[Install]
+WantedBy=multi-user.target
