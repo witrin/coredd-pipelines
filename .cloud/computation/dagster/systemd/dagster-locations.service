@@ -1,0 +1,19 @@
+[Unit]
+Description=Synchronize Dagster location deployments
+After=network-online.target docker.service
+Requires=docker.service
+# Unit-Version: ${unit_version}
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/dagster/locations.env
+ExecStart=/usr/local/bin/dagster-locations-synchronize \
+  --project ${PROJECT} \
+  --region ${REGION} \
+  --bucket ${BUCKET} \
+  --database ${DATABASE} \
+  --ports ${PORTS} \
+  --account ${ACCOUNT} \
+  --prefix ${PREFIX} \
+  ${CODE_IMAGE_REPOSITORY} \
+  ${JOB_IMAGE_REPOSITORY}

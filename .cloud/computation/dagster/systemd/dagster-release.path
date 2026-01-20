@@ -1,0 +1,10 @@
+[Unit]
+Description=Trigger Dagster restarts when /etc/dagster/release.env changes
+# Unit-Version: ${unit_version}
+
+[Path]
+PathModified=/etc/dagster/release.env
+Unit=dagster-release.service
+
+[Install]
+WantedBy=multi-user.target

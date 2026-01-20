@@ -3,8 +3,10 @@ options:
 substitutions:
   _REGION: europe-west1
   _REPOSITORY: containers
+  _PROJECT: $PROJECT_ID
+  _BRANCH: $BRANCH_NAME
 steps:
-  - id: analyze
+  - id: delete-location-images
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: bash
     args:
@@ -12,61 +14,43 @@ steps:
       - |
         set -euo pipefail
 
-        echo "PROJECT_ID=${PROJECT_ID}"
-        echo "COMMIT_SHA=${COMMIT_SHA}"
-        echo "TRIGGER_NAME=${TRIGGER_NAME}"
-        echo "TRIGGER_BUILD_CONFIG_PATH=${TRIGGER_BUILD_CONFIG_PATH}"
-        echo "BRANCH_NAME=${BRANCH_NAME}"
-        echo "REF_NAME=${REF_NAME}"
-
-        action="build"
-        if [[ "${COMMIT_SHA}" =~ ^0+$ ]]; then
-          action="delete"
-        fi
-
-        branch=""
-        if [[ -n "${BRANCH_NAME}" ]]; then
-          branch="${BRANCH_NAME}"
-        elif [[ -n "${REF_NAME}" ]]; then
-          branch="${REF_NAME}"
-        fi
-
-        echo "BRANCH_NAME=${branch}"
-
-        if [[ -z "${branch}" ]]; then
-          echo "Unable to determine branch; ensure Cloud Build trigger passes BRANCH_NAME/REF_NAME." >&2
-          exit 1
-        fi
-
-        if [[ ! "${branch}" =~ ^[A-Za-z0-9._-]+$ ]]; then
-          echo "Skipping unsupported branch ${branch}" >&2
-          action="skip"
-        fi
-
-        cat <<EOF >/workspace/delivery.env
-        ACTION=${action}
-        BRANCH_NAME=${branch}
-        EOF
-  - id: delete
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        set -euo pipefail
-
-        source /workspace/delivery.env
-
-        if [[ "$${ACTION}" != "delete" ]]; then
+        if [[ "${_BRANCH}" != "main" ]]; then
           exit 0
         fi
 
-        image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/pipelines/code:$${BRANCH_NAME}"
-        gcloud artifacts docker images delete "${image}" \
-          --project="${PROJECT_ID}" \
-          --quiet \
-          --delete-tags || true
-  - id: build
+        git fetch origin "+refs/heads/*:refs/remotes/origin/*" >/dev/null 2>&1 || true
+        git fetch origin "+refs/pull/*/head:refs/remotes/origin/pr/*" >/dev/null 2>&1 || true
+
+        declare -A branches=()
+        while read -r ref; do
+          [[ -z "${ref}" ]] && continue
+          branches["${ref}"]=1
+        done < <(git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin | sed '/^HEAD$/d')
+
+        delete() {
+          local repository="$1"
+          gcloud artifacts docker tags list "${repository}" \
+            --format="get(tag)" \
+            --quiet \
+            --filter="tag:*" \
+            --limit=10000 | while read -r full; do
+              [[ -z "${full}" ]] && continue
+              tag="${full##*/}"
+              if [[ -z "${tag}" || -n "${branches[${tag}]:-}" ]]; then
+                continue
+              fi
+              image="${repository}:${tag}"
+              echo "Deleting stale image tag ${image}"
+              gcloud artifacts docker images delete "${image}" \
+                --project="${_PROJECT}" \
+                --quiet \
+                --delete-tags || true
+            done
+        }
+
+        delete "${_REGION}-docker.pkg.dev/${_PROJECT}/${_REPOSITORY}/pipelines/code"
+        delete "${_REGION}-docker.pkg.dev/${_PROJECT}/${_REPOSITORY}/pipelines/job"
+  - id: build-location-images
     name: gcr.io/cloud-builders/docker
     entrypoint: bash
     args:
@@ -74,13 +58,7 @@ steps:
       - |
         set -euo pipefail
 
-        source /workspace/delivery.env
-
-        if [[ "$${ACTION}" != "build" ]]; then
-          exit 0
-        fi
-
-        image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/pipelines/code:$${BRANCH_NAME}"
+        image="${_REGION}-docker.pkg.dev/${_PROJECT}/${_REPOSITORY}/pipelines/code:${_BRANCH}"
 
         docker build --target pipelines \
           --tag "${image}" \
@@ -88,7 +66,7 @@ steps:
 
         docker push "${image}"
 
-        image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/pipelines/job:$${BRANCH_NAME}"
+        image="${_REGION}-docker.pkg.dev/${_PROJECT}/${_REPOSITORY}/pipelines/job:${_BRANCH}"
 
         docker build --target job \
           --tag "${image}" \

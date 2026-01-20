@@ -1,20 +1,354 @@
-name: projects/$PROJECT/guestPolicies/images
-description: Update image tag
-assignment:
-  groupLabels:
+osPolicies:
+  - id: computation-setup
+    description: Compute pipelines configuration
+    mode: ENFORCEMENT
+    resourceGroups:
+      - resources:
+        - id: cloud-ops-agent-repository
+          exec:
+            validate:
+              interpreter: SHELL
+              script: |
+                [ -f /etc/apt/sources.list.d/google-cloud-ops-agent.list ] && exit 100 || exit 101
+            enforce:
+              interpreter: SHELL
+              script: |
+                curl -s --retry 3 --retry-delay 2 --retry-all-errors \
+                  https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh \
+                  -o /tmp/add-google-cloud-ops-agent-repo.sh
+                bash /tmp/add-google-cloud-ops-agent-repo.sh || true
+                exit 100
+
+        - id: cloud-ops-agent-package
+          pkg:
+            desiredState: INSTALLED
+            apt:
+              name: google-cloud-ops-agent
+
+        - id: cloud-ops-agent-configuration
+          exec:
+            validate:
+              interpreter: SHELL
+              script: |
+                [ -f /etc/google-cloud-ops-agent/config.yaml ] && exit 100 || exit 101
+            enforce:
+              interpreter: SHELL
+              script: |
+                mkdir -p /etc/google-cloud-ops-agent
+                cat >/etc/google-cloud-ops-agent/config.yaml <<'EOF'
+                logging:
+                  receivers:
+                    orchestrator:
+                      type: systemd_journald
+                  processors:
+                    orchestrator:
+                      type: exclude_logs
+                      match_any:
+                        - 'NOT jsonPayload._SYSTEMD_UNIT:"dagster-" AND NOT jsonPayload._SYSTEMD_UNIT="argilla-"'
+                    json:
+                      type: parse_json
+                      field: MESSAGE
+                    severity:
+                      type: modify_fields
+                      fields:
+                        severity:
+                          copy_from: jsonPayload.severity
+                  service:
+                    pipelines:
+                      default_pipeline:
+                        receivers: []
+                      orchestrator:
+                        receivers: [orchestrator]
+                        processors: [orchestrator, json, severity]
+                EOF
+                systemctl restart google-cloud-ops-agent || true
+                exit 100
+
+        - id: project-repository
+          exec:
+            validate:
+              interpreter: SHELL
+              script: |
+                list_file="/etc/apt/sources.list.d/${PACKAGES}.list"
+                [ -f "$list_file" ] && exit 100 || exit 101
+            enforce:
+              interpreter: SHELL
+              script: |
+                list_file="/etc/apt/sources.list.d/${PACKAGES}.list"
+                transport_file="/etc/apt/sources.list.d/artifact-registry-transport.list"
+
+                apt update -y
+                apt install -y curl gnupg
+
+                if [ ! -f /usr/share/keyrings/cloud.google.gpg ]; then
+                  curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+                    | gpg --batch --yes --dearmor \
+                    >/usr/share/keyrings/cloud.google.gpg
+                fi
+
+                if [ ! -f /etc/apt/sources.list.d/google-cloud-sdk.list ]; then
+                  echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+                    >/etc/apt/sources.list.d/google-cloud-sdk.list
+                fi
+
+                if [ ! -f "$transport_file" ]; then
+                  echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt apt-transport-artifact-registry-stable main" \
+                    >"$transport_file"
+                fi
+
+                apt update -y
+                apt install -y apt-transport-artifact-registry
+
+                if [ ! -f /usr/share/keyrings/artifact-registry.gpg ]; then
+                  curl -fsSL "https://${REGION}-apt.pkg.dev/doc/repo-signing-key.gpg" \
+                    | gpg --batch --yes --dearmor \
+                    >/usr/share/keyrings/artifact-registry.gpg
+                fi
+
+                echo "deb [arch=all signed-by=/usr/share/keyrings/artifact-registry.gpg] ar+https://${REGION}-apt.pkg.dev/projects/${PROJECT} ${PACKAGES} main" \
+                  >"$list_file"
+
+                apt update -y
+                exit 100
+
+        - id: google-osconfig-agent-package
+          pkg:
+            desiredState: INSTALLED
+            apt:
+              name: google-osconfig-agent
+
+        - id: dagster-cloud-package
+          pkg:
+            desiredState: INSTALLED
+            apt:
+              name: dagster-cloud
+
+        - id: argilla-cloud-package
+          pkg:
+            desiredState: INSTALLED
+            apt:
+              name: argilla-cloud
+
+        - id: docker-configuration
+          exec:
+            validate:
+              interpreter: SHELL
+              script: |
+                systemctl is-active --quiet docker && [ -f /root/.docker/config.json ] && exit 100 || exit 101
+            enforce:
+              interpreter: SHELL
+              script: |
+                if [ -z "${registry:-}" ]; then
+                  raw="$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/docker || true)"
+                  if [ -n "$raw" ]; then
+                    registry="$(printf '%s' "$raw" | base64 -d | jq -r '.registry // empty')"
+                  fi
+                fi
+                if [ -z "${registry:-}" ]; then
+                  exit 101
+                fi
+                install -d -m 700 /root/.docker
+                cat >/root/.docker/config.json <<EOF
+                {
+                  "credHelpers": {
+                    "${registry}": "gcloud"
+                  }
+                }
+                EOF
+                systemctl daemon-reload
+                systemctl enable --now docker.service || true
+                exit 100
+
+        - id: dagster-configuration
+          exec:
+            validate:
+              interpreter: SHELL
+              script: |
+                [ -f /etc/dagster/daemon.env ] && [ -f /etc/dagster/release.env ] && exit 100 || exit 101
+            enforce:
+              interpreter: SHELL
+              script: |
+                set -eu
+                umask 077
+
+                if ! command -v jq >/dev/null 2>&1; then
+                  apt update -y
+                  apt install -y jq
+                fi
+
+                meta="$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/dagster)"
+                json="$(printf '%s' "$meta" | base64 -d)"
+
+                v() { printf '%s' "$json" | jq -r "$1"; }
+
+                token="$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token | jq -r .access_token)"
+
+                s() {
+                  curl -fsS -H "Authorization: Bearer $token" \
+                    "https://secretmanager.googleapis.com/v1/projects/$(v '.project')/secrets/$1/versions/latest:access" \
+                  | jq -r '.payload.data' | tr '_-' '/+' | base64 -d
+                }
+
+                mkdir -p /etc/dagster /etc/dagster/locations
+
+                cat >/etc/dagster/daemon.env <<EOF
+                DATABASE_HOST=$(v '.database.host')
+                DATABASE_USER=$(v '.database.user')
+                DATABASE_PASSWORD=$(s 'dagster-database-password')
+                DATABASE_NAME=$(v '.database.name')
+                CLOUD_BUCKET=$(v '.bucket')
+                CLOUD_RUN_PROJECT=$(v '.project')
+                CLOUD_RUN_REGION=$(v '.region')
+                CLOUD_RUN_JOB=pipelines
+                GRPC_HOST=127.0.0.1
+                GRPC_PORT=$(v '.grpc.port')
+                EOF
+
+                cat >/etc/dagster/interface.env <<EOF
+                DATABASE_HOST=$(v '.database.host')
+                DATABASE_USER=$(v '.database.user')
+                DATABASE_PASSWORD=$(s 'dagster-database-password')
+                DATABASE_NAME=$(v '.database.name')
+                CLOUD_BUCKET=$(v '.bucket')
+                EOF
+
+                cat >/etc/dagster/location.env <<EOF
+                DATABASE_HOST=$(v '.database.host')
+                DATABASE_USER=$(v '.database.user')
+                DATABASE_PASSWORD=$(s 'dagster-database-password')
+                DATABASE_NAME=$(v '.database.name')
+                CLOUD_BUCKET=$(v '.bucket')
+                EOF
+
+                cat >/etc/dagster/locations.env <<EOF
+                PROJECT=$(v '.project')
+                REGION=$(v '.region')
+                BUCKET=$(v '.bucket')
+                DATABASE=postgresql://$(v '.database.user')@$(v '.database.connection')/$(v '.database.name')?sslmode=$(v '.database.ssl')&password=dagster-database-password:latest
+                PORTS=$(v '.ports.start')-$(v '.ports.end')
+                ACCOUNT=$(v '.account')
+                PREFIX=$(v '.prefix')
+                CODE_IMAGE_REPOSITORY=$(v '.images.code')
+                JOB_IMAGE_REPOSITORY=$(v '.images.job')
+                EOF
+
+                cat >/etc/dagster/workspace.yaml <<EOF
+                load_from:
+                  - grpc_server:
+                      host: 127.0.0.1
+                      port: $(v '.grpc.port')
+                      location_name: default
+                EOF
+
+                cat >/etc/dagster/release.env <<EOF
+                GRPC_PORT=$(v '.grpc.port')
+                IMAGE_REPOSITORY=$(v '.images.pipelines')
+                IMAGE_TAG=${IMAGE}
+                EOF
+
+                cat >/etc/dagster/locations/release.env <<EOF
+                DAGSTER_LOCATION=default
+                GRPC_PORT=$(v '.grpc.port')
+                IMAGE_REPOSITORY=$(v '.images.pipelines')
+                IMAGE_TAG=${IMAGE}
+                EOF
+
+                chmod 600 /etc/dagster/*.env
+                chmod 644 /etc/dagster/workspace.yaml
+                systemctl daemon-reload
+                systemctl enable --now dagster-release.path || true
+                systemctl restart dagster-release.service || true
+                exit 100
+
+        - id: argilla-configuration
+          exec:
+            validate:
+              interpreter: SHELL
+              script: |
+                [ -f /etc/argilla.env ] && [ -f /etc/argilla/release.env ] && exit 100 || exit 101
+            enforce:
+              interpreter: SHELL
+              script: |
+                set -eu
+                umask 077
+
+                if ! command -v jq >/dev/null 2>&1; then
+                  apt update -y
+                  apt install -y jq
+                fi
+
+                meta="$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/argilla)"
+                json="$(printf '%s' "$meta" | base64 -d)"
+                v() { printf '%s' "$json" | jq -r "$1"; }
+
+                token="$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token | jq -r .access_token)"
+                s() {
+                  curl -fsS -H "Authorization: Bearer $token" \
+                    "https://secretmanager.googleapis.com/v1/projects/$(v '.project')/secrets/$1/versions/latest:access" \
+                  | jq -r '.payload.data' | tr '_-' '/+' | base64 -d
+                }
+
+                mkdir -p /etc/argilla
+
+                cat >/etc/argilla.env <<EOF
+                ARGILLA_HOST=0.0.0.0
+                ARGILLA_PORT=6900
+                ARGILLA_DATABASE_HOST=$(v '.database.host')
+                ARGILLA_DATABASE_PORT=$(v '.database.port')
+                ARGILLA_DATABASE_SSLMODE=$(v '.database.ssl')
+                ARGILLA_DATABASE_USER=$(v '.database.user')
+                ARGILLA_DATABASE_PASSWORD=$(s 'dagster-database-password')
+                ARGILLA_DATABASE_NAME=$(v '.database.name')
+                ARGILLA_DATABASE_URL=postgresql+asyncpg://$(v '.database.user'):$(s 'dagster-database-password')@$(v '.database.host'):$(v '.database.port')/$(v '.database.name')
+                ARGILLA_ELASTICSEARCH=http://127.0.0.1:9200
+                ARGILLA_REDIS_URL=redis://127.0.0.1:6379/0
+                ARGILLA_AUTHENTICATION_METHOD=oauth2
+                ARGILLA_OAUTH_PROVIDER=github
+                ARGILLA_AUTH_OAUTH_CFG=/etc/argilla/oauth.yml
+                ARGILLA_OAUTH2_GITHUB_CLIENT_ID=$(s 'github-argilla-client-id')
+                ARGILLA_OAUTH2_GITHUB_CLIENT_SECRET=$(s 'github-argilla-client-secret')
+                SOCIAL_AUTH_GITHUB_SCOPE=read:user,user:email
+                SOCIAL_AUTH_GITHUB_ORG_NAME=bug-request
+                EOF
+
+                cat >/etc/argilla/oauth.yml <<EOF
+                providers:
+                  - name: github
+                    client_id: $(s 'github-argilla-client-id')
+                    client_secret: $(s 'github-argilla-client-secret')
+                    scope: "read:user,user:email"
+                allowed_workspaces:
+                  - name: bug-request
+                allow_http_redirect: false
+                EOF
+
+                cat >/etc/argilla/elasticsearch.env <<EOF
+                ES_JAVA_OPTS=-Xms512m -Xmx512m
+                node.name=elasticsearch
+                cluster.name=es-argilla-local
+                discovery.type=single-node
+                cluster.routing.allocation.disk.threshold_enabled=false
+                xpack.security.enabled=false
+                EOF
+
+                cat >/etc/argilla/release.env <<EOF
+                IMAGE_REPOSITORY=$(v '.image')
+                IMAGE_TAG=${IMAGE}
+                EOF
+
+                chmod 600 /etc/argilla/*.env /etc/argilla/oauth.yml /etc/argilla/release.env
+                chmod 644 /etc/argilla/elasticsearch.env
+                systemctl daemon-reload
+                systemctl enable --now argilla-release.path || true
+                systemctl restart argilla-release.service || true
+                exit 100
+
+instanceFilter:
+  inclusionLabels:
     - labels:
         role: computation
-recipes:
-  - name: images-release-tag
-    version: "${POLICY_VERSION}"
-    desiredState: INSTALLED
-    installSteps:
-      - scriptRun:
-          interpreter: SHELL
-          script: |
-            printf 'IMAGE_TAG=%s\n' "${IMAGE_TAG}" >/etc/release.env
-    updateSteps:
-      - scriptRun:
-          interpreter: SHELL
-          script: |
-            printf 'IMAGE_TAG=%s\n' "${IMAGE_TAG}" >/etc/release.env
+
+rollout:
+  disruptionBudget:
+    percent: 100
+  minWaitDuration: 0s

@@ -1,0 +1,8 @@
+Package: argilla-cloud
+Version: __VERSION__
+Section: utils
+Priority: optional
+Architecture: all
+Maintainer: bug-request
+Depends: docker.io
+Description: Argilla services for GCP compute hosts

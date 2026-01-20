@@ -1,0 +1,27 @@
+[Unit]
+Description=Dagster location container (%i)
+After=docker.service
+Requires=docker.service
+# Unit-Version: ${unit_version}
+
+[Service]
+Type=simple
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=600
+EnvironmentFile=-/etc/dagster/release.env
+EnvironmentFile=-/etc/dagster/locations/%i.env
+ExecStartPre=-/usr/bin/docker rm -f dagster-location-%i
+ExecStartPre=/usr/bin/docker pull ${IMAGE_REPOSITORY}:${IMAGE_TAG}
+ExecStart=/usr/bin/docker run \
+  --rm \
+  --network host \
+  --name dagster-location-%i \
+  --env-file /etc/dagster/location.env \
+  --env-file /etc/dagster/locations/%i.env \
+  ${IMAGE_REPOSITORY}:${IMAGE_TAG} \
+  dagster api grpc -h 127.0.0.1 -p ${GRPC_PORT} -f /usr/local/src/components/bootstrap.py
+
+[Install]
+WantedBy=multi-user.target

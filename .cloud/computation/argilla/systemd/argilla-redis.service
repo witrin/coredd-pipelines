@@ -1,0 +1,24 @@
+[Unit]
+Description=Redis cache for Argilla
+After=docker.service
+Requires=docker.service
+# Unit-Version: ${unit_version}
+
+[Service]
+Type=simple
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=600
+EnvironmentFile=-/etc/argilla/release.env
+ExecStartPre=-/usr/bin/docker rm -f argilla-redis
+ExecStartPre=/usr/bin/docker pull redis:7
+ExecStart=/usr/bin/docker run \
+  --rm \
+  --network host \
+  --name argilla-redis \
+  redis:7 \
+  redis-server --appendonly no
+
+[Install]
+WantedBy=multi-user.target

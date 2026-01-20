@@ -11,9 +11,17 @@ resource "google_artifact_registry_repository" "containers" {
   depends_on    = [google_project_service.required["artifactregistry.googleapis.com"]]
 }
 
+resource "google_artifact_registry_repository" "apt" {
+  location      = local.region
+  repository_id = "apt"
+  format        = "APT"
+  description   = "Host packages for compute instances."
+  depends_on    = [google_project_service.required["artifactregistry.googleapis.com"]]
+}
+
 resource "google_cloudbuild_trigger" "deploy" {
   name        = "computation"
-  description = "Builds and deploys the pipelines image when new commits are pushed."
+  description = "Builds and deploys the pipeline computation when new commits are pushed."
   location    = local.region
   filename    = ".cloud/computation/delivery.yaml"
 
@@ -34,11 +42,12 @@ resource "google_cloudbuild_trigger" "deploy" {
   ]
 
   substitutions = {
-    "_REGION"     = local.region
-    "_REPOSITORY" = google_artifact_registry_repository.containers.repository_id
-    "_IMAGE"      = "pipelines"
-    "_TAG"        = "$SHORT_SHA"
-    "_ZONE"       = local.zone
+    "_REGION"   = local.region
+    "_IMAGES"   = google_artifact_registry_repository.containers.repository_id
+    "_PACKAGES" = google_artifact_registry_repository.apt.repository_id
+    "_IMAGE"    = "pipelines"
+    "_TAG"      = "$SHORT_SHA"
+    "_ZONE"     = local.zone
   }
 
   service_account = "projects/${data.google_project.current.project_id}/serviceAccounts/${local.build_service_account}"
@@ -72,7 +81,7 @@ locals {
       "roles/cloudfunctions.developer",
       "roles/logging.logWriter",
       "roles/run.admin",
-      "roles/osconfig.guestPolicyAdmin",
+      "roles/osconfig.osPolicyAssignmentAdmin",
       "roles/compute.instanceAdmin.v1"
     ]
     compute_default = [
@@ -165,6 +174,12 @@ resource "google_service_account_iam_member" "service_account_impersonation" {
   service_account_id = each.value.service_account
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${each.value.member}"
+}
+
+resource "google_service_account_iam_member" "app_engine_default_build_act_as" {
+  service_account_id = data.google_app_engine_default_service_account.app_engine.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${local.build_service_account}"
 }
 
 resource "google_secret_manager_secret_iam_member" "service_account_secret_access" {
@@ -267,32 +282,49 @@ resource "google_compute_instance" "engine" {
     "google-monitoring-enabled" = "TRUE"
     "enable-osconfig"           = "TRUE"
     "unit-version"              = local.unit_version
-      "user-data" = templatefile("${path.module}/computation/initialize.yaml", {
-        pipelines_image_repository      = local.pipelines_image_repository
-        code_image_repository           = local.code_image_repository
-        job_image_repository            = local.job_image_repository
-        evaluation_image_repository     = local.evaluation_image_repository
-        default_image_tag               = local.default_image_tag
-        unit_version                    = local.unit_version
-        artifact_registry_host          = local.artifact_registry_host
-        project                         = data.google_project.current.project_id
-        region                          = local.region
-        database_host                   = google_sql_database_instance.database.public_ip_address
-        database_port                   = 5432
-        database_sslmode                = "require"
-        database_user                   = google_sql_user.pipelines_user.name
-        database_password               = google_sql_user.pipelines_user.password
-        database_name                   = google_sql_database.pipelines_meta.name
-        bucket                          = google_storage_bucket.bucket.name
-        github_argilla_id               = data.google_secret_manager_secret_version.github_argilla_client_id.secret_data
-        github_argilla_secret           = data.google_secret_manager_secret_version.github_argilla_client_secret.secret_data
-        github_oauth_callback_url       = var.github_argilla_callback
-        branches_port_start             = 4100
-        branches_port_end               = 4109
-        service_account                 = google_service_account.runtime.email
-        cloud_sql_instance              = local.cloud_sql_instance
-      })
-    }
+    "docker" = base64encode(jsonencode({
+      registry = local.artifact_registry_host
+    }))
+    "dagster" = base64encode(jsonencode({
+      project = data.google_project.current.project_id
+      region  = local.region
+      bucket  = google_storage_bucket.bucket.name
+      account = google_service_account.runtime.email
+      database = {
+        host       = google_sql_database_instance.database.public_ip_address
+        port       = 5432
+        name       = google_sql_database.pipelines_meta.name
+        user       = google_sql_user.pipelines_user.name
+        connection = google_sql_database_instance.database.connection_name
+        ssl        = "require"
+      }
+      ports = {
+        start = 4100
+        end   = 4109
+      }
+      images = {
+        pipelines = local.pipelines_image_repository
+        code      = local.code_image_repository
+        job       = local.job_image_repository
+      }
+      grpc = {
+        port = 4100
+      }
+      prefix = "pipelines"
+    }))
+    "argilla" = base64encode(jsonencode({
+      project = data.google_project.current.project_id
+      region  = local.region
+      database = {
+        host    = google_sql_database_instance.database.public_ip_address
+        port    = 5432
+        name    = "argilla"
+        user    = google_sql_user.pipelines_user.name
+        ssl     = "require"
+      }
+      image = local.evaluation_image_repository
+    }))
+  }
   resource_policies = [
     google_compute_resource_policy.engine_stop.id
   ]

@@ -1,0 +1,27 @@
+[Unit]
+Description=Dagster interface container
+After=docker.service
+Requires=docker.service
+# Unit-Version: ${unit_version}
+
+[Service]
+Type=simple
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=600
+EnvironmentFile=-/etc/dagster/release.env
+ExecStartPre=-/usr/bin/docker rm -f dagster-interface
+ExecStartPre=/bin/sh -c "docker image ls ${IMAGE_REPOSITORY} --format '{{.Repository}}:{{.Tag}}' | grep -v ':${IMAGE_TAG}$' | grep -v ':<none>$' | xargs -r docker image rm"
+ExecStartPre=/usr/bin/docker pull ${IMAGE_REPOSITORY}:${IMAGE_TAG}
+ExecStart=/usr/bin/docker run \
+  --rm \
+  --network host \
+  --name dagster-interface \
+  --env-file /etc/dagster/interface.env \
+  -v /etc/dagster/workspace.yaml:/etc/dagster/workspace.yaml:ro \
+  ${IMAGE_REPOSITORY}:${IMAGE_TAG} \
+  dagster-webserver -h 0.0.0.0 -p 3000 -w /etc/dagster/workspace.yaml
+
+[Install]
+WantedBy=multi-user.target

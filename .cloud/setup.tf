@@ -123,10 +123,9 @@ locals {
   artifact_registry_repository       = "${local.artifact_registry_host}/${data.google_project.current.project_id}/containers"
   pipelines_image_repository         = "${local.artifact_registry_repository}/pipelines"
   code_image_repository              = "${local.artifact_registry_repository}/pipelines/code"
-  job_image_repository              = "${local.artifact_registry_repository}/pipelines/job"
+  job_image_repository               = "${local.artifact_registry_repository}/pipelines/job"
   evaluation_image_repository        = "${local.artifact_registry_repository}/evaluation"
-  default_image_tag                  = "latest"
-  pipelines_image                    = "${local.pipelines_image_repository}:${local.default_image_tag}"
+  pipelines_image                    = "${local.pipelines_image_repository}:latest"
   unit_version                       = formatdate("2006-01-02", timestamp())
   build_service_account              = google_service_account.build.email
   compute_default_service_account    = data.google_compute_default_service_account.compute_default.email

@@ -1,0 +1,11 @@
+[Unit]
+Description=Restart Dagster release services when tag changes
+After=docker.service
+# Unit-Version: ${unit_version}
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart \
+  dagster-location@release.service \
+  dagster-daemon.service \
+  dagster-interface.service
