@@ -9,37 +9,27 @@ substitutions:
   _PROJECT: $PROJECT_ID
 steps:
   - id: build-pipelines-image
-    name: gcr.io/cloud-builders/docker
-    entrypoint: bash
+    name: gcr.io/kaniko-project/executor:latest
     args:
-      - -c
-      - |
-        set -euo pipefail
-
-        docker build --target pipelines \
-          --tag ${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/pipelines:${_TAG} \
-          --tag ${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/pipelines:latest \
-          .
-
-        docker push ${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/pipelines:${_TAG}
-        docker push ${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/pipelines:latest
+      - --destination=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/pipelines:${_TAG}
+      - --destination=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/pipelines:latest
+      - --target=pipelines
+      - --cache=true
+      - --cache-repo=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/pipelines-cache
+      - --context=.
+      - --dockerfile=Dockerfile
 
   - id: build-evalution-image
     waitFor: ['-']
-    name: gcr.io/cloud-builders/docker
-    entrypoint: bash
+    name: gcr.io/kaniko-project/executor:latest
     args:
-      - -c
-      - |
-        set -euo pipefail
-
-        docker build --target evaluation \
-          --tag ${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation:${_TAG} \
-          --tag ${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation:latest \
-          .
-
-        docker push ${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation:${_TAG}
-        docker push ${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation:latest
+      - --destination=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation:${_TAG}
+      - --destination=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation:latest
+      - --target=evaluation
+      - --cache=true
+      - --cache-repo=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation-cache
+      - --context=.
+      - --dockerfile=Dockerfile
 
   - id: build-pipelines-package
     waitFor: ['-']
