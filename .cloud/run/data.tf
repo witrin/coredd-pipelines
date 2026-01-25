@@ -6,7 +6,6 @@ resource "google_storage_bucket" "bucket" {
   labels = {
     component = "bucket"
   }
-  depends_on = [google_project_service.required["artifactregistry.googleapis.com"]]
 }
 
 resource "google_storage_bucket_iam_member" "pipelines_runtime_bucket_writer" {
@@ -19,7 +18,6 @@ resource "google_sql_database_instance" "database" {
   name             = "bug-request-database"
   database_version = "POSTGRES_15"
   region           = local.region
-  depends_on       = [google_project_service.required["sqladmin.googleapis.com"]]
 
   deletion_protection = false
 

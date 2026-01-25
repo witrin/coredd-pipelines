@@ -67,13 +67,11 @@ osPolicies:
                 service:
                   pipelines:
                     default_pipeline:
-                      default_pipeline:
-                        receivers: []
+                      receivers: []
                     orchestrator:
-                      orchestrator:
-                        receivers: [orchestrator]
-                        processors: [orchestrator, json, severity]
-  
+                      receivers: [orchestrator]
+                      processors: [orchestrator, json, severity]
+
   - id: dagster
     description: Dagster orchestrator.
     mode: ENFORCEMENT
@@ -87,10 +85,25 @@ osPolicies:
             apt:
               name: dagster-cloud
 
+        - id: dagster-cloud-update
+          exec:
+            validate:
+              interpreter: SHELL
+              script: |
+                exit 101
+            enforce:
+              interpreter: SHELL
+              script: |
+                set -e
+                apt update
+                apt install -y --only-upgrade dagster-cloud
+                systemctl restart dagster-release.service || true
+                exit 100
+
         - id: dagster-build-environment
           file:
             path: /etc/dagster/build.env
-            state: PRESENT
+            state: CONTENTS_MATCH
             permissions: "0600"
             content: |
               IMAGE_TAG=${IMAGE}
@@ -106,11 +119,6 @@ osPolicies:
               script: |
                 set -eu
                 umask 077
-
-                if ! command -v jq >/dev/null 2>&1; then
-                  apt update -y
-                  apt install -y jq
-                fi
 
                 meta="$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/dagster)"
                 json="$(printf '%s' "$meta" | base64 -d)"
@@ -149,11 +157,6 @@ osPolicies:
               script: |
                 set -eu
                 umask 077
-
-                if ! command -v jq >/dev/null 2>&1; then
-                  apt update -y
-                  apt install -y jq
-                fi
 
                 meta="$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/dagster)"
                 json="$(printf '%s' "$meta" | base64 -d)"
@@ -219,14 +222,14 @@ osPolicies:
                 printf '%s' "$meta" | sha256sum | cut -d' ' -f1 >/etc/dagster/.meta-hash
 
                 chmod 600 /etc/dagster/*.env /etc/dagster/.meta-hash
-                chmod 600 /etc/dagster/locations/*.env
                 systemctl daemon-reload
                 systemctl enable --now dagster-release.path || true
+                systemctl enable --now dagster-locations.timer || true
                 systemctl restart dagster-release.service || true
                 exit 100
   
   - id: argilla
-    description: Argilla annotation framwork.
+    description: Argilla annotation framework.
     mode: ENFORCEMENT
     resourceGroups:
   
@@ -249,11 +252,6 @@ osPolicies:
               script: |
                 set -eu
                 umask 077
-
-                if ! command -v jq >/dev/null 2>&1; then
-                  apt update -y
-                  apt install -y jq
-                fi
 
                 meta="$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/argilla)"
                 json="$(printf '%s' "$meta" | base64 -d)"

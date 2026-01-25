@@ -10,7 +10,6 @@ RemainAfterExit=yes
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=600
-EnvironmentFile=-/etc/dagster/locations/%i.env
 ExecStartPre=-/usr/bin/docker rm -f dagster-location-%i
 ExecStartPre=/usr/bin/docker pull ${IMAGE_REPOSITORY}:${IMAGE_TAG}
 ExecStart=/usr/bin/docker run \

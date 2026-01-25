@@ -15,20 +15,24 @@ steps:
         set -euo pipefail
 
         if [[ "${_BRANCH}" != "main" ]]; then
+          echo "Skipping cleanup on non-main branch"
           exit 0
         fi
 
-        git fetch origin "+refs/heads/*:refs/remotes/origin/*" >/dev/null 2>&1 || true
-        git fetch origin "+refs/pull/*/head:refs/remotes/origin/pr/*" >/dev/null 2>&1 || true
-
         declare -A branches=()
+        branches["main"]=1
+
         while read -r ref; do
           [[ -z "${ref}" ]] && continue
+          ref="${ref#refs/heads/}"
           branches["${ref}"]=1
-        done < <(git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin | sed '/^HEAD$/d')
+        done < <(git ls-remote --heads origin 2>/dev/null | awk '{print $2}')
+
+        echo "Protected branches are ${!branches[*]}"
 
         delete() {
           local repository="$1"
+          echo "Checking tags in ${repository}"
           gcloud artifacts docker tags list "${repository}" \
             --format="get(tag)" \
             --quiet \
@@ -36,7 +40,11 @@ steps:
             --limit=10000 | while read -r full; do
               [[ -z "${full}" ]] && continue
               tag="${full##*/}"
-              if [[ -z "${tag}" || -n "${branches[${tag}]:-}" ]]; then
+              if [[ -z "${tag}" ]]; then
+                continue
+              fi
+              if [[ -n "${branches[${tag}]:-}" ]]; then
+                echo "Keeping ${tag} (branch exists)"
                 continue
               fi
               image="${repository}:${tag}"

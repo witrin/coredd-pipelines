@@ -1,9 +1,9 @@
 [Unit]
-Description=Trigger Dagster restarts when /etc/dagster/release.env changes
+Description=Trigger Dagster restarts when /etc/dagster/build.env changes
 # Unit-Version: ${unit_version}
 
 [Path]
-PathModified=/etc/dagster/release.env
+PathModified=/etc/dagster/build.env
 Unit=dagster-release.service
 
 [Install]

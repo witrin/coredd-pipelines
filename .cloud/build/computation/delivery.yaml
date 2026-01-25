@@ -8,7 +8,59 @@ substitutions:
   _ZONE: europe-west1-b
   _PROJECT: $PROJECT_ID
 steps:
+
+  - id: build-computation-image
+    name: hashicorp/packer:light
+    entrypoint: sh
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        apk add --no-cache git >/dev/null 2>&1 || true
+        if git rev-parse HEAD^ >/dev/null 2>&1 && ! git diff --name-only HEAD^ HEAD -- .cloud/build/delivery | grep -q .; then
+          echo "No Packer changes detected; skipping image build"
+          exit 0
+        fi
+
+        packer init .cloud/build/delivery
+
+        packer build \
+          -var "project=${_PROJECT}" \
+          -var "zone=${_ZONE}" \
+          -var "region=${_REGION}" \
+          -var "image_name=computation-${_TAG}" \
+          -var "image_family=computation" \
+          -var "packages=${_PACKAGES}" \
+          -var "registry=${_REGION}-docker.pkg.dev" \
+          .cloud/build/delivery/computation.pkr.hcl
+
+  - id: clear-computation-images
+    waitFor: ['-']
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        family="computation"
+        keep=3
+        max_age=7
+        cutoff=$(date -d "-${max_age} days" +%Y%m%d%H%M%S 2>/dev/null || date -v-${max_age}d +%Y%m%d%H%M%S)
+        images=$(gcloud compute images list --project="${_PROJECT}" --filter="family=${family}" \
+          --format="csv[no-heading](name,creationTimestamp)" --sort-by="~creationTimestamp" 2>/dev/null || true)
+        [[ -z "${images}" ]] && exit 0
+        count=0
+        while IFS=',' read -r name ts; do
+          [[ -z "${name}" ]] && continue
+          count=$((count + 1))
+          [[ ${count} -le ${keep} ]] && continue
+          created=$(echo "${ts}" | tr -d 'TZ:-' | cut -c1-14)
+          [[ "${created}" -gt "${cutoff}" ]] && continue
+          gcloud compute images delete "${name}" --project="${_PROJECT}" --quiet || true
+        done <<< "${images}"
+
   - id: build-pipelines-image
+    waitFor: ['-']
     name: gcr.io/cloud-builders/docker
     args:
       - build
@@ -17,6 +69,7 @@ steps:
       - --target=pipelines
       - --cache-from=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/pipelines:latest
       - .
+
   - id: push-pipelines-image
     waitFor: [build-pipelines-image]
     name: gcr.io/cloud-builders/docker
@@ -35,6 +88,7 @@ steps:
       - --target=evaluation
       - --cache-from=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation:latest
       - .
+
   - id: push-evaluation-image
     waitFor: [build-evaluation-image]
     name: gcr.io/cloud-builders/docker
@@ -70,27 +124,28 @@ steps:
         mkdir -p "$root/etc/systemd/system/dagster-release.path.d"
         mkdir -p "$root/etc/dagster/locations"
 
-        cp -R .cloud/computation/dagster/package/DEBIAN/* "$root/DEBIAN/"
+        cp -R .cloud/build/computation/dagster/package/DEBIAN/* "$root/DEBIAN/"
         sed -i "s/__VERSION__/$version/" "$root/DEBIAN/control"
 
         systemd_tmp="/workspace/dagster-cloud-systemd"
         rm -rf "$systemd_tmp"
         mkdir -p "$systemd_tmp"
 
-        for unit in .cloud/computation/dagster/systemd/*.service .cloud/computation/dagster/systemd/*.timer .cloud/computation/dagster/systemd/*.path; do
+        for unit in .cloud/build/computation/dagster/systemd/*.service .cloud/build/computation/dagster/systemd/*.timer .cloud/build/computation/dagster/systemd/*.path; do
           envsubst '${unit_version}' < "$unit" > "$systemd_tmp/$(basename "$unit")"
         done
 
-        install -m 0755 .cloud/computation/dagster/update.sh "$root/usr/local/bin/dagster-locations-synchronize"
+        install -m 0755 .cloud/build/computation/dagster/update.sh "$root/usr/local/bin/dagster-locations-synchronize"
         for unit in "$systemd_tmp"/*.service "$systemd_tmp"/*.timer "$systemd_tmp"/*.path; do
           install -m 0644 "$unit" "$root/lib/systemd/system/dagster-$(basename "$unit")"
         done
 
-        install -m 0644 .cloud/computation/dagster/systemd/service.conf "$root/etc/systemd/system/dagster-daemon.service.d/10.conf"
-        install -m 0644 .cloud/computation/dagster/systemd/service.conf "$root/etc/systemd/system/dagster-interface.service.d/10.conf"
-        install -m 0644 .cloud/computation/dagster/systemd/service.conf "$root/etc/systemd/system/dagster-location@.service.d/10.conf"
-        install -m 0644 .cloud/computation/dagster/systemd/path.conf "$root/etc/systemd/system/dagster-release.path.d/10.conf"
-        install -m 0600 .cloud/computation/dagster/release.env "$root/etc/dagster/locations/"
+        install -m 0644 .cloud/build/computation/dagster/systemd/service.conf "$root/etc/systemd/system/dagster-daemon.service.d/10.conf"
+        install -m 0644 .cloud/build/computation/dagster/systemd/service.conf "$root/etc/systemd/system/dagster-interface.service.d/10.conf"
+        install -m 0644 .cloud/build/computation/dagster/systemd/service.conf "$root/etc/systemd/system/dagster-location@.service.d/10.conf"
+        install -m 0644 .cloud/build/computation/dagster/systemd/location.conf "$root/etc/systemd/system/dagster-location@.service.d/20.conf"
+        install -m 0644 .cloud/build/computation/dagster/systemd/path.conf "$root/etc/systemd/system/dagster-release.path.d/10.conf"
+        install -m 0600 .cloud/build/computation/dagster/release.env "$root/etc/dagster/locations/"
 
         dpkg-deb --build "$root" "/workspace/dagster-cloud_${version}_all.deb"
 
@@ -120,14 +175,14 @@ steps:
         rm -rf "$root"
         mkdir -p "$root/DEBIAN" "$root/lib/systemd/system"
 
-        cp -R .cloud/computation/argilla/package/DEBIAN/* "$root/DEBIAN/"
+        cp -R .cloud/build/computation/argilla/package/DEBIAN/* "$root/DEBIAN/"
         sed -i "s/__VERSION__/$version/" "$root/DEBIAN/control"
 
         systemd_tmp="/workspace/argilla-cloud-systemd"
         rm -rf "$systemd_tmp"
         mkdir -p "$systemd_tmp"
 
-        for unit in .cloud/computation/argilla/systemd/*; do
+        for unit in .cloud/build/computation/argilla/systemd/*; do
           envsubst '${unit_version}' < "$unit" > "$systemd_tmp/$(basename "$unit")"
         done
 
@@ -166,7 +221,7 @@ steps:
         fi
 
         envsubst '$$PROJECT $$REGION $$PACKAGES $$IMAGE $$VERSION' \
-          < .cloud/computation/update.yaml \
+          < .cloud/run/computation/update.yaml \
           > /workspace/update.yaml
 
         if gcloud compute os-config os-policy-assignments describe pipelines \

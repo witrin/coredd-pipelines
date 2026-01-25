@@ -14,7 +14,7 @@ steps:
         set -euo pipefail
         apt-get update -y
         apt-get install -y zip
-        cd .cloud/identity/signup
+        cd .cloud/build/identity/signup
 
         artifact="/workspace/signup.zip"
         rm -f "${artifact}"

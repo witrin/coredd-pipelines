@@ -2,9 +2,11 @@ options:
   logging: CLOUD_LOGGING_ONLY
 substitutions:
   _REGION: europe-west1
-  _REPOSITORY: benchmark
+  _REPOSITORY: packages
+  _PROJECT: $PROJECT_ID
 steps:
-  - id: build
+
+  - id: build-jupyter
     name: python:3.11-slim
     entrypoint: bash
     args:
@@ -12,10 +14,18 @@ steps:
       - |
         set -euo pipefail
 
+        cd .jupyter
+
+        patch=$(grep -oP 'version = "\K[^"]+' pyproject.toml)
+        build="${patch}+$(date -u +%Y%m%d%H%M%S)"
+
+        sed -i "s/version = \"${patch}\"/version = \"${build}\"/" pyproject.toml
+
         python -m pip install --upgrade pip
         python -m pip install build
-        python -m build .jupyter
-  - id: publish
+        python -m build .
+
+  - id: publish-jupyter
     name: python:3.11-slim
     entrypoint: bash
     args:
@@ -26,5 +36,6 @@ steps:
         python -m pip install --upgrade pip
         python -m pip install twine keyring keyrings.google-artifactregistry-auth
         python -m twine upload \
-          --repository-url "https://${_REGION}-python.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/" \
-          /workspace/.jupyter/dist/*
+          --skip-existing \
+          --repository-url "https://${_REGION}-python.pkg.dev/${_PROJECT}/${_REPOSITORY}" \
+          .jupyter/dist/*

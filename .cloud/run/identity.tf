@@ -2,44 +2,12 @@ resource "google_project_service_identity" "developer_connect" {
   provider = google-beta
   project  = data.google_project.current.project_id
   service  = "developerconnect.googleapis.com"
-
-  depends_on = [google_project_service.required["developerconnect.googleapis.com"]]
 }
 
 resource "google_project_iam_member" "developer_connect_cloudbuild_service_agent" {
   project = data.google_project.current.project_id
   role    = "roles/cloudbuild.serviceAgent"
   member  = "serviceAccount:${local.developer_connect_service_account}"
-}
-
-resource "google_cloudbuild_trigger" "identity" {
-  name        = "identity"
-  description = "Deploys the signup blocking function when new commits are pushed."
-  location    = local.region
-  filename    = ".cloud/identity/delivery.yaml"
-
-  repository_event_config {
-    repository = local.cloud_build_repository_resource
-    push {
-      branch = "^main$"
-    }
-  }
-
-  substitutions = {
-    "_REGION"     = local.region
-    "_GITHUB_ORG" = var.github_org
-    "_BUILD_BUCKET" = google_storage_bucket.build.name
-  }
-
-  service_account = "projects/${data.google_project.current.project_id}/serviceAccounts/${local.build_service_account}"
-
-  depends_on = [google_project_service.required["cloudbuild.googleapis.com"]]
-
-  lifecycle {
-    ignore_changes = [
-      repository_event_config
-    ]
-  }
 }
 
 data "archive_file" "signup_dummy" {
@@ -68,7 +36,7 @@ data "archive_file" "signup_dummy" {
 
 resource "google_storage_bucket_object" "signup_dummy" {
   name   = "functions/signup.zip"
-  bucket = google_storage_bucket.build.name
+  bucket = data.terraform_remote_state.build.outputs.bucket
   source = data.archive_file.signup_dummy.output_path
 
   lifecycle {
@@ -87,14 +55,12 @@ resource "google_cloudfunctions_function" "signup" {
   region       = local.region
   trigger_http = true
 
-  source_archive_bucket = google_storage_bucket.build.name
+  source_archive_bucket = data.terraform_remote_state.build.outputs.bucket
   source_archive_object = "functions/signup.zip"
 
   environment_variables = {
     GITHUB_ORG = var.github_org
   }
-
-  depends_on = [google_project_service.required["cloudfunctions.googleapis.com"]]
 
   lifecycle {
     ignore_changes = [
@@ -113,7 +79,6 @@ resource "google_cloudfunctions_function_iam_member" "signup_invoker" {
 }
 
 resource "google_identity_platform_config" "project" {
-  depends_on = [google_project_service.required["identitytoolkit.googleapis.com"]]
   multi_tenant {
     allow_tenants = true
   }
@@ -131,7 +96,6 @@ resource "google_identity_platform_default_supported_idp_config" "github" {
   enabled       = true
   client_id     = data.google_secret_manager_secret_version.github_dagster_client_id.secret_data
   client_secret = data.google_secret_manager_secret_version.github_dagster_client_secret.secret_data
-  depends_on    = [google_project_service.required["identitytoolkit.googleapis.com"]]
 }
 
 resource "google_cloud_run_v2_service" "engine_authentication" {
