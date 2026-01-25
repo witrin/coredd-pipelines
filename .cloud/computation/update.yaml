@@ -1,9 +1,12 @@
 osPolicies:
-  - id: computation-setup
-    description: Compute pipelines configuration
+  
+  - id: cloud
+    description: Cloud infrastructure.
     mode: ENFORCEMENT
     resourceGroups:
+
       - resources:
+
         - id: cloud-ops-agent-repository
           exec:
             validate:
@@ -25,97 +28,58 @@ osPolicies:
             apt:
               name: google-cloud-ops-agent
 
-        - id: cloud-ops-agent-configuration
+        - id: cloud-ops-agent-configuration-directory
           exec:
             validate:
               interpreter: SHELL
               script: |
-                [ -f /etc/google-cloud-ops-agent/config.yaml ] && exit 100 || exit 101
+                [ -d /etc/google-cloud-ops-agent ] && exit 100 || exit 101
             enforce:
               interpreter: SHELL
               script: |
                 mkdir -p /etc/google-cloud-ops-agent
-                cat >/etc/google-cloud-ops-agent/config.yaml <<'EOF'
-                logging:
-                  receivers:
-                    orchestrator:
-                      type: systemd_journald
-                  processors:
-                    orchestrator:
-                      type: exclude_logs
-                      match_any:
-                        - 'NOT jsonPayload._SYSTEMD_UNIT:"dagster-" AND NOT jsonPayload._SYSTEMD_UNIT="argilla-"'
-                    json:
-                      type: parse_json
-                      field: MESSAGE
-                    severity:
-                      type: modify_fields
-                      fields:
-                        severity:
-                          copy_from: jsonPayload.severity
-                  service:
-                    pipelines:
+                chmod 755 /etc/google-cloud-ops-agent
+                exit 100
+
+        - id: cloud-ops-agent-configuration
+          file:
+            path: /etc/google-cloud-ops-agent/config.yaml
+            state: PRESENT
+            permissions: "0644"
+            content: |
+              logging:
+                receivers:
+                  orchestrator:
+                    type: systemd_journald
+                processors:
+                  orchestrator:
+                    type: exclude_logs
+                    match_any:
+                      - 'NOT jsonPayload._SYSTEMD_UNIT:"dagster-" AND NOT jsonPayload._SYSTEMD_UNIT="argilla-"'
+                  json:
+                    type: parse_json
+                    field: MESSAGE
+                  severity:
+                    type: modify_fields
+                    fields:
+                      severity:
+                        copy_from: jsonPayload.severity
+                service:
+                  pipelines:
+                    default_pipeline:
                       default_pipeline:
                         receivers: []
+                    orchestrator:
                       orchestrator:
                         receivers: [orchestrator]
                         processors: [orchestrator, json, severity]
-                EOF
-                systemctl restart google-cloud-ops-agent || true
-                exit 100
+  
+  - id: dagster
+    description: Dagster orchestrator.
+    mode: ENFORCEMENT
+    resourceGroups:
 
-        - id: project-repository
-          exec:
-            validate:
-              interpreter: SHELL
-              script: |
-                list_file="/etc/apt/sources.list.d/${PACKAGES}.list"
-                [ -f "$list_file" ] && exit 100 || exit 101
-            enforce:
-              interpreter: SHELL
-              script: |
-                list_file="/etc/apt/sources.list.d/${PACKAGES}.list"
-                transport_file="/etc/apt/sources.list.d/artifact-registry-transport.list"
-
-                apt update -y
-                apt install -y curl gnupg
-
-                if [ ! -f /usr/share/keyrings/cloud.google.gpg ]; then
-                  curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
-                    | gpg --batch --yes --dearmor \
-                    >/usr/share/keyrings/cloud.google.gpg
-                fi
-
-                if [ ! -f /etc/apt/sources.list.d/google-cloud-sdk.list ]; then
-                  echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
-                    >/etc/apt/sources.list.d/google-cloud-sdk.list
-                fi
-
-                if [ ! -f "$transport_file" ]; then
-                  echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt apt-transport-artifact-registry-stable main" \
-                    >"$transport_file"
-                fi
-
-                apt update -y
-                apt install -y apt-transport-artifact-registry
-
-                if [ ! -f /usr/share/keyrings/artifact-registry.gpg ]; then
-                  curl -fsSL "https://${REGION}-apt.pkg.dev/doc/repo-signing-key.gpg" \
-                    | gpg --batch --yes --dearmor \
-                    >/usr/share/keyrings/artifact-registry.gpg
-                fi
-
-                echo "deb [arch=all signed-by=/usr/share/keyrings/artifact-registry.gpg] ar+https://${REGION}-apt.pkg.dev/projects/${PROJECT} ${PACKAGES} main" \
-                  >"$list_file"
-
-                apt update -y
-                exit 100
-
-        - id: google-osconfig-agent-package
-          pkg:
-            desiredState: INSTALLED
-            apt:
-              name: google-osconfig-agent
+      - resources:
 
         - id: dagster-cloud-package
           pkg:
@@ -123,40 +87,44 @@ osPolicies:
             apt:
               name: dagster-cloud
 
-        - id: argilla-cloud-package
-          pkg:
-            desiredState: INSTALLED
-            apt:
-              name: argilla-cloud
+        - id: dagster-build-environment
+          file:
+            path: /etc/dagster/build.env
+            state: PRESENT
+            permissions: "0600"
+            content: |
+              IMAGE_TAG=${IMAGE}
 
-        - id: docker-configuration
+        - id: dagster-workspace-configuration
           exec:
             validate:
               interpreter: SHELL
               script: |
-                systemctl is-active --quiet docker && [ -f /root/.docker/config.json ] && exit 100 || exit 101
+                [ -f /etc/dagster/workspace.yaml ] && exit 100 || exit 101
             enforce:
               interpreter: SHELL
               script: |
-                if [ -z "${registry:-}" ]; then
-                  raw="$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/docker || true)"
-                  if [ -n "$raw" ]; then
-                    registry="$(printf '%s' "$raw" | base64 -d | jq -r '.registry // empty')"
-                  fi
+                set -eu
+                umask 077
+
+                if ! command -v jq >/dev/null 2>&1; then
+                  apt update -y
+                  apt install -y jq
                 fi
-                if [ -z "${registry:-}" ]; then
-                  exit 101
-                fi
-                install -d -m 700 /root/.docker
-                cat >/root/.docker/config.json <<EOF
-                {
-                  "credHelpers": {
-                    "${registry}": "gcloud"
-                  }
-                }
+
+                meta="$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/dagster)"
+                json="$(printf '%s' "$meta" | base64 -d)"
+                v() { printf '%s' "$json" | jq -r "$1"; }
+
+                mkdir -p /etc/dagster
+                cat >/etc/dagster/workspace.yaml <<EOF
+                load_from:
+                  - grpc_server:
+                      host: 127.0.0.1
+                      port: $(v '.grpc.port')
+                      location_name: default
                 EOF
-                systemctl daemon-reload
-                systemctl enable --now docker.service || true
+                chmod 644 /etc/dagster/workspace.yaml
                 exit 100
 
         - id: dagster-configuration
@@ -164,7 +132,18 @@ osPolicies:
             validate:
               interpreter: SHELL
               script: |
-                [ -f /etc/dagster/daemon.env ] && [ -f /etc/dagster/release.env ] && exit 100 || exit 101
+                set -eu
+
+                meta="$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/dagster)"
+                hash="$(printf '%s' "$meta" | sha256sum | cut -d' ' -f1)"
+
+                if [ -f /etc/dagster/.meta-hash ]; then
+                  if [ "$(cat /etc/dagster/.meta-hash)" = "$hash" ]; then
+                    exit 100
+                  fi
+                fi
+
+                exit 101
             enforce:
               interpreter: SHELL
               script: |
@@ -232,33 +211,32 @@ osPolicies:
                 JOB_IMAGE_REPOSITORY=$(v '.images.job')
                 EOF
 
-                cat >/etc/dagster/workspace.yaml <<EOF
-                load_from:
-                  - grpc_server:
-                      host: 127.0.0.1
-                      port: $(v '.grpc.port')
-                      location_name: default
-                EOF
-
-                cat >/etc/dagster/release.env <<EOF
-                GRPC_PORT=$(v '.grpc.port')
+                cat >/etc/dagster/meta.env <<EOF
                 IMAGE_REPOSITORY=$(v '.images.pipelines')
-                IMAGE_TAG=${IMAGE}
-                EOF
-
-                cat >/etc/dagster/locations/release.env <<EOF
-                DAGSTER_LOCATION=default
                 GRPC_PORT=$(v '.grpc.port')
-                IMAGE_REPOSITORY=$(v '.images.pipelines')
-                IMAGE_TAG=${IMAGE}
                 EOF
 
-                chmod 600 /etc/dagster/*.env
-                chmod 644 /etc/dagster/workspace.yaml
+                printf '%s' "$meta" | sha256sum | cut -d' ' -f1 >/etc/dagster/.meta-hash
+
+                chmod 600 /etc/dagster/*.env /etc/dagster/.meta-hash
+                chmod 600 /etc/dagster/locations/*.env
                 systemctl daemon-reload
                 systemctl enable --now dagster-release.path || true
                 systemctl restart dagster-release.service || true
                 exit 100
+  
+  - id: argilla
+    description: Argilla annotation framwork.
+    mode: ENFORCEMENT
+    resourceGroups:
+  
+      - resources:
+
+        - id: argilla-cloud-package
+          pkg:
+            desiredState: INSTALLED
+            apt:
+              name: argilla-cloud
 
         - id: argilla-configuration
           exec:

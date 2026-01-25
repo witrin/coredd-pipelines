@@ -280,8 +280,13 @@ resource "google_compute_instance" "engine" {
   metadata = {
     "google-logging-enabled"    = "TRUE"
     "google-monitoring-enabled" = "TRUE"
-    "enable-osconfig"           = "TRUE"
     "unit-version"              = local.unit_version
+    "user-data" = templatefile("${path.module}/computation/initialize.yaml.tpl", {
+      region   = local.region
+      project  = data.google_project.current.project_id
+      packages = google_artifact_registry_repository.apt.repository_id
+      registry = local.artifact_registry_host
+    })
     "docker" = base64encode(jsonencode({
       registry = local.artifact_registry_host
     }))

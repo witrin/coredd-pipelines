@@ -10,7 +10,6 @@ RemainAfterExit=yes
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=600
-EnvironmentFile=-/etc/dagster/release.env
 ExecStartPre=-/usr/bin/docker rm -f dagster-interface
 ExecStartPre=/bin/sh -c "docker image ls ${IMAGE_REPOSITORY} --format '{{.Repository}}:{{.Tag}}' | grep -v ':${IMAGE_TAG}$' | grep -v ':<none>$' | xargs -r docker image rm"
 ExecStartPre=/usr/bin/docker pull ${IMAGE_REPOSITORY}:${IMAGE_TAG}

@@ -9,27 +9,39 @@ substitutions:
   _PROJECT: $PROJECT_ID
 steps:
   - id: build-pipelines-image
-    name: gcr.io/kaniko-project/executor:latest
+    name: gcr.io/cloud-builders/docker
     args:
-      - --destination=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/pipelines:${_TAG}
-      - --destination=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/pipelines:latest
+      - build
+      - --tag=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/pipelines:${_TAG}
+      - --tag=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/pipelines:latest
       - --target=pipelines
-      - --cache=true
-      - --cache-repo=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/pipelines-cache
-      - --context=.
-      - --dockerfile=Dockerfile
-
-  - id: build-evalution-image
-    waitFor: ['-']
-    name: gcr.io/kaniko-project/executor:latest
+      - --cache-from=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/pipelines:latest
+      - .
+  - id: push-pipelines-image
+    waitFor: [build-pipelines-image]
+    name: gcr.io/cloud-builders/docker
     args:
-      - --destination=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation:${_TAG}
-      - --destination=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation:latest
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/pipelines
+
+  - id: build-evaluation-image
+    waitFor: ['-']
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --tag=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation:${_TAG}
+      - --tag=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation:latest
       - --target=evaluation
-      - --cache=true
-      - --cache-repo=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation-cache
-      - --context=.
-      - --dockerfile=Dockerfile
+      - --cache-from=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation:latest
+      - .
+  - id: push-evaluation-image
+    waitFor: [build-evaluation-image]
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation
 
   - id: build-pipelines-package
     waitFor: ['-']
@@ -52,6 +64,11 @@ steps:
 
         rm -rf "$root"
         mkdir -p "$root/DEBIAN" "$root/usr/local/bin" "$root/lib/systemd/system"
+        mkdir -p "$root/etc/systemd/system/dagster-daemon.service.d"
+        mkdir -p "$root/etc/systemd/system/dagster-interface.service.d"
+        mkdir -p "$root/etc/systemd/system/dagster-location@.service.d"
+        mkdir -p "$root/etc/systemd/system/dagster-release.path.d"
+        mkdir -p "$root/etc/dagster/locations"
 
         cp -R .cloud/computation/dagster/package/DEBIAN/* "$root/DEBIAN/"
         sed -i "s/__VERSION__/$version/" "$root/DEBIAN/control"
@@ -60,14 +77,20 @@ steps:
         rm -rf "$systemd_tmp"
         mkdir -p "$systemd_tmp"
 
-        for unit in .cloud/computation/dagster/systemd/*; do
+        for unit in .cloud/computation/dagster/systemd/*.service .cloud/computation/dagster/systemd/*.timer .cloud/computation/dagster/systemd/*.path; do
           envsubst '${unit_version}' < "$unit" > "$systemd_tmp/$(basename "$unit")"
         done
 
-        install -m 0755 .cloud/computation/dagster/synchronize-code.sh "$root/usr/local/bin/dagster-locations-synchronize"
-        install -m 0644 "$systemd_tmp"/*.service "$root/lib/systemd/system/"
-        install -m 0644 "$systemd_tmp"/*.timer "$root/lib/systemd/system/"
-        install -m 0644 "$systemd_tmp"/*.path "$root/lib/systemd/system/"
+        install -m 0755 .cloud/computation/dagster/update.sh "$root/usr/local/bin/dagster-locations-synchronize"
+        for unit in "$systemd_tmp"/*.service "$systemd_tmp"/*.timer "$systemd_tmp"/*.path; do
+          install -m 0644 "$unit" "$root/lib/systemd/system/dagster-$(basename "$unit")"
+        done
+
+        install -m 0644 .cloud/computation/dagster/systemd/service.conf "$root/etc/systemd/system/dagster-daemon.service.d/10.conf"
+        install -m 0644 .cloud/computation/dagster/systemd/service.conf "$root/etc/systemd/system/dagster-interface.service.d/10.conf"
+        install -m 0644 .cloud/computation/dagster/systemd/service.conf "$root/etc/systemd/system/dagster-location@.service.d/10.conf"
+        install -m 0644 .cloud/computation/dagster/systemd/path.conf "$root/etc/systemd/system/dagster-release.path.d/10.conf"
+        install -m 0600 .cloud/computation/dagster/release.env "$root/etc/dagster/locations/"
 
         dpkg-deb --build "$root" "/workspace/dagster-cloud_${version}_all.deb"
 
@@ -120,8 +143,8 @@ steps:
 
   - id: update-computation-setup
     waitFor:
-      - build-pipelines-image
-      - build-evalution-image
+      - push-pipelines-image
+      - push-evaluation-image
       - build-pipelines-package
       - build-evaluation-package
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
