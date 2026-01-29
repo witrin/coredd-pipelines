@@ -133,6 +133,54 @@ extraction_pull_requests_raw
 Due to a current Dagster limitation, the active branch is prepended as the first path segment of the asset key at registration time (e.g. `main/scope_repositories_raw`). The convention above describes the branchless logical name; the branch prefix is a temporary workaround.
 
 
+## Secret Management
+
+The Dagster compute instance synchronizes secrets from Google Secret Manager.
+Secrets are filtered by a configured prefix (e.g., `pipelines`) and require a
+label named `environment` whose value becomes the environment variable name.
+
+### Create a Secret
+
+```bash
+echo -n "xxx" | gcloud secrets create pipelines-github-api-token \
+  --project=bug-request \
+  --labels=environment=github_token \
+  --data-file=-
+```
+
+The label value is automatically converted to uppercase (e.g., `github_token` becomes `GITHUB_TOKEN`).
+
+### Grant Access
+
+The Dagster compute service account and the Cloud Run job service account need
+read access to the secret:
+
+```bash
+gcloud secrets add-iam-policy-binding pipelines-github-api-token \
+  --project=bug-request \
+  --member="serviceAccount:dagster-compute@bug-request.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+### List Secrets
+
+```bash
+gcloud secrets list --project=bug-request
+```
+
+### View Secret Details
+
+```bash
+gcloud secrets describe pipelines-github-api-token --project=bug-request
+```
+
+### Access Secret Value
+
+```bash
+gcloud secrets versions access latest --secret=pipelines-github-api-token --project=bug-request
+```
+
+
 ## Asset Storage Projection
 
 Assets are projected to GCS as versioned Parquet files.  

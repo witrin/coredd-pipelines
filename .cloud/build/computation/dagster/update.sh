@@ -107,7 +107,6 @@ database_host=""
 database_password=""
 port_start=""
 port_end=""
-secrets_changed=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -215,8 +214,9 @@ sync_secrets() {
       echo "Secret $key missing label environment" >&2
       continue
     fi
+    name=$(echo "$name" | tr '[:lower:]' '[:upper:]')
     if [[ ! "$name" =~ ^[A-Z_][A-Z0-9_]*$ ]]; then
-      echo "Secret $key label environment is not a valid env name: $name" >&2
+      echo "Secret $key label environment is not a valid name with $name" >&2
       continue
     fi
     value=$(gcloud secrets versions access latest --secret="$key" --project="$project" 2>/dev/null || true)
@@ -229,20 +229,9 @@ sync_secrets() {
   if [[ ! -f "$secrets" ]] || ! cmp -s "$tmp" "$secrets"; then
     mv "$tmp" "$secrets"
     chmod 600 "$secrets"
-    secrets_changed=1
+  else
+    rm -f "$tmp"
   fi
-  rm -f "$tmp"
-}
-
-restart_location_services() {
-  local -a units=()
-  mapfile -t units < <(
-    systemctl list-units --full --state=active "$unit@*.service" --no-legend 2>/dev/null | awk '{print $1}'
-  )
-  for location_unit in "${units[@]}"; do
-    [[ -n "$location_unit" ]] || continue
-    systemctl restart "$location_unit" || true
-  done
 }
 
 assign_port() {
@@ -540,10 +529,6 @@ for configuration in "$locations"/*.env; do
   echo "Delete environment $branch"
   rm -f "$configuration"
 done
-
-if [[ "$secrets_changed" -eq 1 ]]; then
-  restart_location_services
-fi
 
 cleanup_cloud_run_jobs
 

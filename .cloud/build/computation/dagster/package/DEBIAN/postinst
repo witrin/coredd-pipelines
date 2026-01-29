@@ -3,6 +3,7 @@ set -e
 
 systemctl daemon-reload
 systemctl enable dagster-release.path
+systemctl enable dagster-secrets.path
 systemctl enable dagster-location@release.service
 systemctl enable dagster-daemon.service
 systemctl enable dagster-interface.service
