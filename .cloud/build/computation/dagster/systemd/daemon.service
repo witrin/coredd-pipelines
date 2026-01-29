@@ -11,7 +11,7 @@ Restart=on-failure
 RestartSec=5
 TimeoutStartSec=600
 ExecStartPre=-/usr/bin/docker rm -f dagster-daemon
-ExecStartPre=/bin/sh -c "docker image ls ${IMAGE_REPOSITORY} --format '{{.Repository}}:{{.Tag}}' | grep -v ':${IMAGE_TAG}$' | grep -v ':<none>$' | xargs -r docker image rm"
+ExecStartPre=-/bin/sh -c "docker image ls ${IMAGE_REPOSITORY} --format '{{.Repository}}:{{.Tag}}' | grep -v ':${IMAGE_TAG}$' | grep -v ':<none>$' | xargs -r docker image rm"
 ExecStartPre=/usr/bin/docker pull ${IMAGE_REPOSITORY}:${IMAGE_TAG}
 ExecStart=/usr/bin/docker run \
   --rm \
