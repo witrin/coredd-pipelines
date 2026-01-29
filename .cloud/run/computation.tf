@@ -159,6 +159,18 @@ resource "google_service_account_iam_member" "allow_impersonation" {
   member             = "serviceAccount:${data.google_compute_default_service_account.compute_default.email}"
 }
 
+resource "google_project_iam_member" "compute_secrets" {
+  project = data.google_project.current.project_id
+  role    = "roles/secretmanager.secretAccessor"
+  member  = "serviceAccount:${local.accounts.compute_default}"
+
+  condition {
+    title       = "secrets_prefix_only"
+    description = "Access only to secrets with ${local.secrets_prefix}- prefix"
+    expression  = "resource.name.startsWith(\"projects/${local.project_number}/secrets/${local.secrets_prefix}-\")"
+  }
+}
+
 resource "google_compute_address" "engine" {
   name   = "engine"
   region = local.region
@@ -248,7 +260,7 @@ resource "google_compute_instance" "engine" {
       grpc = {
         port = 4100
       }
-      prefix = "pipelines"
+      prefix = local.secrets_prefix
     }))
     "argilla" = base64encode(jsonencode({
       project = data.google_project.current.project_id

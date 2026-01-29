@@ -20,9 +20,18 @@ resource "google_artifact_registry_repository" "containers" {
     id     = "delete-old-pipeline-images"
     action = "DELETE"
     condition {
-      tag_state            = "TAGGED"
-      older_than           = "604800s" # 7 days
+      tag_state             = "TAGGED"
+      older_than            = "604800s"
       package_name_prefixes = ["pipelines/"]
+    }
+  }
+
+  cleanup_policies {
+    id     = "keep-nested-pipeline-images"
+    action = "KEEP"
+    condition {
+      tag_state             = "TAGGED"
+      package_name_prefixes = ["pipelines/code", "pipelines/job"]
     }
   }
 

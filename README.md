@@ -150,17 +150,7 @@ echo -n "xxx" | gcloud secrets create pipelines-github-api-token \
 
 The label value is automatically converted to uppercase (e.g., `github_token` becomes `GITHUB_TOKEN`).
 
-### Grant Access
-
-The Dagster compute service account and the Cloud Run job service account need
-read access to the secret:
-
-```bash
-gcloud secrets add-iam-policy-binding pipelines-github-api-token \
-  --project=bug-request \
-  --member="serviceAccount:dagster-compute@bug-request.iam.gserviceaccount.com" \
-  --role="roles/secretmanager.secretAccessor"
-```
+Access is granted automatically via Terraform for all secrets with the `pipelines-` prefix.
 
 ### List Secrets
 

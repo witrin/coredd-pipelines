@@ -117,6 +117,7 @@ data "google_app_engine_default_service_account" "app_engine" {
 }
 
 locals {
+  secrets_prefix                     = "pipelines"
   region                             = "europe-west1"
   zone                               = "${local.region}-b"
   artifact_registry_host             = format("%s-docker.pkg.dev", local.region)
