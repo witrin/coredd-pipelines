@@ -69,7 +69,7 @@ parse_database_uri() {
     die "Database URI host is empty"
   fi
   path="${host#*/}"
-  database_name="${path%%\\?*}"
+  database_name="${path%%\?*}"
   if [[ -z "$database_name" ]]; then
     die "Database URI name is empty"
   fi
@@ -77,7 +77,7 @@ parse_database_uri() {
   if [[ "$path" == *"?"* ]]; then
     local query key value pair
     local -a pairs
-    query="${path#*\\?}"
+    query="${path#*\?}"
     IFS='&' read -r -a pairs <<< "$query"
     for pair in "${pairs[@]}"; do
       key="${pair%%=*}"
@@ -350,7 +350,6 @@ ensure_cloud_run_job() {
     --set-env-vars="DATABASE_USER=${database_user}" \
     --set-env-vars="DATABASE_NAME=${database_name}" \
     --set-secrets="DATABASE_PASSWORD=${database_password}" \
-    --set-secrets="GITHUB_TOKEN=github-dagster-api-secret:latest" \
     --set-env-vars="CLOUD_BUCKET=${bucket}" \
     --set-env-vars="DAGSTER_LOCATION=$branch" \
     --quiet
