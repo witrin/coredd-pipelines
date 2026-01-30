@@ -28,6 +28,12 @@ resource "google_service_account_iam_member" "build_act_as" {
   member             = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-cloudbuild.iam.gserviceaccount.com"
 }
 
+resource "google_secret_manager_secret_iam_member" "build_github_api_token" {
+  secret_id = data.google_secret_manager_secret.build_github_api_token.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${local.build_service_account}"
+}
+
 resource "google_storage_bucket" "build" {
   name                        = "${data.google_project.current.project_id}-build"
   location                    = local.region

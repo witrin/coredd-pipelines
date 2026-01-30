@@ -5,6 +5,7 @@ substitutions:
   _REPOSITORY: containers
   _PROJECT: $PROJECT_ID
   _BRANCH: $BRANCH_NAME
+  _SECRET: bug-request-github-oauthtoken-88e712
 steps:
 
   - id: delete
@@ -20,19 +21,34 @@ steps:
           exit 0
         fi
 
+        token=$(gcloud secrets versions access latest \
+          --secret=build-github-api-token)
+
+        if [[ -z "${token}" ]]; then
+          echo "Failed to fetch GitHub token from Secret Manager"
+          exit 1
+        fi
+
         declare -A branches=()
         branches["main"]=1
 
-        cd /workspace
+        page=1
+        while :; do
+          response=$(curl -sf \
+            -H "Authorization: token ${token}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/bug-request/benchmark/pulls?state=open&per_page=100&page=${page}")
 
-        git fetch --all --prune 2>/dev/null || true
+          [[ -z "${response}" || "${response}" == "[]" ]] && break
 
-        while read -r ref; do
-          [[ -z "${ref}" ]] && continue
-          ref="${ref#origin/}"
-          [[ "${ref}" == "HEAD" ]] && continue
-          branches["${ref}"]=1
-        done < <(git branch -r --format='%(refname:short)' 2>/dev/null)
+          while read -r branch; do
+            [[ -n "${branch}" ]] && branches["${branch}"]=1
+          done < <(echo "${response}" | python3 -c "import sys,json; print('\n'.join(pr['head']['ref'] for pr in json.load(sys.stdin)))")
+
+          count=$(echo "${response}" | grep -c '"number":' || true)
+          [[ ${count} -lt 100 ]] && break
+          ((page++))
+        done
 
         echo "Protected branches are ${!branches[*]}"
 
@@ -50,7 +66,7 @@ steps:
                 continue
               fi
               if [[ -n "${branches[${tag}]:-}" ]]; then
-                echo "Keeping ${tag} (branch exists)"
+                echo "Keeping ${tag}"
                 continue
               fi
               image="${repository}:${tag}"
