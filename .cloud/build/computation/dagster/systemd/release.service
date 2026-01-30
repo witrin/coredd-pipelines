@@ -6,6 +6,6 @@ After=docker.service
 [Service]
 Type=oneshot
 ExecStart=/bin/systemctl restart \
-  dagster-location@release.service \
+  dagster-location@*.service \
   dagster-daemon.service \
   dagster-interface.service

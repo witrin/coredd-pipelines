@@ -182,8 +182,6 @@ osPolicies:
                 CLOUD_RUN_PROJECT=$(v '.project')
                 CLOUD_RUN_REGION=$(v '.region')
                 CLOUD_RUN_JOB=pipelines
-                GRPC_HOST=127.0.0.1
-                GRPC_PORT=$(v '.grpc.port')
                 EOF
 
                 cat >/etc/dagster/interface.env <<EOF
