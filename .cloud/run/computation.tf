@@ -159,10 +159,10 @@ resource "google_service_account_iam_member" "allow_impersonation" {
   member             = "serviceAccount:${data.google_compute_default_service_account.compute_default.email}"
 }
 
-resource "google_project_iam_member" "compute_secrets" {
+resource "google_project_iam_member" "runtime_secrets" {
   project = data.google_project.current.project_id
   role    = "roles/secretmanager.secretAccessor"
-  member  = "serviceAccount:${local.accounts.compute_default}"
+  member  = "serviceAccount:${local.accounts.runtime}"
 
   condition {
     title       = "secrets_prefix_only"

@@ -5,7 +5,6 @@ locations="/etc/dagster/locations"
 workspace="/etc/dagster/workspace.yaml"
 unit="dagster-location"
 lock="/run/dagster-synchronize.lock"
-secrets="/etc/dagster/secrets.env"
 
 usage() {
   cat <<'EOF'
@@ -99,8 +98,8 @@ region=""
 account=""
 bucket=""
 prefix=""
-code_image_repository=""
-job_image_repository=""
+code_registry=""
+job_registry=""
 database_user=""
 database_name=""
 database_host=""
@@ -166,8 +165,8 @@ if [[ $# -ne 2 ]]; then
   die "Expected code and job registry"
 fi
 
-code_image_repository="$1"
-job_image_repository="$2"
+code_registry="$1"
+job_registry="$2"
 shift 2
 
 require_arg "$project" "--project"
@@ -177,8 +176,8 @@ require_arg "$database" "--database"
 require_arg "$ports" "--ports"
 require_arg "$account" "--account"
 require_arg "$prefix" "--prefix"
-require_arg "$code_image_repository" "code registry"
-require_arg "$job_image_repository" "job registry"
+require_arg "$code_registry" "code registry"
+require_arg "$job_registry" "job registry"
 
 parse_ports "$ports"
 parse_database_uri "$database"
@@ -193,15 +192,13 @@ ensure_dirs() {
   mkdir -p "$locations"
 }
 
-sync_secrets() {
-  local output tmp key name value
+fetch_secrets() {
+  local output key name
   local -a keys=()
   output=$(gcloud secrets list --project="$project" --format="value(name)") || die "Failed to list secrets"
   if [[ -n "$output" ]]; then
     mapfile -t keys < <(printf '%s\n' "$output" | sort)
   fi
-  tmp=$(mktemp)
-  chmod 600 "$tmp"
   for key in "${keys[@]}"; do
     [[ -n "$key" ]] || continue
     if [[ "$key" != "$prefix"* ]]; then
@@ -219,19 +216,8 @@ sync_secrets() {
       echo "Secret $key label environment is not a valid name with $name" >&2
       continue
     fi
-    value=$(gcloud secrets versions access latest --secret="$key" --project="$project" 2>/dev/null || true)
-    if [[ -z "$value" ]]; then
-      echo "Secret $key value is empty" >&2
-    fi
-    printf '%s=%s\n' "$name" "$value" >>"$tmp"
+    printf '%s=%s:latest\n' "$name" "$key"
   done
-  mkdir -p "$(dirname "$secrets")"
-  if [[ ! -f "$secrets" ]] || ! cmp -s "$tmp" "$secrets"; then
-    mv "$tmp" "$secrets"
-    chmod 600 "$secrets"
-  else
-    rm -f "$tmp"
-  fi
 }
 
 assign_port() {
@@ -318,26 +304,31 @@ cloud_run_job_name() {
 
 ensure_cloud_run_job() {
   local branch=$1
-  local job image current_image
+  local job image
+
   job=$(cloud_run_job_name "$branch") || {
     echo "Skip job $branch (invalid name)"
     return 0
   }
-  image="${job_image_repository}:$branch"
-  active_jobs["$job"]=1
-  current_image=$(gcloud run jobs describe "$job" \
+
+  image=$(gcloud run jobs describe "$job" \
     --project="$project" \
     --region="$region" \
     --format='value(template.template.containers[0].image)' 2>/dev/null || true)
-  if [[ "$current_image" == "$image" ]]; then
+
+  active_jobs["$job"]=1
+  
+  if [[ "$image" == "${job_registry}:$branch" ]]; then
     echo "Job ok $branch ($job)"
     return 0
   fi
+  
   echo "Deploy job $branch ($job)"
+  
   gcloud run jobs deploy "$job" \
     --project="$project" \
     --region="$region" \
-    --image="$image" \
+    --image="${job_registry}:$branch" \
     --service-account="$account" \
     --tasks=1 \
     --parallelism=1 \
@@ -350,7 +341,9 @@ ensure_cloud_run_job() {
     --set-env-vars="DATABASE_USER=${database_user}" \
     --set-env-vars="DATABASE_NAME=${database_name}" \
     --set-secrets="DATABASE_PASSWORD=${database_password}" \
+    ${secrets:+--set-secrets="$(echo "$secrets" | paste -sd,)"} \
     --set-env-vars="CLOUD_BUCKET=${bucket}" \
+    --set-env-vars="CLOUD_PROJECT=${project}" \
     --set-env-vars="DAGSTER_LOCATION=$branch" \
     --quiet
 }
@@ -413,7 +406,7 @@ update_workspace() {
 }
 
 images_json=$(
-  gcloud artifacts docker images list "${code_image_repository}" \
+  gcloud artifacts docker images list "${code_registry}" \
     --include-tags \
     --format=json \
     --project="$project"
@@ -437,7 +430,12 @@ done < <(
 )
 
 ensure_dirs
-sync_secrets
+
+secrets=$(fetch_secrets)
+
+if [[ -n "$secrets" ]] && { [[ ! -f /etc/dagster/secrets.env ]] || [[ "$(cat /etc/dagster/secrets.env)" != "$secrets" ]]; }; then
+  echo "$secrets" > /etc/dagster/secrets.env
+fi
 
 for branch in "${!active_digests[@]}"; do
   digest="${active_digests[$branch]}"
@@ -455,7 +453,7 @@ for branch in "${!active_digests[@]}"; do
 DAGSTER_LOCATION=$branch
 IMAGE_TAG=$branch
 GRPC_PORT=$port
-IMAGE_REPOSITORY=${code_image_repository}
+IMAGE_REPOSITORY=${code_registry}
 EOF
     systemctl enable --now "$unit@$branch.service"
   else
@@ -468,9 +466,9 @@ EOF
         echo "IMAGE_TAG=$branch" >>"$configuration"
       fi
       if grep -q '^IMAGE_REPOSITORY=' "$configuration"; then
-        sed -i "s|^IMAGE_REPOSITORY=.*|IMAGE_REPOSITORY=${code_image_repository}|" "$configuration"
+        sed -i "s|^IMAGE_REPOSITORY=.*|IMAGE_REPOSITORY=${code_registry}|" "$configuration"
       else
-        echo "IMAGE_REPOSITORY=${code_image_repository}" >>"$configuration"
+        echo "IMAGE_REPOSITORY=${code_registry}" >>"$configuration"
       fi
       set_env_digest "$configuration" "$digest"
       if ! systemctl restart "$unit@$branch.service"; then
@@ -537,11 +535,11 @@ mapfile -t running_images < <(
 
 declare -A active_images
 for branch in "${!active_digests[@]}"; do
-  active_images["${code_image_repository}:$branch"]=1
+  active_images["${code_registry}:$branch"]=1
 done
 
 mapfile -t images < <(
-  docker images "${code_image_repository}" --format '{{.Repository}}:{{.Tag}}' | grep -v ':<none>$'
+  docker images "${code_registry}" --format '{{.Repository}}:{{.Tag}}' | grep -v ':<none>$'
 )
 
 for image in "${images[@]}"; do
