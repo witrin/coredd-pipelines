@@ -126,6 +126,7 @@ osPolicies:
                 DATABASE_PASSWORD=$(s 'dagster-database-password')
                 DATABASE_NAME=$(v '.database.name')
                 CLOUD_BUCKET=$(v '.bucket')
+                CLOUD_PROJECT=$(v '.project')
                 EOF
 
                 cat >/etc/dagster/locations.env <<EOF
