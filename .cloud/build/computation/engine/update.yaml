@@ -1,6 +1,6 @@
 osPolicies:
   
-  - id: cloud
+  - id: setup
     description: Cloud infrastructure.
     mode: ENFORCEMENT
     resourceGroups:
