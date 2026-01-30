@@ -1,6 +1,13 @@
 #!/bin/sh
 set -e
 
+mkdir -p /etc/dagster/locations
+
+touch /etc/dagster/location.env
+touch /etc/dagster/secrets.env
+
+chmod 600 /etc/dagster/location.env /etc/dagster/secrets.env
+
 systemctl daemon-reload
 systemctl enable dagster-release.path
 systemctl enable dagster-secrets.path
