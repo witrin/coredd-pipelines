@@ -226,7 +226,7 @@ resource "google_compute_instance" "engine" {
     "google-logging-enabled"    = "TRUE"
     "google-monitoring-enabled" = "TRUE"
     "unit-version"              = local.unit_version
-    "user-data" = templatefile("${path.module}/computation/initialize.yaml.tpl", {
+    "user-data" = templatefile("${path.module}/../build/computation/engine/initialize.yaml.tpl", {
       region   = local.region
       project  = data.google_project.current.project_id
       packages = data.terraform_remote_state.build.outputs.registry.packages

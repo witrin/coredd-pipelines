@@ -1,0 +1,102 @@
+osPolicies:
+  
+  - id: setup
+    description: Argilla annotation framework.
+    mode: ENFORCEMENT
+    resourceGroups:
+  
+      - resources:
+
+        - id: argilla-cloud-package
+          pkg:
+            desiredState: INSTALLED
+            apt:
+              name: argilla-cloud
+
+        - id: argilla-configuration
+          exec:
+            validate:
+              interpreter: SHELL
+              script: |
+                [ -f /etc/argilla.env ] && [ -f /etc/argilla/release.env ] && exit 100 || exit 101
+            enforce:
+              interpreter: SHELL
+              script: |
+                set -eu
+                umask 077
+
+                meta="$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/argilla)"
+                json="$(printf '%s' "$meta" | base64 -d)"
+                v() { printf '%s' "$json" | jq -r "$1"; }
+
+                token="$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token | jq -r .access_token)"
+                s() {
+                  curl -fsS -H "Authorization: Bearer $token" \
+                    "https://secretmanager.googleapis.com/v1/projects/$(v '.project')/secrets/$1/versions/latest:access" \
+                  | jq -r '.payload.data' | tr '_-' '/+' | base64 -d
+                }
+
+                mkdir -p /etc/argilla
+
+                cat >/etc/argilla.env <<EOF
+                ARGILLA_HOST=0.0.0.0
+                ARGILLA_PORT=6900
+                ARGILLA_DATABASE_HOST=$(v '.database.host')
+                ARGILLA_DATABASE_PORT=$(v '.database.port')
+                ARGILLA_DATABASE_SSLMODE=$(v '.database.ssl')
+                ARGILLA_DATABASE_USER=$(v '.database.user')
+                ARGILLA_DATABASE_PASSWORD=$(s 'dagster-database-password')
+                ARGILLA_DATABASE_NAME=$(v '.database.name')
+                ARGILLA_DATABASE_URL=postgresql+asyncpg://$(v '.database.user'):$(s 'dagster-database-password')@$(v '.database.host'):$(v '.database.port')/$(v '.database.name')
+                ARGILLA_ELASTICSEARCH=http://127.0.0.1:9200
+                ARGILLA_REDIS_URL=redis://127.0.0.1:6379/0
+                ARGILLA_AUTHENTICATION_METHOD=oauth2
+                ARGILLA_OAUTH_PROVIDER=github
+                ARGILLA_AUTH_OAUTH_CFG=/etc/argilla/oauth.yml
+                ARGILLA_OAUTH2_GITHUB_CLIENT_ID=$(s 'github-argilla-client-id')
+                ARGILLA_OAUTH2_GITHUB_CLIENT_SECRET=$(s 'github-argilla-client-secret')
+                SOCIAL_AUTH_GITHUB_SCOPE=read:user,user:email
+                SOCIAL_AUTH_GITHUB_ORG_NAME=bug-request
+                EOF
+
+                cat >/etc/argilla/oauth.yml <<EOF
+                providers:
+                  - name: github
+                    client_id: $(s 'github-argilla-client-id')
+                    client_secret: $(s 'github-argilla-client-secret')
+                    scope: "read:user,user:email"
+                allowed_workspaces:
+                  - name: bug-request
+                allow_http_redirect: false
+                EOF
+
+                cat >/etc/argilla/elasticsearch.env <<EOF
+                ES_JAVA_OPTS=-Xms512m -Xmx512m
+                node.name=elasticsearch
+                cluster.name=es-argilla-local
+                discovery.type=single-node
+                cluster.routing.allocation.disk.threshold_enabled=false
+                xpack.security.enabled=false
+                EOF
+
+                cat >/etc/argilla/release.env <<EOF
+                IMAGE_REPOSITORY=$(v '.image')
+                IMAGE_TAG=${IMAGE}
+                EOF
+
+                chmod 600 /etc/argilla/*.env /etc/argilla/oauth.yml /etc/argilla/release.env
+                chmod 644 /etc/argilla/elasticsearch.env
+                systemctl daemon-reload
+                systemctl enable --now argilla-release.path || true
+                systemctl restart argilla-release.service || true
+                exit 100
+
+instanceFilter:
+  inclusionLabels:
+    - labels:
+        role: computation
+
+rollout:
+  disruptionBudget:
+    percent: 100
+  minWaitDuration: 0s

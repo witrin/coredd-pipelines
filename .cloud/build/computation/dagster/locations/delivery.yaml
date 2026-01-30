@@ -6,7 +6,8 @@ substitutions:
   _PROJECT: $PROJECT_ID
   _BRANCH: $BRANCH_NAME
 steps:
-  - id: delete-location-images
+
+  - id: delete
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: bash
     args:
@@ -22,11 +23,16 @@ steps:
         declare -A branches=()
         branches["main"]=1
 
+        cd /workspace
+
+        git fetch --all --prune 2>/dev/null || true
+
         while read -r ref; do
           [[ -z "${ref}" ]] && continue
-          ref="${ref#refs/heads/}"
+          ref="${ref#origin/}"
+          [[ "${ref}" == "HEAD" ]] && continue
           branches["${ref}"]=1
-        done < <(git ls-remote --heads origin 2>/dev/null | awk '{print $2}')
+        done < <(git branch -r --format='%(refname:short)' 2>/dev/null)
 
         echo "Protected branches are ${!branches[*]}"
 
@@ -58,7 +64,8 @@ steps:
 
         delete "${_REGION}-docker.pkg.dev/${_PROJECT}/${_REPOSITORY}/pipelines/code"
         delete "${_REGION}-docker.pkg.dev/${_PROJECT}/${_REPOSITORY}/pipelines/job"
-  - id: build-location-images
+
+  - id: build
     name: gcr.io/cloud-builders/docker
     entrypoint: bash
     args:

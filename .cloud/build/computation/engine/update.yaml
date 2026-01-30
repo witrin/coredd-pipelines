@@ -1,0 +1,83 @@
+osPolicies:
+  
+  - id: cloud
+    description: Cloud infrastructure.
+    mode: ENFORCEMENT
+    resourceGroups:
+
+      - resources:
+
+        - id: cloud-ops-agent-repository
+          exec:
+            validate:
+              interpreter: SHELL
+              script: |
+                [ -f /etc/apt/sources.list.d/google-cloud-ops-agent.list ] && exit 100 || exit 101
+            enforce:
+              interpreter: SHELL
+              script: |
+                curl -s --retry 3 --retry-delay 2 --retry-all-errors \
+                  https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh \
+                  -o /tmp/add-google-cloud-ops-agent-repo.sh
+                bash /tmp/add-google-cloud-ops-agent-repo.sh || true
+                exit 100
+
+        - id: cloud-ops-agent-package
+          pkg:
+            desiredState: INSTALLED
+            apt:
+              name: google-cloud-ops-agent
+
+        - id: cloud-ops-agent-configuration-directory
+          exec:
+            validate:
+              interpreter: SHELL
+              script: |
+                [ -d /etc/google-cloud-ops-agent ] && exit 100 || exit 101
+            enforce:
+              interpreter: SHELL
+              script: |
+                mkdir -p /etc/google-cloud-ops-agent
+                chmod 755 /etc/google-cloud-ops-agent
+                exit 100
+
+        - id: cloud-ops-agent-configuration
+          file:
+            path: /etc/google-cloud-ops-agent/config.yaml
+            state: PRESENT
+            permissions: "0644"
+            content: |
+              logging:
+                receivers:
+                  orchestrator:
+                    type: systemd_journald
+                processors:
+                  orchestrator:
+                    type: exclude_logs
+                    match_any:
+                      - 'NOT jsonPayload._SYSTEMD_UNIT:"dagster-" AND NOT jsonPayload._SYSTEMD_UNIT="argilla-"'
+                  json:
+                    type: parse_json
+                    field: MESSAGE
+                  severity:
+                    type: modify_fields
+                    fields:
+                      severity:
+                        copy_from: jsonPayload.severity
+                service:
+                  pipelines:
+                    default_pipeline:
+                      receivers: []
+                    orchestrator:
+                      receivers: [orchestrator]
+                      processors: [orchestrator, json, severity]
+
+instanceFilter:
+  inclusionLabels:
+    - labels:
+        role: computation
+
+rollout:
+  disruptionBudget:
+    percent: 100
+  minWaitDuration: 0s

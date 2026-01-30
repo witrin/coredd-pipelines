@@ -1,0 +1,65 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+substitutions:
+  _REGION: europe-west1
+  _IMAGES: containers
+  _PACKAGES: apt
+  _TAG: $SHORT_SHA
+  _ZONE: europe-west1-b
+  _PROJECT: $PROJECT_ID
+steps:
+
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --tag=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation:${_TAG}
+      - --tag=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation:latest
+      - --target=evaluation
+      - --cache-from=${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation:latest
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation
+
+  - id: assign
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        export PROJECT="${_PROJECT}"
+        export REGION="${_REGION}"
+        export PACKAGES="${_PACKAGES}"
+        export IMAGE="${_TAG}"
+        export VERSION="$(date +%Y%m%d%H%M%S)"
+
+        if ! command -v envsubst >/dev/null 2>&1; then
+          apt-get update -y >/dev/null
+          apt-get install -y gettext-base >/dev/null
+        fi
+
+        envsubst '$$PROJECT $$REGION $$PACKAGES $$IMAGE $$VERSION' \
+          < .cloud/build/computation/argilla/update.yaml \
+          > /workspace/update.yaml
+
+        if gcloud compute os-config os-policy-assignments describe argilla \
+          --project="$$PROJECT" \
+          --location="${_ZONE}" >/dev/null 2>&1; then
+
+          gcloud compute os-config os-policy-assignments update argilla \
+            --project="$$PROJECT" \
+            --location="${_ZONE}" \
+            --file=/workspace/update.yaml
+        else
+          gcloud compute os-config os-policy-assignments create argilla \
+            --project="$$PROJECT" \
+            --location="${_ZONE}" \
+            --file=/workspace/update.yaml
+        fi

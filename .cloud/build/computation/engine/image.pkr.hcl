@@ -69,6 +69,7 @@ echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.clou
 echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt apt-transport-artifact-registry-stable main" \
   >/etc/apt/sources.list.d/artifact-registry-transport.list
 
+rm -rf /var/lib/apt/lists/*
 apt update -y
 apt install -y apt-transport-artifact-registry google-cloud-cli curl gnupg
 
