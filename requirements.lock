@@ -20,7 +20,9 @@ backoff==2.2.1
 certifi==2026.1.4
     # via requests
 cffi==2.0.0
-    # via cryptography
+    # via
+    #   cryptography
+    #   pynacl
 charset-normalizer==3.4.4
     # via requests
 click==8.3.1
@@ -31,7 +33,9 @@ click==8.3.1
 coloredlogs==14.0
     # via dagster
 cryptography==46.0.4
-    # via google-auth
+    # via
+    #   google-auth
+    #   pyjwt
 dagit==1.12.13
     # via benchmark (pyproject.toml)
 dagster==1.12.13
@@ -178,6 +182,10 @@ pathlib-abc==0.5.2
     # via universal-pathlib
 platformdirs==4.5.1
     # via dagster-shared
+polars==1.37.0
+    # via benchmark (pyproject.toml)
+polars-runtime-32==1.37.0
+    # via polars
 propcache==0.4.1
     # via yarl
 proto-plus==1.27.0
@@ -192,8 +200,10 @@ protobuf==6.33.5
     #   proto-plus
 psycopg2-binary==2.9.11
     # via dagster-postgres
-pyarrow==23.0.0
-    # via db-dtypes
+pyarrow==22.0.0
+    # via
+    #   benchmark (pyproject.toml)
+    #   db-dtypes
 pyasn1==0.6.2
     # via
     #   oauth2client
@@ -209,8 +219,14 @@ pydantic==2.12.5
     # via dagster-shared
 pydantic-core==2.41.5
     # via pydantic
+pygithub==2.8.1
+    # via benchmark (pyproject.toml)
 pygments==2.19.2
     # via rich
+pyjwt[crypto]==2.11.0
+    # via pygithub
+pynacl==1.6.2
+    # via pygithub
 pyparsing==3.3.2
     # via httplib2
 python-dateutil==2.9.0.post0
@@ -238,6 +254,7 @@ requests==2.32.5
     #   google-cloud-bigquery
     #   google-cloud-storage
     #   gql
+    #   pygithub
     #   requests-toolbelt
 requests-toolbelt==1.0.0
     # via gql
@@ -282,6 +299,7 @@ typing-extensions==4.15.0
     #   grpcio
     #   pydantic
     #   pydantic-core
+    #   pygithub
     #   sqlalchemy
     #   typing-inspection
 typing-inspection==0.4.2
@@ -295,7 +313,9 @@ universal-pathlib==0.3.9
 uritemplate==4.2.0
     # via google-api-python-client
 urllib3==2.6.3
-    # via requests
+    # via
+    #   pygithub
+    #   requests
 uvicorn[standard]==0.40.0
     # via dagster-webserver
 uvloop==0.22.1

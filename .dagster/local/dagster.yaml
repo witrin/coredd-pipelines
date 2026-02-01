@@ -17,13 +17,13 @@ local_artifact_storage:
 telemetry:
   enabled: false
 
-run_launcher:
-  module: components.launcher
-  class: CloudRunJobRunLauncher
-  config:
-    project:
-      env: CLOUD_RUN_PROJECT
-    region:
-      env: CLOUD_RUN_REGION
-    job:
-      env: CLOUD_RUN_JOB
+# run_launcher:
+#   module: components.launcher
+#   class: CloudRunJobRunLauncher
+#   config:
+#     project:
+#       env: CLOUD_RUN_PROJECT
+#     region:
+#       env: CLOUD_RUN_REGION
+#     job:
+#       env: CLOUD_RUN_JOB

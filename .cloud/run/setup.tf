@@ -78,6 +78,12 @@ data "google_secret_manager_secret_version" "github_dagster_client_secret" {
   version = "latest"
 }
 
+data "google_secret_manager_secret_version" "github_dagster_api_secret" {
+  project = data.google_project.current.project_id
+  secret  = "github-dagster-api-secret"
+  version = "latest"
+}
+
 data "google_secret_manager_secret_version" "github_argilla_client_id" {
   project = data.google_project.current.project_id
   secret  = "github-argilla-client-id"
@@ -99,12 +105,6 @@ data "google_secret_manager_secret_version" "github_guard_token" {
 data "google_secret_manager_secret_version" "oauth_cookie_secret" {
   project = data.google_project.current.project_id
   secret  = "dagster-oauth-cookie-secret"
-  version = "latest"
-}
-
-data "google_secret_manager_secret_version" "github_dagster_api_secret" {
-  project = data.google_project.current.project_id
-  secret  = "github-dagster-api-secret"
   version = "latest"
 }
 
