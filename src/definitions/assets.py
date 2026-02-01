@@ -161,7 +161,7 @@ def ingest_repository_raw(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "1.3.0"},
     tags={"concurrency": "github"},
     partitions_def=scope_repository_batch_partition,
     group_name="ingest",
@@ -195,6 +195,12 @@ def ingest_repository_profile(
             "changes": None,
             "merges": None,
             "issues": None,
+            "stars": raw.get("stargazers_count"),
+            "watchers": raw.get("watchers_count"),
+            "forks": raw.get("forks_count"),
+            "topics": raw.get("topics"),
+            "subscribers": raw.get("subscribers_count"),
+            "network": raw.get("network_count"),
             "status": "absent",
         }
 
@@ -204,9 +210,31 @@ def ingest_repository_profile(
             query = """
                 query RepositoryProfile($owner: String!, $name: String!) {
                     repository(owner: $owner, name: $name) {
-                        issues(states: [OPEN, CLOSED]) { totalCount }
-                        pullRequests(states: [OPEN, CLOSED, MERGED]) { totalCount }
-                        merged: pullRequests(states: [MERGED]) { totalCount }
+                        defaultBranchRef {
+                            name
+                        }
+
+                        issues(states: [OPEN, CLOSED]) {
+                            totalCount
+                        }
+
+                        pullRequests(states: [OPEN, CLOSED, MERGED]) {
+                            totalCount
+                        }
+
+                        merged: pullRequests(states: [MERGED]) {
+                            totalCount
+                        }
+
+                        languages(first: 20, orderBy: { field: SIZE, direction: DESC }) {
+                            totalSize
+                            edges {
+                                size
+                                node {
+                                    name
+                                }
+                            }
+                        }
                     }
                 }
             """
@@ -223,6 +251,12 @@ def ingest_repository_profile(
                     "merges": result["merged"]["totalCount"],
                     "issues": result["issues"]["totalCount"],
                     "status": "present",
+                    "trunk": result["defaultBranchRef"]["name"],
+                    "size": result["languages"]["totalSize"],
+                    "languages": [
+                        {"name": edge["node"]["name"], "size": int(edge["size"])}
+                        for edge in result["languages"]["edges"]
+                    ],
                 }
             except UnknownObjectException:
                 pass
