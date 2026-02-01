@@ -1,4 +1,4 @@
-FROM python:3.11-slim AS pipelines
+FROM python:3.13-slim AS pipelines
 
 RUN adduser --disabled-password --gecos "" dagster \
     && mkdir -p /srv/bug-request/src /etc/dagster /var/lib/dagster /var/log/dagster \
@@ -15,14 +15,14 @@ RUN pip install uv \
 ENV DAGSTER_HOME=/etc/dagster \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/usr/local/lib/python3.11/site-packages:/usr/local/src \
+    PYTHONPATH=/usr/local/lib/python3.13/site-packages:/usr/local/src \
     LOG_FORMAT=json \
     LOG_LEVEL=INFO
 
 RUN printf "/usr/local/src/components\nimport logs\n" > \
-    /usr/local/lib/python3.11/site-packages/99-logging.pth \
+    /usr/local/lib/python3.13/site-packages/99-logging.pth \
     && printf "/usr/local/src/components\nimport exceptions\n" > \
-    /usr/local/lib/python3.11/site-packages/99-exceptions.pth
+    /usr/local/lib/python3.13/site-packages/99-exceptions.pth
 
 COPY .dagster/cloud/dagster.yaml .dagster/cloud/workspace.yaml /etc/dagster/
 

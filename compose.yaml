@@ -25,7 +25,7 @@ services:
         env_file:
             - .env
         command: >
-            python -m debugpy --listen 0.0.0.0:5678 -m dagster dev --host 0.0.0.0 -w /etc/dagster/workspace.yaml
+            python -W ignore::dagster.SupersessionWarning -m debugpy --listen 0.0.0.0:5678 -m dagster dev --host 0.0.0.0 -w /etc/dagster/workspace.yaml
         ports:
             - 3000:3000
         volumes:
@@ -96,7 +96,7 @@ services:
             - ./.argilla/oauth.yml://opt/venv/lib/python3.13/site-packages/argilla_server/.oauth.yml
 
     lock:
-        image: python:3.11-slim
+        image: python:3.13-slim
         working_dir: /usr/local/src
         profiles: [ dependencies ]
         command: >

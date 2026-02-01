@@ -1,14 +1,14 @@
 [project]
 name = "benchmark"
-version = "0.1.0"
+version = "1.0.0"
 description = "Dagster pipeline for scope, ingestion, discovery, tracing and evaluation of defects in code reviews."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 dependencies = [
-    "dagster==1.11",
-    "dagit==1.11",
-    "dagster-postgres==0.27.0",
-    "dagster-gcp==0.27.0",
+    "dagster==1.12.13",
+    "dagit==1.12.13",
+    "dagster-postgres==0.28.13",
+    "dagster-gcp==0.28.13",
     "google-cloud-bigquery",
     "google-cloud-storage",
     "tqdm==4.67"
