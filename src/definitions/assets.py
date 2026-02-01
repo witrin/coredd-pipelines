@@ -23,7 +23,7 @@ class BigQueryQueryConfig(dg.Config):
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "1.1.0"},
     group_name="scope",
     kinds={"bigquery"},
 )
@@ -49,10 +49,10 @@ def scope_repository_candidate(
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter(
-                    "since", "TIMESTAMP", "2025-07-01T00:00:00Z"
+                    "since", "TIMESTAMP", "2025-06-01T00:00:00Z"
                 ),
                 bigquery.ScalarQueryParameter(
-                    "until", "TIMESTAMP", "2025-07-02T00:00:00Z"
+                    "until", "TIMESTAMP", "2026-09-01T00:00:00Z"
                 ),
                 bigquery.ArrayQueryParameter(
                     "languages", "STRING", ["JavaScript", "Python", "TypeScript"]

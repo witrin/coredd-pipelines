@@ -108,12 +108,6 @@ data "google_secret_manager_secret_version" "oauth_cookie_secret" {
   version = "latest"
 }
 
-data "google_secret_manager_secret_version" "github_dagster_api_secret" {
-  project = data.google_project.current.project_id
-  secret  = "github-dagster-api-secret"
-  version = "latest"
-}
-
 data "google_compute_default_service_account" "compute_default" {
   project = data.google_project.current.project_id
 }
