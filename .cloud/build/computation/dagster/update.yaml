@@ -18,7 +18,10 @@ osPolicies:
             validate:
               interpreter: SHELL
               script: |
-                exit 101
+                if apt-get -s upgrade 2>/dev/null | grep -q "^Inst dagster-cloud"; then
+                  exit 101
+                fi
+                exit 100
             enforce:
               interpreter: SHELL
               script: |
