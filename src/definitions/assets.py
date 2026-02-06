@@ -1,17 +1,19 @@
 import json
+from typing import Dict
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from google.cloud import bigquery
+
 from components.decorator import asset
-from .partitions import (
-    scope_repository_partition,
-    scope_repository_batch_partition,
-    QuarterRange,
-    Shard,
-)
 from components.infrastructure import GithubResource
+from benchmark.definitions import partitions
+from benchmark.scope.cohort import ChangeCollector, IssueCollector
+from benchmark.scope.ingestion import ChangeExtractor, IssueExtractor, SourceExtractor
+from components.io import BlobStream
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import dagster as dg
+from google.cloud import bigquery
 from github.GithubException import UnknownObjectException
 
 
@@ -30,7 +32,14 @@ class BigQueryQueryConfig(dg.Config):
 def scope_repository_candidate(
     context: dg.AssetExecutionContext, config: BigQueryQueryConfig
 ) -> pa.Table:
-    """Execute the configured BigQuery query and return the result as a PyArrow table."""
+    """
+    GitHub repositories whose primary language is TypeScript, Python, or
+    JavaScript and that show maintenance activity within the specified time
+    window. Maintenance is defined as at least one pull request opened against
+    the default branch with reviews from at least two distinct reviewers,
+    at least one issue opened, and at least one issue closed during the same
+    period. Only activity performed by human users is considered.
+    """
 
     with open(
         Path(__file__).parent.parent / "scope/sampling.sql", "r", encoding="utf-8"
@@ -77,7 +86,11 @@ def scope_repository_profile(
     context: dg.AssetExecutionContext,
     scope_repository_candidate: pa.Table,
 ) -> pa.Table:
-    """Attach an quality score to each repository candidate."""
+    """
+    Enriches the input dataset with aggregated indicators that capture
+    throughput, contributor structure, and overall quality characteristics
+    within the observed time window.
+    """
     import polars as pl
 
     df = pl.from_arrow(scope_repository_candidate)
@@ -116,7 +129,40 @@ def scope_repository_profile(
 
 @asset(
     metadata={"version": "1.0.0"},
-    partitions_def=scope_repository_batch_partition,
+    group_name="scope",
+    ins={
+        "ingest_repository_profile": dg.AssetIn(
+            partition_mapping=dg.AllPartitionMapping()
+        )
+    },
+)
+def scope_repository_cohort(
+    context: dg.AssetExecutionContext,
+    scope_repository_profile: pa.Table,
+    ingest_repository_profile: Dict[str, pa.Table],
+) -> pa.Table:
+    """Qualified repositories with merge counts and creation dates."""
+    import polars as pl
+
+    mask = pc.greater_equal(scope_repository_profile["quality_score"], 0.75)
+    filtered = scope_repository_profile.filter(mask)
+
+    profiles = pa.concat_tables(ingest_repository_profile.values())
+
+    joined = pl.from_arrow(filtered).join(
+        pl.from_arrow(profiles).select(["name", "merges", "creation", "trunk"]),
+        on="name",
+        how="inner",
+    )
+
+    context.log.info("Cohort has %d qualified repositories.", joined.height)
+
+    return joined.to_arrow()
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    partitions_def=partitions.scope_repository_batch_partition,
     group_name="ingest",
     kinds={"github"},
     pool="github",
@@ -133,7 +179,7 @@ def ingest_repository_raw(
     column = scope_repository_profile.column("name")
     repositories = [column[i].as_py() for i in range(column.length())]
 
-    bucket = Shard.from_key(partition)
+    bucket = partitions.Shard.from_key(partition)
     batch = [
         repository for repository in repositories if bucket.key(repository) == partition
     ]
@@ -162,8 +208,7 @@ def ingest_repository_raw(
 
 @asset(
     metadata={"version": "1.3.0"},
-    tags={"concurrency": "github"},
-    partitions_def=scope_repository_batch_partition,
+    partitions_def=partitions.scope_repository_batch_partition,
     group_name="ingest",
     kinds={"github"},
     pool="github",
@@ -276,81 +321,225 @@ def ingest_repository_profile(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
-    partitions_def=scope_repository_partition,
+    metadata={"version": "2.0.0"},
+    partitions_def=partitions.scope_repository_cohort_partition,
     group_name="ingest",
     kinds={"github"},
     pool="github",
 )
-def ingest_pull_requests_raw(
+def ingest_repository_cohort(
     context: dg.AssetExecutionContext,
+    scope_repository_cohort: pa.Table,
     github: GithubResource,
 ) -> pa.Table:
-    keys = context.partition_key.keys_by_dimension
+    """Ingest repository cohort metrics."""
+    import polars as pl
 
-    repository = keys["name"]
-    quarter = QuarterRange.from_label(keys["quarter"])
-    start, end = quarter.bounds()
+    partition = context.partition_key
+    df = pl.from_arrow(scope_repository_cohort)
+
+    shard = partitions.Shard.from_key(partition)
+    shards = shard.shards
+
+    names = sorted(df["name"].to_list())
+    repository = partitions.Shard.from_space(shard.space, names)
+
+    matches = df.filter(pl.col("name") == repository)
+    if matches.is_empty():
+        raise ValueError(f"Repository '{repository}' not found in cohort")
+    row = matches.row(0, named=True)
+    creation_str = row["creation"]
+    trunk = row["trunk"]
+
+    index = shard.keys().index(partition)
+
+    creation = datetime.fromisoformat(str(creation_str).replace("Z", "+00:00")).date()
+    today = date.today()
+    days = (today - creation).days + 1
+    step = days // shards
+
+    start = creation + timedelta(days=index * step)
+    end = (
+        today
+        if index == shards - 1
+        else creation + timedelta(days=(index + 1) * step - 1)
+    )
+
+    context.log.info(
+        "Collect partition of %s from %s to %s",
+        repository,
+        start,
+        end,
+    )
 
     client = github.client()
-    query = (
-        f"repo:{repository} "
-        f"is:pr is:closed "
-        f"closed:{start.isoformat()}..{end.isoformat()}"
+    changes = ChangeCollector(client, repository, trunk, log=context.log.info).collect(
+        start, end
+    )
+    issues = IssueCollector(client, repository, log=context.log.info).collect(
+        start, end
     )
 
     context.log.info(
-        "Querying closed pull requests for %s in %s (%s..%s)",
+        "Collected partition of %s from %s to %s with %d changes and %d issues",
         repository,
-        keys["quarter"],
+        start,
+        end,
+        len(changes),
+        len(issues),
+    )
+
+    return pa.concat_tables([changes, issues], promote_options="permissive")
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    group_name="scope",
+)
+def scope_repository_set(
+    context: dg.AssetExecutionContext,
+    scope_repository_cohort: pa.Table,
+) -> pa.Table:
+    """Stable deterministic list of repos defining benchmark scope."""
+    import polars as pl
+
+    df = pl.from_arrow(scope_repository_cohort)
+
+    # just a test for now
+    result = (
+        df.select(["name", "creation"])
+        .filter(pl.col("name") == "microsoft/agent-framework")
+        .unique()
+        .sort("name")
+    )
+
+    context.log.info("Repository set contains %d repositories.", result.height)
+    return result.to_arrow()
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    partitions_def=partitions.ingest_raw_partition,
+    group_name="ingest",
+    kinds={"github"},
+    pool="github",
+)
+def ingest_changes_raw(
+    context: dg.AssetExecutionContext,
+    scope_repository_set: pa.Table,
+    github: GithubResource,
+) -> pa.Table:
+    """Ingest raw PR data for a repository and month partition."""
+    import polars as pl
+    from dateutil.relativedelta import relativedelta
+
+    partition = context.partition_key
+    df = pl.from_arrow(scope_repository_set)
+    names = sorted(df["name"].to_list())
+
+    shard = partitions.Shard.from_key(partition)
+    repository = partitions.Shard.from_space(shard.space, names)
+    index = shard.keys().index(partition)
+
+    row = df.filter(pl.col("name") == repository).row(0, named=True)
+    creation = datetime.fromisoformat(
+        str(row["creation"]).replace("Z", "+00:00")
+    ).date()
+
+    start = date(creation.year, creation.month, 1) + relativedelta(months=index)
+    end = start + relativedelta(months=1) - timedelta(days=1)
+
+    context.log.info(
+        "Extract changes for %s from %s to %s",
+        repository,
         start,
         end,
     )
 
-    issues = client.search_issues(query=query, sort="created", order="asc")
-
-    total = getattr(issues, "totalCount", None)
-
-    limit = 1000
-
-    if total is not None and total > limit:
-        raise RuntimeError(
-            f"Search results truncated for {repository} {start}..{end} fetched {len(payloads)} of {total}"
-        )
+    collector = ChangeExtractor(github.client(), repository, log=context.log.warning)
+    table = collector.collect(start, end)
 
     context.log.info(
-        "Fetching %s closed pull requests for %s in %s (%s..%s)",
-        total,
+        "Extracted %d raw records for %s.",
+        table.num_rows,
         repository,
-        keys["quarter"],
+    )
+
+    return table
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    partitions_def=partitions.ingest_raw_partition,
+    group_name="ingest",
+    kinds={"github"},
+    pool="github",
+)
+def ingest_issues_raw(
+    context: dg.AssetExecutionContext,
+    scope_repository_set: pa.Table,
+    github: GithubResource,
+) -> pa.Table:
+    """Ingest raw issue data for a repository and month partition."""
+    import polars as pl
+    from dateutil.relativedelta import relativedelta
+
+    partition = context.partition_key
+    df = pl.from_arrow(scope_repository_set)
+    names = sorted(df["name"].to_list())
+
+    shard = partitions.Shard.from_key(partition)
+    repository = partitions.Shard.from_space(shard.space, names)
+    index = shard.keys().index(partition)
+
+    row = df.filter(pl.col("name") == repository).row(0, named=True)
+    creation = datetime.fromisoformat(
+        str(row["creation"]).replace("Z", "+00:00")
+    ).date()
+
+    start = date(creation.year, creation.month, 1) + relativedelta(months=index)
+    end = start + relativedelta(months=1) - timedelta(days=1)
+
+    context.log.info(
+        "Extract issues for %s from %s to %s",
+        repository,
         start,
         end,
     )
 
-    payloads: list[str] = []
-    repositories: list[str] = []
+    extractor = IssueExtractor(github.client(), repository, log=context.log.info)
+    table = extractor.extract(start, end)
 
-    # for index, issue in enumerate(issues):
-    #     if index >= limit:
-    #         raise RuntimeError(
-    #             f"GitHub search limit reached for {repository} {start}..{end} "
-    #             f"(>= {limit} results)"
-    #         )
-
-    #     repositories.append(repository)
-    #     payloads.append(json.dumps(issue.raw_data))
-
-    if not payloads:
-        return pa.table(
-            {
-                "name": pa.array([], type=pa.string()),
-                "payload": pa.array([], type=pa.large_string()),
-            }
-        )
-
-    return pa.table(
-        {
-            "name": pa.array(repositories, type=pa.string()),
-            "payload": pa.array(payloads, type=pa.large_string()),
-        }
+    context.log.info(
+        "Extracted %d raw records for %s.",
+        table.num_rows,
+        repository,
     )
+
+    return table
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    partitions_def=partitions.ingest_source_partition,
+    group_name="ingest",
+    kinds={"github"},
+    pool="github",
+)
+def ingest_sources_raw(
+    context: dg.AssetExecutionContext,
+    scope_repository_set: pa.Table,
+    github: GithubResource,
+) -> BlobStream:
+    """Ingest repository source tarball."""
+    import polars as pl
+
+    partition = context.partition_key
+    df = pl.from_arrow(scope_repository_set)
+    names = sorted(df["name"].to_list())
+    repository = partitions.Shard.from_space(partition, names)
+
+    context.log.info("Collecting source tarball for %s", repository)
+
+    extractor = SourceExtractor(github.client(), repository, log=context.log.info)
+    return extractor.extract()

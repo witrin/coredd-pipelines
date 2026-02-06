@@ -12,7 +12,8 @@ has been recomputed for their branch.
 from __future__ import annotations
 
 import os
-from typing import Optional, Union
+from dataclasses import dataclass
+from typing import Any, Iterator, Optional, Union
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -20,6 +21,24 @@ import dagster as dg
 from google.cloud import storage
 
 from components.location import Location
+
+
+@dataclass
+class BlobStream:
+    """Streaming binary content for direct GCS upload."""
+
+    content_type: str
+    filename: str
+    response: Any  # requests.Response with stream=True
+    size: int = 0
+
+    def chunks(self, chunk_size: int = 8 * 1024 * 1024) -> Iterator[bytes]:
+        for chunk in self.response.iter_content(chunk_size=chunk_size):
+            if chunk:
+                yield chunk
+
+    def __len__(self) -> int:
+        return self.size
 
 
 Context = Union[
@@ -330,7 +349,56 @@ class CloudStorageManager(dg.IOManager):
             "RecordBatch, or pandas.DataFrame."
         )
 
+    def _store_stream(self, context: dg.OutputContext, stream: BlobStream) -> None:
+        """Stream blob content directly to GCS without buffering."""
+        asset_key = self._storage._asset_key(context, None, None)
+        partition = self._storage._partition(context, None)
+        version = self._storage._version_from_context(context)
+
+        path = list(asset_key.path)
+        key = path[-1]
+        loc = self._location.current or path[0] or Location.load().current
+
+        blob_name = (
+            f"assets/{key}/"
+            f"version={version}/"
+            f"location={loc}/"
+            f"partition={partition}/"
+            f"{stream.filename}"
+        )
+
+        blob = self._storage._bucket.blob(blob_name)
+
+        with blob.open("wb", content_type=stream.content_type) as f:
+            for chunk in stream.chunks():
+                f.write(chunk)
+
+        context.add_output_metadata(
+            {
+                "console": dg.MetadataValue.url(
+                    (
+                        f"https://console.cloud.google.com/storage/browser/_details/"
+                        f"{self._storage._bucket.name}/{blob_name}"
+                    )
+                ),
+                "storage": dg.MetadataValue.text(
+                    f"gs://{self._storage._bucket.name}/{blob_name}"
+                ),
+                "content_type": dg.MetadataValue.text(stream.content_type),
+                "size_bytes": dg.MetadataValue.int(len(stream)),
+            }
+        )
+
     def handle_output(self, context: dg.OutputContext, obj) -> None:
+        if isinstance(obj, BlobStream):
+            self._store_stream(context, obj)
+            context.log.info(
+                "Stored blob %s (%d bytes).",
+                context.asset_key,
+                len(obj),
+            )
+            return
+
         table = self._ensure_table(obj)
         self._storage.store(context=context, table=table)
         context.log.info(

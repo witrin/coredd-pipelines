@@ -1,10 +1,6 @@
 load_from:
   - python_file:
       relative_path: /usr/local/src/components/bootstrap.py
-<<<<<<< HEAD
       working_directory: /usr/local/src/components
-      location_name: main
-=======
       location_name:
         env: DAGSTER_LOCATION
->>>>>>> d6127dc (Ingest repositories from scope)

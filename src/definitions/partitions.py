@@ -59,10 +59,51 @@ class Shard:
         return cls(space=space, shards=shards)
 
     @classmethod
-    def to_space(cls, items: List[Any]) -> str:
-        xs = [repr(x) for x in items]
-        xs.sort()
-        return hashlib.sha256("".join(xs).encode()).hexdigest()[:4]
+    def to_space(cls, items: list[Any], element: Any | None = None) -> str:
+        values = [repr(x) for x in items]
+        ordered = sorted(values)
+        space = hashlib.sha256("".join(ordered).encode()).hexdigest()[:4]
+
+        if element is None:
+            return space
+
+        if len(set(values)) != len(values):
+            raise ValueError("Items must be unique when encoding an element.")
+
+        key = repr(element)
+        try:
+            index = ordered.index(key)
+        except ValueError:
+            raise ValueError("Element not found in items.")
+
+        width = max(1, ((len(ordered) - 1).bit_length() + 3) // 4)
+        return space + f"{index:0{width}x}"
+
+    @classmethod
+    def from_space(cls, token: str, items: list[Any]) -> Any:
+        if len(token) <= 4:
+            raise ValueError("Token does not encode an element.")
+
+        values = [repr(x) for x in items]
+        if len(set(values)) != len(values):
+            raise ValueError("Items must be unique to decode token.")
+
+        ordered = sorted(values)
+        expected = hashlib.sha256("".join(ordered).encode()).hexdigest()[:4]
+        if token[:4] != expected:
+            raise ValueError("Space prefix does not match items.")
+
+        index = int(token[4:], 16)
+        try:
+            value = ordered[index]
+        except IndexError:
+            raise ValueError("Index out of range.")
+
+        for x in items:
+            if repr(x) == value:
+                return x
+
+        raise RuntimeError("Invariant broken.")
 
 
 @dataclass(frozen=True)
@@ -109,7 +150,8 @@ class QuarterRange:
                 year += 1
 
         return labels
-    
+
+
 @dataclass(frozen=True)
 class MonthRange:
     """Defines an inclusive [start, end] range on month resolution."""
@@ -170,3 +212,15 @@ scope_repository_partition = dg.MultiPartitionsDefinition(
 scope_repository_batch_partition = dg.DynamicPartitionsDefinition(
     name="scope_repository_batch",
 )
+
+scope_repository_attainment_partition = dg.DynamicPartitionsDefinition(
+    name="scope_repository_attainment",
+)
+
+scope_repository_cohort_partition = dg.DynamicPartitionsDefinition(
+    name="scope_repository_cohort",
+)
+
+ingest_raw_partition = dg.DynamicPartitionsDefinition(name="ingest_raw")
+
+ingest_source_partition = dg.DynamicPartitionsDefinition(name="ingest_source")

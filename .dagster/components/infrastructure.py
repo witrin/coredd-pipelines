@@ -101,6 +101,7 @@ class GithubResource(dg.ConfigurableResource):
             status=3,
             backoff_factor=0.5,
             status_forcelist=(500, 502, 503, 504),
+            allowed_methods=["GET", "POST"],
             raise_on_status=False,
         )
         self._client = Github(self.token, retry=retry)
