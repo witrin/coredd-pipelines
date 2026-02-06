@@ -44,7 +44,7 @@ osPolicies:
         - id: cloud-ops-agent-configuration
           file:
             path: /etc/google-cloud-ops-agent/config.yaml
-            state: PRESENT
+            state: CONTENTS_MATCH
             permissions: "0644"
             content: |
               logging:
