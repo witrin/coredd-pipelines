@@ -1,17 +1,23 @@
 import json
+from typing import Any, Dict, List
+from datetime import datetime
 from pathlib import Path
-from google.cloud import bigquery
+
 from components.decorator import asset
+from components.infrastructure import GithubResource
 from .partitions import (
     scope_repository_partition,
     scope_repository_batch_partition,
+    scope_repository_attainment_partition,
     QuarterRange,
     Shard,
 )
-from components.infrastructure import GithubResource
+from ..scope.sampling import AttainmentConfiguration, AttainmentSampler, QuarterIterator
 
 import pyarrow as pa
 import dagster as dg
+import pyarrow.compute as pc
+from google.cloud import bigquery
 from github.GithubException import UnknownObjectException
 
 
@@ -30,7 +36,14 @@ class BigQueryQueryConfig(dg.Config):
 def scope_repository_candidate(
     context: dg.AssetExecutionContext, config: BigQueryQueryConfig
 ) -> pa.Table:
-    """Execute the configured BigQuery query and return the result as a PyArrow table."""
+    """
+    GitHub repositories whose primary language is TypeScript, Python, or
+    JavaScript and that show maintenance activity within the specified time
+    window. Maintenance is defined as at least one pull request opened against
+    the default branch with reviews from at least two distinct reviewers,
+    at least one issue opened, and at least one issue closed during the same
+    period. Only activity performed by human users is considered.
+    """
 
     with open(
         Path(__file__).parent.parent / "scope/sampling.sql", "r", encoding="utf-8"
@@ -77,7 +90,11 @@ def scope_repository_profile(
     context: dg.AssetExecutionContext,
     scope_repository_candidate: pa.Table,
 ) -> pa.Table:
-    """Attach an quality score to each repository candidate."""
+    """
+    Enriches the input dataset with aggregated indicators that capture
+    throughput, contributor structure, and overall quality characteristics
+    within the observed time window.
+    """
     import polars as pl
 
     df = pl.from_arrow(scope_repository_candidate)
@@ -162,7 +179,6 @@ def ingest_repository_raw(
 
 @asset(
     metadata={"version": "1.3.0"},
-    tags={"concurrency": "github"},
     partitions_def=scope_repository_batch_partition,
     group_name="ingest",
     kinds={"github"},
@@ -354,3 +370,89 @@ def ingest_pull_requests_raw(
             "payload": pa.array(payloads, type=pa.large_string()),
         }
     )
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    partitions_def=scope_repository_attainment_partition,
+    group_name="ingest",
+    kinds={"github"},
+    pool="github",
+    ins={
+        "ingest_repository_profile": dg.AssetIn(
+            partition_mapping=dg.AllPartitionMapping()
+        )
+    },
+)
+def sample_repository_attainment(
+    context: dg.AssetExecutionContext,
+    scope_repository_profile: pa.Table,
+    ingest_repository_profile: Dict[str, pa.Table],
+    github: GithubResource,
+) -> pa.Table:
+    # Merge all ingest_repository_profile partitions
+    profiles = pa.concat_tables(ingest_repository_profile.values())
+
+    # Filter scope_repository_profile on quality_score >= 0.75
+    mask = pc.greater_equal(scope_repository_profile["quality_score"], 0.75)
+    qualified = scope_repository_profile.filter(mask)
+
+    # Inner join on "name" - get trunk from profiles
+    joined = qualified.join(profiles.select(["name", "trunk"]), keys="name")
+
+    repository = context.partition_key
+    hit = joined.filter(pc.equal(joined["name"], repository))
+
+    if hit.num_rows == 0:
+        raise dg.Failure(f"{repository} not found or quality_score < 0.75")
+
+    r = {col: hit[col][0].as_py() for col in hit.schema.names}
+
+    configuration = AttainmentConfiguration()
+    sampler = AttainmentSampler(
+        client=github.client(),
+        configuration=configuration,
+        repository=repository,
+        trunk=r["trunk"],
+    )
+
+    # Reference shares for stability check
+    ref_review = float(r["review_share"])
+    ref_audit = float(r["audit_only_share"])
+    ref_label = float(r["label_share"])
+    ref_default = float(r["default_target_share"])
+
+    created = datetime.fromisoformat(str(r["creation"]).replace("Z", "+00:00")).date()
+    if created < configuration.tooling_start:
+        created = configuration.tooling_start
+
+    rows: List[Dict[str, Any]] = []
+    consecutive = 0
+
+    for since, until, quarter in QuarterIterator(created, configuration.end_date):
+        ch = sampler.changes(since, until)
+        iss = sampler.issues(since, until)
+
+        rows.append(
+            {
+                "name": repository,
+                "quarter": quarter,
+                "since": str(since),
+                "until": str(until),
+                "changes": ch,
+                "issues": iss,
+            }
+        )
+
+        if sampler.check(
+            ch["sample"], iss["sample"], ref_review, ref_audit, ref_label, ref_default
+        ):
+            consecutive += 1
+            if consecutive >= configuration.stable_windows:
+                break
+        else:
+            consecutive = 0
+
+    context.log.info("Sampled %d quarters from %s.", len(rows), repository)
+
+    return pa.Table.from_pylist(rows)

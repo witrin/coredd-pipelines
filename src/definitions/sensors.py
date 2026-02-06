@@ -4,6 +4,7 @@ from components.io import AssetCloudStorage, CloudCache
 from .partitions import Shard
 
 import dagster as dg
+import pyarrow.compute as pc
 
 
 @asset_sensor(
@@ -12,7 +13,7 @@ import dagster as dg
 def scope_repository_partition_sensor(
     context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
 ):
-    """Keeps dynamic partitions aligned."""
+    """Synchronize repository partitions."""
 
     instance: dg.DagsterInstance = context.instance
 
@@ -56,7 +57,7 @@ def scope_repository_partition_sensor(
 def scope_repository_batch_sensor(
     context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
 ):
-    """Syncs batch partitions scope_repository_batch."""
+    """Synchronize repository batch partitions."""
     instance = context.instance
 
     storage = AssetCloudStorage()
@@ -92,7 +93,47 @@ def scope_repository_batch_sensor(
             instance.delete_dynamic_partition("scope_repository_batch", key)
 
     context.log.info(
-        "Updated scope_repository partitions with +%d / -%d",
+        "Updated partition with +%d / -%d",
+        len(to_add),
+        len(to_remove),
+    )
+
+    return None
+
+
+@asset_sensor(
+    asset_key="scope_repository_profile",
+)
+def scope_repository_attainment_sensor(
+    context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
+):
+    """Synchronize repository attainment partitions."""
+    instance = context.instance
+
+    storage = AssetCloudStorage()
+    table = storage.load(context, event=asset_event)
+
+    if table is None or table.num_rows == 0:
+        return None
+
+    mask = pc.greater_equal(table["quality_score"], 0.75)
+    filtered = table.filter(mask)
+
+    keys = set(filtered["name"].to_pylist())
+    existing = set(instance.get_dynamic_partitions("scope_repository_attainment"))
+
+    to_add = keys - existing
+    to_remove = existing - keys
+
+    if to_add:
+        instance.add_dynamic_partitions("scope_repository_attainment", list(to_add))
+
+    if to_remove:
+        for key in to_remove:
+            instance.delete_dynamic_partition("scope_repository_attainment", key)
+
+    context.log.info(
+        "Updated partition with +%d / -%d",
         len(to_add),
         len(to_remove),
     )

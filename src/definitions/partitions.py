@@ -170,3 +170,7 @@ scope_repository_partition = dg.MultiPartitionsDefinition(
 scope_repository_batch_partition = dg.DynamicPartitionsDefinition(
     name="scope_repository_batch",
 )
+
+scope_repository_attainment_partition = dg.DynamicPartitionsDefinition(
+    name="scope_repository_attainment",
+)
