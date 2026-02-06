@@ -233,11 +233,17 @@ class AssetCloudStorage:
         ),
         event: Optional[dg.EventLogEntry] = None,
         location: str | None = None,
+        partition: str | None = None,
     ) -> Optional[pa.Table]:
         """Loads the table for the given context, optionally scoped by a materialization event."""
 
         asset_key = self._asset_key(context=context, event=event, location=location)
-        partition = self._partition(context=context, event=event)
+
+        if partition is not None:
+            partition = partition.replace("|", ";").replace("/", "-").replace("_", "-")
+        else:
+            partition = self._partition(context=context, event=event)
+
         version = self._version(context=context, event=event, asset_key=asset_key)
 
         blob = self._blob_name(
@@ -333,14 +339,56 @@ class CloudStorageManager(dg.IOManager):
             table.num_rows,
         )
 
-    def load_input(self, context: dg.InputContext):
-        table = self._storage.load(context=context, location=self._location.current)
+    def _load_partition(
+        self, context: dg.InputContext, partition: str | None = None
+    ) -> pa.Table | None:
+        """Load a single partition, with fallback to default location."""
+        table = self._storage.load(
+            context=context,
+            location=self._location.current,
+            partition=partition,
+        )
 
         if table is None and self._location.current != self._location.default:
             table = self._storage.load(
                 context=context,
                 location=self._location.default,
+                partition=partition,
             )
+
+        return table
+
+    def load_input(self, context: dg.InputContext):
+        # Check if we have multiple partitions (AllPartitionMapping case)
+        if context.has_asset_partitions:
+            partition_keys = list(context.asset_partition_keys)
+
+            if len(partition_keys) > 1:
+                # Multiple partitions - return dict
+                result = {}
+                missing = []
+                for key in partition_keys:
+                    table = self._load_partition(context, partition=key)
+                    if table is not None:
+                        result[key] = table
+                        context.log.info(
+                            "Loaded partition %s of %s (%d rows).",
+                            key,
+                            context.asset_key,
+                            table.num_rows,
+                        )
+                    else:
+                        missing.append(key)
+
+                if missing:
+                    raise FileNotFoundError(
+                        f"Missing partitions {missing} for {context.asset_key}"
+                    )
+
+                return result
+
+        # Single partition or no partitions
+        table = self._load_partition(context)
 
         if table is None:
             raise FileNotFoundError(

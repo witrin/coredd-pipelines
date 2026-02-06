@@ -90,6 +90,16 @@ def asset(*asset_args, **asset_kwargs):
         signature = inspect.signature(fn)
         inputs = dict(asset_kwargs.get("ins", {}))
 
+        # Add location prefix to existing ins entries without explicit key
+        for name, asset_in in list(inputs.items()):
+            if asset_in.key is None:
+                inputs[name] = dg.AssetIn(
+                    key=[location, name.replace("_", "-")],
+                    metadata=asset_in.metadata,
+                    partition_mapping=asset_in.partition_mapping,
+                    dagster_type=asset_in.dagster_type,
+                )
+
         for name, parameter in signature.parameters.items():
             if name in ("context", "config"):
                 continue
