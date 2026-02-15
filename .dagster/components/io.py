@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Iterator, Optional, Union
+from typing import Any, Iterator, Optional, Union, overload
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -86,6 +86,19 @@ class AssetCloudStorage:
         client = storage.Client(project=project or os.environ.get("CLOUD_PROJECT"))
 
         self._bucket = client.bucket(bucket or os.environ["CLOUD_BUCKET"])
+
+    @property
+    def bucket(self) -> str:
+        return self._bucket.name
+
+    def blob(
+        self,
+        asset_key: dg.AssetKey,
+        version: str,
+        location: str | None,
+        partition: str,
+    ) -> str:
+        return self._blob_name(asset_key, version, location, partition)
 
     def _asset_key(
         self,
@@ -242,6 +255,7 @@ class AssetCloudStorage:
         pq.write_table(table, sink)
         blob.upload_from_string(sink.getvalue().to_pybytes())
 
+    @overload
     def load(
         self,
         context: (
@@ -253,8 +267,31 @@ class AssetCloudStorage:
         event: Optional[dg.EventLogEntry] = None,
         location: str | None = None,
         partition: str | None = None,
+    ) -> Optional[pa.Table]: ...
+
+    @overload
+    def load(self, *, blob: str) -> Optional[pa.Table]: ...
+
+    def load(
+        self,
+        context: (
+            dg.AssetExecutionContext
+            | dg.InputContext
+            | dg.OutputContext
+            | dg.SensorEvaluationContext
+            | None
+        ) = None,
+        event: Optional[dg.EventLogEntry] = None,
+        location: str | None = None,
+        partition: str | None = None,
+        blob: str | None = None,
     ) -> Optional[pa.Table]:
         """Loads the table for the given context, optionally scoped by a materialization event."""
+        if blob is not None:
+            return self._load_parquet(blob)
+
+        if context is None:
+            raise ValueError("Either context or blob must be provided")
 
         asset_key = self._asset_key(context=context, event=event, location=location)
 
@@ -265,15 +302,16 @@ class AssetCloudStorage:
 
         version = self._version(context=context, event=event, asset_key=asset_key)
 
-        blob = self._blob_name(
+        blob_path = self._blob_name(
             asset_key=asset_key,
             version=version,
             location=location,
             partition=partition,
         )
 
-        return self._load_parquet(blob)
+        return self._load_parquet(blob_path)
 
+    @overload
     def store(
         self,
         context: (
@@ -282,8 +320,28 @@ class AssetCloudStorage:
         table: pa.Table,
         event: Optional[dg.EventLogEntry] = None,
         location: str | None = None,
+    ) -> None: ...
+
+    @overload
+    def store(self, *, blob: str, table: pa.Table) -> None: ...
+
+    def store(
+        self,
+        context: (
+            dg.AssetExecutionContext | dg.OutputContext | dg.SensorEvaluationContext | None
+        ) = None,
+        table: pa.Table | None = None,
+        event: Optional[dg.EventLogEntry] = None,
+        location: str | None = None,
+        blob: str | None = None,
     ) -> None:
         """Stores the table for the given context, optionally scoped by a materialization event."""
+        if blob is not None and table is not None:
+            self._store_parquet(blob, table)
+            return
+
+        if context is None or table is None:
+            raise ValueError("Either (context, table) or (blob, table) must be provided")
 
         asset_key = self._asset_key(context=context, event=event, location=location)
         partition = self._partition(context=context, event=event)
@@ -390,6 +448,9 @@ class CloudStorageManager(dg.IOManager):
         )
 
     def handle_output(self, context: dg.OutputContext, obj) -> None:
+        if obj is None:
+            return
+    
         if isinstance(obj, BlobStream):
             self._store_stream(context, obj)
             context.log.info(
