@@ -118,3 +118,14 @@ services:
         volumes:
             - ./.cloud:/workspace
             - ~/.config/gcloud:/root/.config/gcloud
+
+    notebooks:
+        build:
+            context: .
+            target: notebooks
+        volumes:
+            - ./.jupyter/benchmark_notebook:/usr/local/lib/python3.13/site-packages/benchmark_notebook
+            - ./notebooks:/usr/local/src
+            - ~/.config/gcloud:/root/.config/gcloud:ro
+        tty: true
+        stdin_open: true

@@ -62,3 +62,18 @@ ENTRYPOINT ["/bin/bash"]
 FROM argilla/argilla-server:v2.8.0 AS evaluation
 
 COPY .argilla/oauth.yml /etc/argilla/oauth.yml
+
+FROM python:3.13-slim AS notebooks
+
+WORKDIR /usr/local/src/
+
+COPY pyproject.toml requirements.lock ./
+
+RUN apt update \
+    && apt install gcc \
+    && pip install uv \
+    && uv pip install --system ".[notebooks]"
+
+ENV PYTHONPATH=/usr/local/lib/python3.13/site-packages:/usr/local/src
+
+ENTRYPOINT ["/bin/bash"]
