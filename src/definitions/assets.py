@@ -393,7 +393,7 @@ def ingest_repository_cohort(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "2.0.0"},
     group_name="scope",
 )
 def scope_repository_set(
@@ -408,17 +408,18 @@ def scope_repository_set(
     # just a test for now
     result = (
         df.select(["name", "creation"])
-        .filter(pl.col("name") == "microsoft/agent-framework")
+        .filter(pl.col("name") == "aws/aws-advanced-nodejs-wrapper")
         .unique()
         .sort("name")
     )
 
     context.log.info("Repository set contains %d repositories.", result.height)
+
     return result.to_arrow()
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "2.1.0"},
     partitions_def=partitions.ingest_raw_partition,
     group_name="ingest",
     kinds={"github"},
@@ -456,8 +457,8 @@ def ingest_changes_raw(
         end,
     )
 
-    collector = ChangeExtractor(github.client(), repository, log=context.log.warning)
-    table = collector.collect(start, end)
+    extractor = ChangeExtractor(github.client(), repository, log=context.log.warning)
+    table = extractor.extract(start, end)
 
     context.log.info(
         "Extracted %d raw records for %s.",
@@ -469,7 +470,7 @@ def ingest_changes_raw(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "2.0.0"},
     partitions_def=partitions.ingest_raw_partition,
     group_name="ingest",
     kinds={"github"},
@@ -520,7 +521,7 @@ def ingest_issues_raw(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "2.0.0"},
     partitions_def=partitions.ingest_source_partition,
     group_name="ingest",
     kinds={"github"},

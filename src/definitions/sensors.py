@@ -119,6 +119,7 @@ def scope_repository_cohort_sensor(
         return None
 
     import polars as pl
+
     df = pl.from_arrow(table)
 
     names = sorted(df["name"].to_list())
@@ -180,7 +181,9 @@ def scope_repository_set_sensor(
     for row in df.iter_rows(named=True):
         space = Shard.to_space(names, row["name"])
 
-        creation = datetime.fromisoformat(str(row["creation"]).replace("Z", "+00:00")).date()
+        creation = datetime.fromisoformat(
+            str(row["creation"]).replace("Z", "+00:00")
+        ).date()
         today = date.today()
         current = date(today.year, today.month, 1)
 
