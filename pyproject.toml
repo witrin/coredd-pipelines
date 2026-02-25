@@ -13,20 +13,28 @@ dependencies = [
     "google-cloud-storage",
     "polars==1.37.0",
     "pyarrow==22.0.0",
-    "tqdm==4.67",
-    "PyGithub==2.8.1"
+    "PyGithub==2.8.1",
+    "tree-sitter==0.25.2",
+    "tree-sitter-language-pack==0.13.0",
+    "unidiff==0.7.5",
+    "langgraph",
+    "jpype1>=1.5.0",
+    "optuna==4.7.0",
+    "pygam==0.12.0",
+    "pygit2==1.19.1"
 ]
 
 [project.optional-dependencies]
+development = [
+    "pytest==9.0.2"
+]
 notebooks = [
-    "pytest==8.3.3",
     "ruff==0.6.4",
     "ipykernel==6.29.5",
     "marimo==0.19.11",
     "plotly==6.5.2",
-    "optuna==4.7.0",
     "umap-learn==0.5.11",
-    "pygam==0.12.0"
+    "tqdm==4.67"
 ]
 
 [build-system]

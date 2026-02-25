@@ -39,6 +39,7 @@ class ChangeExtractor:
 
         pr_numbers = self._extract_pr_numbers(rows)
         for number in pr_numbers:
+            self._extract_pr_commits(number, rows)
             self._extract_pr_reviews(number, rows)
             self._extract_pr_review_comments(number, rows)
             self._extract_pr_requested_reviewers(number, rows)
@@ -59,24 +60,44 @@ class ChangeExtractor:
         for issue in results:
             number = issue.raw_data["number"]
             payload = self.repo.get_pull(number).raw_data
-            rows.append({
-                "name": self.repository,
-                "type": "pr",
-                "number": issue.raw_data["number"],
-                "payload": json.dumps(payload),
-            })
+            rows.append(
+                {
+                    "name": self.repository,
+                    "type": "pr",
+                    "number": issue.raw_data["number"],
+                    "payload": json.dumps(payload),
+                }
+            )
+
+    def _extract_pr_commits(self, number: int, rows: List[dict]) -> None:
+        try:
+            pr = self.repo.get_pull(number)
+            items = [commit.raw_data for commit in pr.get_commits()]
+            if items:
+                rows.append(
+                    {
+                        "name": self.repository,
+                        "type": "commit",
+                        "number": number,
+                        "payload": json.dumps(items),
+                    }
+                )
+        except Exception as e:
+            self._log(f"Failed to get commits for PR {number}: {e}")
 
     def _extract_pr_reviews(self, number: int, rows: List[dict]) -> None:
         try:
             pr = self.repo.get_pull(number)
             items = [review.raw_data for review in pr.get_reviews()]
             if items:
-                rows.append({
-                    "name": self.repository,
-                    "type": "review",
-                    "number": number,
-                    "payload": json.dumps(items),
-                })
+                rows.append(
+                    {
+                        "name": self.repository,
+                        "type": "review",
+                        "number": number,
+                        "payload": json.dumps(items),
+                    }
+                )
         except Exception as e:
             self._log(f"Failed to get reviews for PR {number}: {e}")
 
@@ -85,12 +106,14 @@ class ChangeExtractor:
             change = self.repo.get_pull(number)
             items = [comment.raw_data for comment in change.get_review_comments()]
             if items:
-                rows.append({
-                    "name": self.repository,
-                    "type": "review_comment",
-                    "number": number,
-                    "payload": json.dumps(items),
-                })
+                rows.append(
+                    {
+                        "name": self.repository,
+                        "type": "review_comment",
+                        "number": number,
+                        "payload": json.dumps(items),
+                    }
+                )
         except Exception as e:
             self._log(f"Failed to get review comments for PR {number}: {e}")
 
@@ -102,12 +125,14 @@ class ChangeExtractor:
                 "users": [u.raw_data for u in users],
                 "teams": [t.raw_data for t in teams],
             }
-            rows.append({
-                "name": self.repository,
-                "type": "review_request",
-                "number": number,
-                "payload": json.dumps(payload),
-            })
+            rows.append(
+                {
+                    "name": self.repository,
+                    "type": "review_request",
+                    "number": number,
+                    "payload": json.dumps(payload),
+                }
+            )
         except Exception as e:
             self._log(f"Failed to get requested reviewers for PR {number}: {e}")
 
@@ -116,12 +141,14 @@ class ChangeExtractor:
             change = self.repo.get_pull(number)
             items = [comment.raw_data for comment in change.get_issue_comments()]
             if items:
-                rows.append({
-                    "name": self.repository,
-                    "type": "comment",
-                    "number": number,
-                    "payload": json.dumps(items),
-                })
+                rows.append(
+                    {
+                        "name": self.repository,
+                        "type": "comment",
+                        "number": number,
+                        "payload": json.dumps(items),
+                    }
+                )
         except Exception as e:
             self._log(f"Failed to get comments for PR {number}: {e}")
 
@@ -135,19 +162,23 @@ class ChangeExtractor:
                 headers, data = requester.requestJsonAndCheck(
                     "GET",
                     url,
-                    headers={"Accept": "application/vnd.github.mockingbird-preview+json"},
+                    headers={
+                        "Accept": "application/vnd.github.mockingbird-preview+json"
+                    },
                 )
                 if data:
                     items.extend(data)
                 url = self._parse_next_link(headers.get("Link", ""))
 
             if items:
-                rows.append({
-                    "name": self.repository,
-                    "type": "timeline",
-                    "number": number,
-                    "payload": json.dumps(items),
-                })
+                rows.append(
+                    {
+                        "name": self.repository,
+                        "type": "timeline",
+                        "number": number,
+                        "payload": json.dumps(items),
+                    }
+                )
         except Exception as e:
             self._log(f"Failed to get timeline for PR {number}: {e}")
 
@@ -164,19 +195,26 @@ class ChangeExtractor:
 
     def _build_table(self, rows: List[dict]) -> pa.Table:
         if not rows:
-            return pa.table({
-                "name": pa.array([], type=pa.string()),
-                "type": pa.array([], type=pa.string()),
-                "number": pa.array([], type=pa.int32()),
-                "payload": pa.array([], type=pa.large_string()),
-            })
+            return pa.table(
+                {
+                    "name": pa.array([], type=pa.string()),
+                    "type": pa.array([], type=pa.string()),
+                    "number": pa.array([], type=pa.int32()),
+                    "payload": pa.array([], type=pa.large_string()),
+                }
+            )
 
-        return pa.Table.from_pylist(rows, schema=pa.schema([
-            ("name", pa.string()),
-            ("type", pa.string()),
-            ("number", pa.int32()),
-            ("payload", pa.large_string()),
-        ]))
+        return pa.Table.from_pylist(
+            rows,
+            schema=pa.schema(
+                [
+                    ("name", pa.string()),
+                    ("type", pa.string()),
+                    ("number", pa.int32()),
+                    ("payload", pa.large_string()),
+                ]
+            ),
+        )
 
 
 class IssueExtractor:
@@ -219,24 +257,28 @@ class IssueExtractor:
         results = self.client.search_issues(query, sort="created", order="asc")
 
         for issue in results:
-            rows.append({
-                "name": self.repository,
-                "type": "issue",
-                "number": issue.raw_data["number"],
-                "payload": json.dumps(issue.raw_data),
-            })
+            rows.append(
+                {
+                    "name": self.repository,
+                    "type": "issue",
+                    "number": issue.raw_data["number"],
+                    "payload": json.dumps(issue.raw_data),
+                }
+            )
 
     def _extract_issue_comments(self, number: int, rows: List[dict]) -> None:
         try:
             issue = self.repo.get_issue(number)
             items = [comment.raw_data for comment in issue.get_comments()]
             if items:
-                rows.append({
-                    "name": self.repository,
-                    "type": "comment",
-                    "number": number,
-                    "payload": json.dumps(items),
-                })
+                rows.append(
+                    {
+                        "name": self.repository,
+                        "type": "comment",
+                        "number": number,
+                        "payload": json.dumps(items),
+                    }
+                )
         except Exception as e:
             self._log(f"Failed to get comments for issue {number}: {e}")
 
@@ -250,19 +292,23 @@ class IssueExtractor:
                 headers, data = requester.requestJsonAndCheck(
                     "GET",
                     url,
-                    headers={"Accept": "application/vnd.github.mockingbird-preview+json"},
+                    headers={
+                        "Accept": "application/vnd.github.mockingbird-preview+json"
+                    },
                 )
                 if data:
                     items.extend(data)
                 url = self._parse_next_link(headers.get("Link", ""))
 
             if items:
-                rows.append({
-                    "name": self.repository,
-                    "type": "timeline",
-                    "number": number,
-                    "payload": json.dumps(items),
-                })
+                rows.append(
+                    {
+                        "name": self.repository,
+                        "type": "timeline",
+                        "number": number,
+                        "payload": json.dumps(items),
+                    }
+                )
         except Exception as e:
             self._log(f"Failed to get timeline for issue {number}: {e}")
 
@@ -279,19 +325,26 @@ class IssueExtractor:
 
     def _build_table(self, rows: List[dict]) -> pa.Table:
         if not rows:
-            return pa.table({
-                "name": pa.array([], type=pa.string()),
-                "type": pa.array([], type=pa.string()),
-                "number": pa.array([], type=pa.int32()),
-                "payload": pa.array([], type=pa.large_string()),
-            })
+            return pa.table(
+                {
+                    "name": pa.array([], type=pa.string()),
+                    "type": pa.array([], type=pa.string()),
+                    "number": pa.array([], type=pa.int32()),
+                    "payload": pa.array([], type=pa.large_string()),
+                }
+            )
 
-        return pa.Table.from_pylist(rows, schema=pa.schema([
-            ("name", pa.string()),
-            ("type", pa.string()),
-            ("number", pa.int32()),
-            ("payload", pa.large_string()),
-        ]))
+        return pa.Table.from_pylist(
+            rows,
+            schema=pa.schema(
+                [
+                    ("name", pa.string()),
+                    ("type", pa.string()),
+                    ("number", pa.int32()),
+                    ("payload", pa.large_string()),
+                ]
+            ),
+        )
 
 
 class SourceExtractor:
@@ -319,12 +372,14 @@ class SourceExtractor:
         class _FileResponseAdapter:
             def __init__(self, f):
                 self._f = f
+
             def iter_content(self, chunk_size=8192):
                 while True:
                     chunk = self._f.read(chunk_size)
                     if not chunk:
                         break
                     yield chunk
+
             def close(self):
                 self._f.close()
 
@@ -353,6 +408,16 @@ class SourceExtractor:
             )
 
             repository = pygit2.Repository(directory)
+
+            repository.config.set_multivar(
+                "remote.origin.fetch",
+                "",
+                "+refs/pull/*:refs/pull/*",
+            )
+            repository.remotes["origin"].fetch(
+                callbacks=callbacks, prune=pygit2.GIT_FETCH_PRUNE
+            )
+
             commit = repository.revparse_single(reference)
 
             archive = os.path.join(temporary, f"{commit.id}.tar.gz")

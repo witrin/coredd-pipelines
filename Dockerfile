@@ -6,6 +6,14 @@ RUN adduser --disabled-password --gecos "" dagster \
 
 WORKDIR /usr/local/src/
 
+RUN apt update \
+    && apt install -y openjdk-25-jre-headless \
+    && mkdir -p /usr/local/share/java \
+    && apt clean && rm -rf /var/lib/apt/lists/*
+
+COPY --from=gumtreediff/gumtree@sha256:537e629db5fce56ea59d56b9ca6ea20c1775dda08b89a6b6b44ff235cb2d779d \
+    /opt/gumtree/lib/gumtree.jar /usr/local/share/java/gumtree.jar
+
 COPY pyproject.toml requirements.lock ./
 
 RUN pip install uv \
@@ -63,17 +71,12 @@ FROM argilla/argilla-server:v2.8.0 AS evaluation
 
 COPY .argilla/oauth.yml /etc/argilla/oauth.yml
 
-FROM python:3.13-slim AS notebooks
+FROM pipelines AS notebooks
 
-WORKDIR /usr/local/src/
+USER root
 
-COPY pyproject.toml requirements.lock ./
-
-RUN apt update \
-    && apt install gcc \
-    && pip install uv \
+RUN rm /usr/local/lib/python3.13/site-packages/99-logging.pth \
+    && rm /usr/local/lib/python3.13/site-packages/99-exceptions.pth \
     && uv pip install --system ".[notebooks]"
-
-ENV PYTHONPATH=/usr/local/lib/python3.13/site-packages:/usr/local/src
 
 ENTRYPOINT ["/bin/bash"]
