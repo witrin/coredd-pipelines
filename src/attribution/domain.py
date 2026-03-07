@@ -20,6 +20,13 @@ class FileOperation:
 
 
 @dataclass(frozen=True)
+class Reference:
+    file: int
+    hunk: int
+    line: int
+
+
+@dataclass(frozen=True)
 class Anchor:
     """
     Represents an atomic modification between base and after projections.

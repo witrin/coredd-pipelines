@@ -8,7 +8,12 @@ from unidiff import PatchedFile, patch
 from unidiff.patch import PatchInfo
 from tree_sitter import Parser, Query, QueryCursor
 from tree_sitter_language_pack import get_language
-from benchmark.attribution.domain import Anchor, Context, FileOperation
+from benchmark.attribution.domain import (
+    Anchor,
+    Context,
+    FileOperation,
+    Reference,
+)
 from benchmark.attribution.history import VersionControl
 
 
@@ -126,7 +131,166 @@ class ScopeRule:
     scope: Callable[[object, int], object]
 
 
-class SemanticDiff:
+class PatchRenderer:
+    def __init__(self, unified_patch_text: str) -> None:
+        source = (
+            unified_patch_text
+            if unified_patch_text.endswith("\n")
+            else f"{unified_patch_text}\n"
+        )
+        try:
+            self._patchset = patch.PatchSet(source)
+        except Exception as error:
+            raise ValueError(
+                "PatchRenderer requires parseable unified patch content."
+            ) from error
+
+    def render(self) -> str:
+        rows: list[tuple[str | None, str]] = []
+        for file_index, patched in enumerate(self._patchset):
+            for header in self._file_headers(patched):
+                rows.append((None, header))
+            for hunk_index, hunk in enumerate(patched):
+                rows.append((None, self._hunk_header(hunk)))
+                for line_index, line in enumerate(hunk):
+                    rows.append(
+                        (
+                            f"{file_index}-{hunk_index}-{line_index}",
+                            str(line).rstrip("\n"),
+                        )
+                    )
+        width = max((len(reference) for reference, _ in rows if reference), default=0)
+        return "\n".join(
+            f"{(reference or '').ljust(width)} | {line}"
+            for reference, line in rows
+        )
+
+    def base(self) -> str:
+        blocks: list[str] = []
+        for patched in self._patchset:
+            for hunk in patched:
+                lines = [
+                    (line.source_line_no, str(line).rstrip("\n")[1:])
+                    for line in hunk
+                    if line.line_type in {" ", "-"}
+                    and isinstance(line.source_line_no, int)
+                ]
+                if not lines:
+                    continue
+                path = self._normalize_path(patched.source_file, source=True)
+                if path is None:
+                    path = self._normalize_path(patched.target_file, source=False)
+                if path is None:
+                    continue
+                blocks.append(
+                    "\n".join(
+                        [
+                            f"File: {path}",
+                            f"Lines: {lines[0][0]}-{lines[-1][0]}",
+                            *[line[1] for line in lines],
+                        ]
+                    )
+                )
+        return "\n\n".join(blocks)
+
+    def after(self) -> str:
+        blocks: list[str] = []
+        for patched in self._patchset:
+            for hunk in patched:
+                lines = [
+                    (line.target_line_no, str(line).rstrip("\n")[1:])
+                    for line in hunk
+                    if line.line_type in {" ", "+"}
+                    and isinstance(line.target_line_no, int)
+                ]
+                if not lines:
+                    continue
+                path = self._normalize_path(patched.target_file, source=False)
+                if path is None:
+                    path = self._normalize_path(patched.source_file, source=True)
+                if path is None:
+                    continue
+                blocks.append(
+                    "\n".join(
+                        [
+                            f"File: {path}",
+                            f"Lines: {lines[0][0]}-{lines[-1][0]}",
+                            *[line[1] for line in lines],
+                        ]
+                    )
+                )
+        return "\n\n".join(blocks)
+
+    def resolve(self, reference: str) -> Reference | None:
+        values = reference.split("-")
+        if len(values) != 3:
+            return None
+        try:
+            file = int(values[0])
+            hunk = int(values[1])
+            line = int(values[2])
+        except ValueError:
+            return None
+        if file < 0 or hunk < 0 or line < 0:
+            return None
+        if file >= len(self._patchset):
+            return None
+        patched = self._patchset[file]
+        if hunk >= len(patched):
+            return None
+        if line >= len(patched[hunk]):
+            return None
+        return Reference(file=file, hunk=hunk, line=line)
+
+    def _file_headers(self, patched: PatchedFile) -> list[str]:
+        source = self._normalize_path(patched.source_file, source=True)
+        target = self._normalize_path(patched.target_file, source=False)
+        source_ref = "/dev/null" if source is None else f"a/{source}"
+        target_ref = "/dev/null" if target is None else f"b/{target}"
+        lines = [str(info).rstrip("\n") for info in patched.patch_info or []]
+        if lines:
+            if not any(line.startswith("--- ") for line in lines):
+                lines.append(f"--- {source_ref}")
+            if not any(line.startswith("+++ ") for line in lines):
+                lines.append(f"+++ {target_ref}")
+            return lines
+        return [
+            f"diff --git {source_ref} {target_ref}",
+            f"--- {source_ref}",
+            f"+++ {target_ref}",
+        ]
+
+    def _hunk_header(self, hunk: patch.Hunk) -> str:
+        source = self._hunk_range(hunk.source_start, hunk.source_length)
+        target = self._hunk_range(hunk.target_start, hunk.target_length)
+        section = str(hunk.section_header).strip()
+        if section:
+            return f"@@ -{source} +{target} @@ {section}"
+        return f"@@ -{source} +{target} @@"
+
+    def _hunk_range(self, start: int, length: int) -> str:
+        if length == 1:
+            return f"{start}"
+        return f"{start},{length}"
+
+    def _normalize_path(self, value: object, *, source: bool) -> str | None:
+        if not isinstance(value, str):
+            return None
+        path = value.strip()
+        if path == "" or path == "/dev/null":
+            return None
+        if source and path.startswith("a/"):
+            return path[2:]
+        if not source and path.startswith("b/"):
+            return path[2:]
+        return path
+
+
+class SourceDelta:
+    # TODO: Add the paper's explicit line-based expansion for supported-language
+    # changes outside enclosing scopes. The current implementation always expands
+    # to the next structural scope and does not implement the exact "three
+    # surrounding lines" behavior described in the paper.
     _increments = {
         "python": {
             "function_definition",
@@ -173,13 +337,45 @@ class SemanticDiff:
     def __init__(self, repository: VersionControl) -> None:
         self.repository = repository
 
+    def patch(
+        self,
+        base: str,
+        after: str,
+        files: Iterable[FileOperation] | None = None,
+        *,
+        n: int = 3,
+    ) -> patch.PatchSet:
+        result = patch.PatchSet("")
+        diff = self.repository.diff(base, after, context_lines=n)
+        selected = self.repository.manifest(base, after) if files is None else files
+
+        for file in selected:
+            delta = self._locate(diff, file)
+            if delta is None:
+                continue
+
+            source = self.read(base, file.base)
+            target = self.read(after, file.after)
+            hunks = self.extract(delta)
+
+            if hunks:
+                result.append(self.project(file, source, target, hunks))
+
+        return result
+
     def expand(
-        self, base: str, after: str, files: Iterable[FileOperation], n: int = 1
+        self,
+        base: str,
+        after: str,
+        files: Iterable[FileOperation] | None = None,
+        *,
+        level: int = 1,
+        n: int = 3,
     ) -> patch.PatchSet:
         result = patch.PatchSet("")
         diff = self.repository.diff(base, after)
 
-        for file in files:
+        for file in files or self.repository.manifest(base, after):
             delta = self._locate(diff, file)
             if delta is None:
                 continue
@@ -226,10 +422,18 @@ class SemanticDiff:
                             change,
                             [
                                 self._expand(
-                                    roots[0], lines[0], change.base, n, language
+                                    roots[0],
+                                    lines[0],
+                                    change.base,
+                                    level,
+                                    language,
                                 ),
                                 self._expand(
-                                    roots[1], lines[1], change.after, n, language
+                                    roots[1],
+                                    lines[1],
+                                    change.after,
+                                    level,
+                                    language,
                                 ),
                             ],
                             context,
@@ -238,10 +442,151 @@ class SemanticDiff:
 
                 hunks = [hunk for hunk in self.merge(hunks)]
             else:
+                delta = self._locate(
+                    self.repository.diff(base, after, context_lines=n), file
+                )
+                if delta is None:
+                    continue
                 hunks.extend(self.extract(delta))
 
             if hunks:
                 result.append(self.project(file, source, target, hunks))
+
+        return result
+
+    def refine(
+        self,
+        expansion: patch.PatchSet,
+        references: list[str],
+        base: str,
+        after: str,
+    ) -> patch.PatchSet:
+        renderer = PatchRenderer(str(expansion))
+        selection: dict[str, set[int]] = {}
+
+        for reference in references:
+            resolved = renderer.resolve(reference)
+            if resolved is None:
+                continue
+            patched = expansion[resolved.file]
+            line = patched[resolved.hunk][resolved.line]
+            if not isinstance(line.source_line_no, int):
+                continue
+            path = patched.source_file
+            if not isinstance(path, str):
+                continue
+            if path.startswith("a/"):
+                path = path[2:]
+            if path == "" or path == "/dev/null":
+                continue
+            selection.setdefault(path, set()).add(line.source_line_no)
+
+        if not selection:
+            raise ValueError(
+                "SourceDelta.refine requires references that resolve to base lines."
+            )
+
+        result = patch.PatchSet("")
+        operations = list(self.repository.manifest(base, after))
+
+        for operation in operations:
+            path = operation.base
+            if not isinstance(path, str) or path not in selection:
+                continue
+
+            source = self.read(base, operation.base)
+            target = self.read(after, operation.after)
+            size = (
+                len(source.decode("utf-8", "ignore").splitlines()) if source else 0,
+                len(target.decode("utf-8", "ignore").splitlines()) if target else 0,
+            )
+            if size[0] == 0 or size[1] == 0:
+                continue
+
+            bounds = (min(selection[path]), max(selection[path]))
+            padding = 3
+            base_interval = bounds
+            after_interval: tuple[int | None, int | None] = (None, None)
+            delta: pygit2.Patch | None = None
+
+            while True:
+                delta = self._locate(
+                    self.repository.diff(base, after, context_lines=padding),
+                    operation,
+                )
+                if delta is None:
+                    break
+
+                mapping: dict[int, int] = {}
+                for hunk in delta.hunks:
+                    source_line = hunk.old_start + (1 if hunk.old_lines == 0 else 0)
+                    target_line = hunk.new_start + (1 if hunk.new_lines == 0 else 0)
+                    for line in hunk.lines:
+                        if line.origin == " ":
+                            mapping[source_line] = target_line
+                            source_line += 1
+                            target_line += 1
+                            continue
+                        if line.origin == "-":
+                            source_line += 1
+                            continue
+                        if line.origin == "+":
+                            target_line += 1
+
+                base_interval = (
+                    max(1, bounds[0] - padding),
+                    min(size[0], bounds[1] + padding),
+                )
+                after_interval = (
+                    mapping.get(base_interval[0]),
+                    mapping.get(base_interval[1]),
+                )
+
+                if after_interval[0] is not None and after_interval[1] is not None:
+                    break
+
+                if base_interval == (1, size[0]):
+                    keys = sorted(mapping)
+                    if not keys:
+                        break
+                    base_interval = (keys[0], keys[-1])
+                    after_interval = (
+                        mapping[base_interval[0]],
+                        mapping[base_interval[1]],
+                    )
+                    break
+
+                padding += 1
+
+            if delta is None or after_interval[0] is None or after_interval[1] is None:
+                raise ValueError(
+                    f"SourceDelta.refine could not map interval for file {path}."
+                )
+
+            anchors = [
+                anchor
+                for context in self.extract(delta)
+                for anchor in context.changes
+                if not (
+                    anchor.base[1] <= base_interval[0]
+                    or anchor.base[0] >= base_interval[1] + 1
+                )
+            ]
+
+            result.append(
+                self.project(
+                    operation,
+                    source,
+                    target,
+                    [
+                        Context(
+                            base=(base_interval[0], base_interval[1] + 1),
+                            after=(after_interval[0], after_interval[1] + 1),
+                            changes=anchors,
+                        )
+                    ],
+                )
+            )
 
         return result
 
@@ -262,12 +607,16 @@ class SemanticDiff:
             return b""
 
     def _validate(self, root, language: str, path: str, side: str) -> None:
-        for node in QueryCursor(
-            Query(
-                get_language(language),
-                "[(ERROR) (MISSING)] @issue",
+        for node in (
+            QueryCursor(
+                Query(
+                    get_language(language),
+                    "[(ERROR) (MISSING)] @issue",
+                )
             )
-        ).captures(root).get("issue", []):
+            .captures(root)
+            .get("issue", [])
+        ):
             raise RuntimeError(
                 f"Failed to parse {side} file {path} at line {node.start_point[0] + 1}."
             )
@@ -363,9 +712,7 @@ class SemanticDiff:
         return (lower, upper + 1)
 
     @staticmethod
-    def _context(
-        changes: List[Anchor], size: Tuple[int, int]
-    ) -> List[Tuple[int, int]]:
+    def _context(changes: List[Anchor], size: Tuple[int, int]) -> List[Tuple[int, int]]:
         base = set()
         after = set()
 
@@ -561,13 +908,11 @@ class SemanticDiff:
 
     @staticmethod
     @overload
-    def extract(hunk: pygit2.Patch) -> List[Context]:
-        ...
+    def extract(hunk: pygit2.Patch) -> List[Context]: ...
 
     @staticmethod
     @overload
-    def extract(hunk: pygit2.Hunk) -> List[Anchor]:
-        ...
+    def extract(hunk: pygit2.Hunk) -> List[Anchor]: ...
 
     @staticmethod
     def extract(hunk: pygit2.Patch | pygit2.Hunk) -> List[Context] | List[Anchor]:
@@ -581,7 +926,7 @@ class SemanticDiff:
                     Context(
                         base=(base, base + item.old_lines),
                         after=(after, after + item.new_lines),
-                        changes=SemanticDiff.extract(item),
+                        changes=SourceDelta.extract(item),
                     )
                 )
 

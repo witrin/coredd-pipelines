@@ -11,11 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pygit2
 from google.cloud import storage
-
-try:
-    from benchmark.attribution.domain import Change, Commit, FileOperation, OperationType
-except ModuleNotFoundError:
-    from domain import Change, Commit, FileOperation, OperationType
+from benchmark.attribution.domain import Change, Commit, FileOperation, OperationType
 
 
 class VersionControl:
@@ -252,10 +248,17 @@ class VersionControl:
                 blob = self._repository.get(entry.id)
                 path.write_bytes(blob.data)
 
-    def diff(self, base: str, after: str) -> pygit2.Diff:
+    def diff(
+        self,
+        base: str,
+        after: str,
+        *,
+        context_lines: int = 0,
+    ) -> pygit2.Diff:
         """
         Return libgit2-backed diff between base and after.
-        Context is zero – expansion handled later.
+        Context defaults to zero. Callers may request a regular unified-diff
+        context width when needed.
         """
 
         base_obj = self._repository.get(base)
@@ -272,7 +275,7 @@ class VersionControl:
         diff = self._repository.diff(
             base_commit.tree,
             after_commit.tree,
-            context_lines=0,
+            context_lines=context_lines,
             interhunk_lines=0,
         )
 

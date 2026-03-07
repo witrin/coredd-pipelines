@@ -1,4 +1,5 @@
 import json
+import base64
 from typing import Dict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -541,6 +542,93 @@ def ingest_sources_raw(
     repository = partitions.Shard.from_space(partition, names)
 
     context.log.info("Collecting source tarball for %s", repository)
+
+    extractor = SourceExtractor(github.client(), repository, log=context.log.info)
+    return extractor.extract()
+
+
+@asset(
+    metadata={"version": "1.1.0"},
+    group_name="ingest",
+    kinds={"github"},
+    pool="github",
+)
+def ingest_validation_set(
+    context: dg.AssetExecutionContext,
+    github: GithubResource,
+) -> pa.Table:
+    """Ingest the Rosa validation dataset."""
+    client = github.client()
+    repository = client.get_repo("grosa1/icse2021-szz-replication-package")
+    branch = repository.default_branch
+    source = repository.get_contents("detailed-database/language-filtered.json", ref=branch)
+    rows: list[dict[str, object]] = []
+
+    for item in json.loads(base64.b64decode(repository.get_git_blob(source.sha).content)):
+        correction = ((item.get("fix") or {}).get("commit") or {}).get("hash")
+        name = item.get("repository")
+
+        if not isinstance(name, str) or not isinstance(correction, str):
+            continue
+
+        languages = sorted(
+            {
+                language
+                for file in (item.get("fix") or {}).get("files") or []
+                for language in [file.get("lang")]
+                if isinstance(language, str) and language != ""
+            }
+        )
+        if not set(languages).intersection({"js", "py"}):
+            continue
+
+        defects = [
+            defect
+            for defect in [
+                ((bug.get("commit") or {}).get("hash"))
+                for bug in item.get("bugs") or []
+            ]
+            if isinstance(defect, str)
+        ]
+
+        rows.append(
+            {
+                "repository": name,
+                "languages": languages,
+                "correction": correction,
+                "defects": defects,
+            }
+        )
+
+    rows.sort(key=lambda row: (str(row["repository"]), str(row["correction"])))
+    table = pa.Table.from_pylist(rows)
+
+    context.log.info("Ingested %d validation rows.", table.num_rows)
+
+    return table
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    partitions_def=partitions.ingest_validation_sources_partition,
+    group_name="ingest",
+    kinds={"github"},
+    pool="github",
+)
+def ingest_validation_sources(
+    context: dg.AssetExecutionContext,
+    ingest_validation_set: pa.Table,
+    github: GithubResource,
+) -> BlobStream:
+    """Ingest validation repository source tarball."""
+    import polars as pl
+
+    partition = context.partition_key
+    df = pl.from_arrow(ingest_validation_set)
+    names = sorted(df["repository"].unique().to_list())
+    repository = partitions.Shard.from_space(partition, names)
+
+    context.log.info("Collecting validation source tarball for %s", repository)
 
     extractor = SourceExtractor(github.client(), repository, log=context.log.info)
     return extractor.extract()

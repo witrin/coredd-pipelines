@@ -4,20 +4,149 @@ import unittest
 from pathlib import Path
 from textwrap import dedent
 
-from diff import Context, SemanticDiff
+from diff import Context, PatchRenderer, SourceDelta
 from history import VersionControl
 from history_fixture import HistoryFixture
 from unidiff import patch as unidiff_patch
 
 
-class TestSemanticDiff(unittest.TestCase):
+class TestPatchRenderer(unittest.TestCase):
+    def test_render_aligns_references_with_separator(self) -> None:
+        renderer = PatchRenderer(
+            "\n".join(
+                [
+                    "diff --git a/a.py b/a.py",
+                    "--- a/a.py",
+                    "+++ b/a.py",
+                    "@@ -1,2 +1,2 @@",
+                    "-old",
+                    "+new",
+                    " keep",
+                ]
+            )
+        )
+
+        lines = renderer.render().splitlines()
+
+        self.assertIn(" | diff --git a/a.py b/a.py", lines[0])
+        self.assertIn(" | --- a/a.py", lines[1])
+        self.assertIn(" | +++ b/a.py", lines[2])
+        self.assertIn(" | @@ -1,2 +1,2 @@", lines[3])
+        self.assertIn("0-0-0 | -old", lines[4])
+        self.assertIn("0-0-1 | +new", lines[5])
+        self.assertIn("0-0-2 |  keep", lines[6])
+        self.assertTrue(all(" | " in line for line in lines))
+
+    def test_resolve_validates_reference_bounds(self) -> None:
+        renderer = PatchRenderer(
+            "\n".join(
+                [
+                    "diff --git a/a.py b/a.py",
+                    "--- a/a.py",
+                    "+++ b/a.py",
+                    "@@ -1 +1 @@",
+                    "-old",
+                    "+new",
+                ]
+            )
+        )
+
+        zero = renderer.resolve("0-0-0")
+        one = renderer.resolve("0-0-1")
+        self.assertIsNotNone(zero)
+        self.assertIsNotNone(one)
+        self.assertEqual((zero.file, zero.hunk, zero.line), (0, 0, 0))
+        self.assertEqual((one.file, one.hunk, one.line), (0, 0, 1))
+        self.assertIsNone(renderer.resolve("bad"))
+        self.assertIsNone(renderer.resolve("1-0-0"))
+        self.assertIsNone(renderer.resolve("0-1-0"))
+        self.assertIsNone(renderer.resolve("0-0-9"))
+        self.assertIsNone(renderer.resolve("-1-0-0"))
+
+    def test_base_projects_plain_code_blocks(self) -> None:
+        renderer = PatchRenderer(
+            "\n".join(
+                [
+                    "diff --git a/a.py b/a.py",
+                    "--- a/a.py",
+                    "+++ b/a.py",
+                    "@@ -10,3 +10,3 @@",
+                    " keep_before",
+                    "-old",
+                    " keep_after",
+                    "+new",
+                ]
+            )
+        )
+
+        self.assertEqual(
+            renderer.base(),
+            "\n".join(
+                [
+                    "File: a.py",
+                    "Lines: 10-12",
+                    "keep_before",
+                    "old",
+                    "keep_after",
+                ]
+            ),
+        )
+
+    def test_after_projects_plain_code_blocks(self) -> None:
+        renderer = PatchRenderer(
+            "\n".join(
+                [
+                    "diff --git a/a.py b/a.py",
+                    "--- a/a.py",
+                    "+++ b/a.py",
+                    "@@ -10,3 +10,3 @@",
+                    " keep_before",
+                    "-old",
+                    " keep_after",
+                    "+new",
+                ]
+            )
+        )
+
+        self.assertEqual(
+            renderer.after(),
+            "\n".join(
+                [
+                    "File: a.py",
+                    "Lines: 10-12",
+                    "keep_before",
+                    "keep_after",
+                    "new",
+                ]
+            ),
+        )
+
+    def test_projection_uses_version_specific_paths_for_moves(self) -> None:
+        renderer = PatchRenderer(
+            "\n".join(
+                [
+                    "diff --git a/old.py b/new.py",
+                    "--- a/old.py",
+                    "+++ b/new.py",
+                    "@@ -1 +1 @@",
+                    "-old",
+                    "+new",
+                ]
+            )
+        )
+
+        self.assertIn("File: old.py", renderer.base())
+        self.assertIn("File: new.py", renderer.after())
+
+
+class TestSourceDelta(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.TemporaryDirectory()
         self._root = Path(self._tmpdir.name)
         self._history_fixture = HistoryFixture()
         self._history_fixture.__enter__()
         self._repository = VersionControl(self._history_fixture.repository)
-        self._candidate = SemanticDiff(self._repository)
+        self._candidate = SourceDelta(self._repository)
 
     def tearDown(self) -> None:
         self._history_fixture.__exit__(None, None, None)
@@ -131,7 +260,8 @@ class TestSemanticDiff(unittest.TestCase):
             base=base_sha,
             after=after_sha,
             files=self._repository.manifest(base_sha, after_sha),
-            n=1,
+            level=1,
+            n=0,
         )
 
         self.assertEqual(
@@ -198,7 +328,8 @@ class TestSemanticDiff(unittest.TestCase):
             base=base_sha,
             after=after_sha,
             files=self._repository.manifest(base_sha, after_sha),
-            n=1,
+            level=1,
+            n=0,
         )
 
         self.assertEqual(
@@ -276,7 +407,8 @@ class TestSemanticDiff(unittest.TestCase):
             base=base_sha,
             after=after_sha,
             files=self._repository.manifest(base_sha, after_sha),
-            n=1,
+            level=1,
+            n=0,
         )
 
         self.assertEqual(
@@ -318,7 +450,8 @@ class TestSemanticDiff(unittest.TestCase):
             base=base_sha,
             after=after_sha,
             files=self._repository.manifest(base_sha, after_sha),
-            n=1,
+            level=1,
+            n=0,
         )
 
         self.assertEqual(
@@ -357,7 +490,8 @@ class TestSemanticDiff(unittest.TestCase):
             base=base_sha,
             after=after_sha,
             files=self._repository.manifest(base_sha, after_sha),
-            n=1,
+            level=1,
+            n=0,
         )
 
         self.assertEqual(
@@ -396,7 +530,8 @@ class TestSemanticDiff(unittest.TestCase):
             base=base_sha,
             after=after_sha,
             files=self._repository.manifest(base_sha, after_sha),
-            n=1,
+            level=1,
+            n=0,
         )
 
         self.assertEqual(
@@ -526,7 +661,7 @@ class TestSemanticDiff(unittest.TestCase):
             base=base_sha,
             after=after_sha,
             files=self._repository.manifest(base_sha, after_sha),
-            n=2,
+            level=2,
         )
 
         self.assertEqual(
@@ -615,7 +750,7 @@ class TestSemanticDiff(unittest.TestCase):
             base=base_sha,
             after=after_sha,
             files=self._repository.manifest(base_sha, after_sha),
-            n=2,
+            level=2,
         )
 
         self.assertEqual(
@@ -698,7 +833,8 @@ class TestSemanticDiff(unittest.TestCase):
             base=base_sha,
             after=after_sha,
             files=self._repository.manifest(base_sha, after_sha),
-            n=1,
+            level=1,
+            n=0,
         )
 
         self.assertEqual(
@@ -797,7 +933,8 @@ class TestSemanticDiff(unittest.TestCase):
             base=base_sha,
             after=after_sha,
             files=self._repository.manifest(base_sha, after_sha),
-            n=1,
+            level=1,
+            n=0,
         )
 
         self.assertEqual(
@@ -2241,7 +2378,8 @@ class TestSemanticDiff(unittest.TestCase):
                 base=base_sha,
                 after=after_sha,
                 files=self._repository.manifest(base_sha, after_sha),
-                n=1,
+                level=1,
+                n=0,
             )
 
     def test_py_syntax_error_raises(self) -> None:
@@ -2270,7 +2408,8 @@ class TestSemanticDiff(unittest.TestCase):
                 base=base_sha,
                 after=after_sha,
                 files=self._repository.manifest(base_sha, after_sha),
-                n=1,
+                level=1,
+                n=0,
             )
 
     # == J. Whitespace-only / formatting (n=1) ========================
@@ -2314,7 +2453,8 @@ class TestSemanticDiff(unittest.TestCase):
             base=base_sha,
             after=after_sha,
             files=self._repository.manifest(base_sha, after_sha),
-            n=1,
+            level=1,
+            n=0,
         )
 
         # GumTree AST ignores whitespace-only changes
@@ -2365,7 +2505,8 @@ class TestSemanticDiff(unittest.TestCase):
             base=base_sha,
             after=after_sha,
             files=self._repository.manifest(base_sha, after_sha),
-            n=1,
+            level=1,
+            n=0,
         )
 
         # GumTree AST ignores whitespace-only changes
@@ -2397,7 +2538,8 @@ class TestSemanticDiff(unittest.TestCase):
             base=base_sha,
             after=after_sha,
             files=self._repository.manifest(base_sha, after_sha),
-            n=1,
+            level=1,
+            n=0,
         )
         self.assertEqual(
             str(patch),
@@ -2408,6 +2550,34 @@ class TestSemanticDiff(unittest.TestCase):
             @@ -2,1 +2,1 @@
             -key = 1
             +key = 2
+        """
+            ),
+        )
+
+    def test_unsupported_file_type_uses_requested_context_lines(self) -> None:
+        base_sha, after_sha = self._commit(
+            "foo = 1\nbar = 1\nbaz = 1\n",
+            "foo = 1\nbar = 2\nbaz = 1\n",
+            ".toml",
+        )
+        patch = self._candidate.expand(
+            base=base_sha,
+            after=after_sha,
+            files=self._repository.manifest(base_sha, after_sha),
+            level=1,
+            n=1,
+        )
+        self.assertEqual(
+            str(patch),
+            self._patch(
+                """
+            --- a/file.toml
+            +++ b/file.toml
+            @@ -1,3 +1,3 @@
+             foo = 1
+            -bar = 1
+            +bar = 2
+             baz = 1
         """
             ),
         )
@@ -2490,7 +2660,8 @@ class TestSemanticDiff(unittest.TestCase):
             base=base_sha,
             after=after_sha,
             files=self._repository.manifest(base_sha, after_sha),
-            n=1,
+            level=1,
+            n=0,
         )
 
         self.assertEqual(
@@ -2505,6 +2676,93 @@ class TestSemanticDiff(unittest.TestCase):
         """
             ),
         )
+
+    def test_patch_uses_regular_context_lines(self) -> None:
+        base_sha, after_sha = self._commit(
+            "foo = 1\nbar = 1\nbaz = 1\n",
+            "foo = 1\nbar = 2\nbaz = 1\n",
+            ".toml",
+        )
+
+        patch = self._candidate.patch(
+            base=base_sha,
+            after=after_sha,
+            files=self._repository.manifest(base_sha, after_sha),
+            n=1,
+        )
+
+        self.assertEqual(
+            str(patch),
+            self._patch(
+                """
+            --- a/file.toml
+            +++ b/file.toml
+            @@ -1,3 +1,3 @@
+             foo = 1
+            -bar = 1
+            +bar = 2
+             baz = 1
+        """
+            ),
+        )
+
+    def test_refine_builds_window_for_selected_reference(self) -> None:
+        base_sha, after_sha = self._commit(
+            "foo = 1\nbar = 1\nbaz = 1\ncorge = 1\nqux = 1\n",
+            "foo = 1\nbar = 1\nbaz = 2\ncorge = 1\nqux = 1\n",
+            ".toml",
+        )
+        expansion = self._candidate.patch(
+            base=base_sha,
+            after=after_sha,
+            files=self._repository.manifest(base_sha, after_sha),
+            n=0,
+        )
+
+        refined = self._candidate.refine(
+            unidiff_patch.PatchSet(str(expansion)),
+            ["0-0-0"],
+            base_sha,
+            after_sha,
+        )
+
+        self.assertEqual(
+            str(refined),
+            self._patch(
+                """
+            --- a/file.toml
+            +++ b/file.toml
+            @@ -1,5 +1,5 @@
+             foo = 1
+             bar = 1
+            -baz = 1
+            +baz = 2
+             corge = 1
+             qux = 1
+        """
+            ),
+        )
+
+    def test_refine_rejects_unresolvable_references(self) -> None:
+        base_sha, after_sha = self._commit(
+            "foo = 1\nbar = 1\nbaz = 1\n",
+            "foo = 1\nbar = 2\nbaz = 1\n",
+            ".toml",
+        )
+        expansion = self._candidate.patch(
+            base=base_sha,
+            after=after_sha,
+            files=self._repository.manifest(base_sha, after_sha),
+            n=0,
+        )
+
+        with self.assertRaises(ValueError):
+            self._candidate.refine(
+                unidiff_patch.PatchSet(str(expansion)),
+                ["9-9-9"],
+                base_sha,
+                after_sha,
+            )
 
     def test_random_composition_matches_pygit_unidiff(self) -> None:
         rng = random.Random()
