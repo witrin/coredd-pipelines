@@ -133,6 +133,123 @@ class ScopeRule:
     scope: Callable[[object, int], object]
 
 
+class PatchScope:
+    _increments = {
+        "python": {
+            "function_definition",
+            "class_definition",
+            "decorated_definition",
+        },
+        "javascript": {
+            "function_declaration",
+            "function_expression",
+            "arrow_function",
+            "class_declaration",
+            "method_definition",
+        },
+        "typescript": {
+            "function_declaration",
+            "function_expression",
+            "arrow_function",
+            "class_declaration",
+            "method_definition",
+        },
+        "tsx": {
+            "function_declaration",
+            "function_expression",
+            "arrow_function",
+            "class_declaration",
+            "method_definition",
+        },
+    }
+
+    _roots = {
+        "python": {"module"},
+        "javascript": {"program"},
+        "typescript": {"program"},
+        "tsx": {"program"},
+    }
+
+    @property
+    def rules(self) -> List[ScopeRule]:
+        return [
+            ScopeRule(
+                priority=10,
+                language=None,
+                comment="Comment stays local.",
+                match=lambda node, context: "comment" in str(node.type).lower(),
+                scope=lambda node, context: node,
+            ),
+            ScopeRule(
+                priority=20,
+                language=None,
+                comment="Root import stays local in Python.",
+                match=lambda node, context: (
+                    (
+                        str(node.type) in {"import_statement", "import_from_statement"}
+                        and node.parent is not None
+                        and str(node.parent.type) in {"module", "program"}
+                    )
+                    or (
+                        node.parent is not None
+                        and str(node.parent.type)
+                        in {"import_statement", "import_from_statement"}
+                        and node.parent.parent is not None
+                        and str(node.parent.parent.type) in {"module", "program"}
+                    )
+                    or (
+                        node.parent is not None
+                        and node.parent.parent is not None
+                        and str(node.parent.parent.type)
+                        in {"import_statement", "import_from_statement"}
+                        and node.parent.parent.parent is not None
+                        and str(node.parent.parent.parent.type) in {"module", "program"}
+                    )
+                ),
+                scope=lambda node, context: node,
+            ),
+        ]
+
+    def validate(self, root, language: str, path: str, side: str) -> None:
+        for node in (
+            QueryCursor(
+                Query(
+                    get_language(language),
+                    "[(ERROR) (MISSING)] @issue",
+                )
+            )
+            .captures(root)
+            .get("issue", [])
+        ):
+            raise RuntimeError(
+                f"Failed to parse {side} file {path} at line {node.start_point[0] + 1}."
+            )
+
+    def scope(self, node, context: int, language: str):
+        for rule in sorted(self.rules, key=lambda item: item.priority):
+            if rule.language is not None and rule.language != language:
+                continue
+            if rule.match(node, context):
+                return rule.scope(node, context)
+
+        remaining = context
+        if str(node.type) in self._increments.get(language, set()):
+            remaining -= 1
+
+        current = node
+        while current is not None and remaining > 0:
+            parent = current.parent
+            if parent is None:
+                break
+            if str(parent.type) in self._roots.get(language, set()):
+                current = parent
+                break
+            if str(parent.type) in self._increments.get(language, set()):
+                remaining -= 1
+            current = parent
+        return current if current is not None else node
+
+
 class PatchView:
     def __init__(self, source: patch.PatchSet | str) -> None:
         source = source
@@ -522,42 +639,6 @@ class PatchFactory:
     # changes outside enclosing scopes. The current implementation always expands
     # to the next structural scope and does not implement the exact "three
     # surrounding lines" behavior described in the paper.
-    _increments = {
-        "python": {
-            "function_definition",
-            "class_definition",
-            "decorated_definition",
-        },
-        "javascript": {
-            "function_declaration",
-            "function_expression",
-            "arrow_function",
-            "class_declaration",
-            "method_definition",
-        },
-        "typescript": {
-            "function_declaration",
-            "function_expression",
-            "arrow_function",
-            "class_declaration",
-            "method_definition",
-        },
-        "tsx": {
-            "function_declaration",
-            "function_expression",
-            "arrow_function",
-            "class_declaration",
-            "method_definition",
-        },
-    }
-
-    _roots = {
-        "python": {"module"},
-        "javascript": {"program"},
-        "typescript": {"program"},
-        "tsx": {"program"},
-    }
-
     _extensions = {
         "py": "python",
         "js": "javascript",
@@ -567,6 +648,7 @@ class PatchFactory:
 
     def __init__(self, repository: VersionControl) -> None:
         self.repository = repository
+        self._scope = PatchScope()
 
     def create(
         self,
@@ -628,8 +710,8 @@ class PatchFactory:
                 parser = Parser()
                 parser.language = get_language(language)
                 roots = [parser.parse(source).root_node, parser.parse(target).root_node]
-                self._validate(roots[0], language, path, "base")
-                self._validate(roots[1], language, path, "after")
+                self._scope.validate(roots[0], language, path, "base")
+                self._scope.validate(roots[1], language, path, "after")
 
                 lines = [
                     source.decode("utf-8", "ignore").splitlines(),
@@ -932,84 +1014,6 @@ class PatchFactory:
         except FileNotFoundError:
             return b""
 
-    def _validate(self, root, language: str, path: str, side: str) -> None:
-        for node in (
-            QueryCursor(
-                Query(
-                    get_language(language),
-                    "[(ERROR) (MISSING)] @issue",
-                )
-            )
-            .captures(root)
-            .get("issue", [])
-        ):
-            raise RuntimeError(
-                f"Failed to parse {side} file {path} at line {node.start_point[0] + 1}."
-            )
-
-    def _scope(self, node, context: int, language: str):
-        for rule in sorted(self._rules(), key=lambda item: item.priority):
-            if rule.language is not None and rule.language != language:
-                continue
-            if rule.match(node, context):
-                return rule.scope(node, context)
-
-        remaining = context
-        if str(node.type) in self._increments.get(language, set()):
-            remaining -= 1
-
-        current = node
-        while current is not None and remaining > 0:
-            parent = current.parent
-            if parent is None:
-                break
-            if str(parent.type) in self._roots.get(language, set()):
-                current = parent
-                break
-            if str(parent.type) in self._increments.get(language, set()):
-                remaining -= 1
-            current = parent
-        return current if current is not None else node
-
-    def _rules(self) -> List[ScopeRule]:
-        return [
-            ScopeRule(
-                priority=10,
-                language=None,
-                comment="Comment stays local.",
-                match=lambda node, context: "comment" in str(node.type).lower(),
-                scope=lambda node, context: node,
-            ),
-            ScopeRule(
-                priority=20,
-                language=None,
-                comment="Root import stays local in Python.",
-                match=lambda node, context: (
-                    (
-                        str(node.type) in {"import_statement", "import_from_statement"}
-                        and node.parent is not None
-                        and str(node.parent.type) in {"module", "program"}
-                    )
-                    or (
-                        node.parent is not None
-                        and str(node.parent.type)
-                        in {"import_statement", "import_from_statement"}
-                        and node.parent.parent is not None
-                        and str(node.parent.parent.type) in {"module", "program"}
-                    )
-                    or (
-                        node.parent is not None
-                        and node.parent.parent is not None
-                        and str(node.parent.parent.type)
-                        in {"import_statement", "import_from_statement"}
-                        and node.parent.parent.parent is not None
-                        and str(node.parent.parent.parent.type) in {"module", "program"}
-                    )
-                ),
-                scope=lambda node, context: node,
-            ),
-        ]
-
     def _expand(
         self, root, lines: List[str], interval: Interval, context: int, language: str
     ) -> Interval:
@@ -1030,7 +1034,7 @@ class PatchFactory:
                 (line - 1, column), (line - 1, column)
             )
 
-            current = self._scope(node, context, language)
+            current = self._scope.scope(node, context, language)
 
             lower = min(lower, current.start_point[0] + 1)
             upper = max(upper, current.end_point[0] + 1)
