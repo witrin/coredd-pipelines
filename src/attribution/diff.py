@@ -133,23 +133,23 @@ class ScopeRule:
     scope: Callable[[object, int], object]
 
 
-class PatchRenderer:
-    def __init__(self, unified_patch_text: patch.PatchSet | str) -> None:
-        source = unified_patch_text
+class PatchView:
+    def __init__(self, source: patch.PatchSet | str) -> None:
+        source = source
         if isinstance(source, patch.PatchSet):
-            self._patchset = source
+            self._patch = source
             return
         rendered = source if source.endswith("\n") else f"{source}\n"
         try:
-            self._patchset = patch.PatchSet(rendered)
+            self._patch = patch.PatchSet(rendered)
         except Exception as error:
             raise ValueError(
-                f"PatchRenderer requires parseable unified patch content: {rendered!r}"
+                f"PatchView requires parseable unified patch content: {rendered!r}"
             ) from error
 
     def render(self) -> str:
         rows: list[tuple[str | None, str]] = []
-        for file_index, patched in enumerate(self._patchset):
+        for file_index, patched in enumerate(self._patch):
             for header in self._file_headers(patched):
                 rows.append((None, header))
             for hunk_index, hunk in enumerate(patched):
@@ -169,7 +169,7 @@ class PatchRenderer:
 
     def base(self) -> str:
         blocks: list[str] = []
-        for patched in self._patchset:
+        for patched in self._patch:
             for hunk in patched:
                 lines = [
                     (line.source_line_no, str(line).rstrip("\n")[1:])
@@ -196,7 +196,7 @@ class PatchRenderer:
 
     def after(self) -> str:
         blocks: list[str] = []
-        for patched in self._patchset:
+        for patched in self._patch:
             for hunk in patched:
                 lines = [
                     (line.target_line_no, str(line).rstrip("\n")[1:])
@@ -221,7 +221,41 @@ class PatchRenderer:
                 )
         return "\n\n".join(blocks)
 
-    def resolve(self, reference: str) -> Reference | None:
+    @overload
+    def resolve(self, reference: str) -> Reference | None: ...
+
+    @overload
+    def resolve(self, reference: list[str]) -> list[Slice]: ...
+
+    def resolve(self, reference: str | list[str]) -> Reference | None | list[Slice]:
+        if isinstance(reference, list):
+            grouped: dict[tuple[str | None, str | None], list[Anchor]] = {}
+            seen: set[tuple[tuple[str | None, str | None], Anchor]] = set()
+
+            for token in reference:
+                current = self.resolve(token)
+                if current is None:
+                    continue
+                patched = self._patch[current.file]
+                line = patched[current.hunk][current.line]
+                pair = (
+                    self._normalize_path(patched.source_file, source=True),
+                    self._normalize_path(patched.target_file, source=False),
+                )
+                anchor = self._anchor(line)
+                if anchor is None:
+                    continue
+                key = (pair, anchor)
+                if key in seen:
+                    continue
+                seen.add(key)
+                grouped.setdefault(pair, []).append(anchor)
+
+            return [
+                Slice(file=pair, anchors=anchors)
+                for pair, anchors in grouped.items()
+            ]
+
         values = reference.split("-")
         if len(values) != 3:
             return None
@@ -233,42 +267,14 @@ class PatchRenderer:
             return None
         if file < 0 or hunk < 0 or line < 0:
             return None
-        if file >= len(self._patchset):
+        if file >= len(self._patch):
             return None
-        patched = self._patchset[file]
+        patched = self._patch[file]
         if hunk >= len(patched):
             return None
         if line >= len(patched[hunk]):
             return None
         return Reference(file=file, hunk=hunk, line=line)
-
-    def slices(self, references: list[str]) -> list[Slice]:
-        grouped: dict[tuple[str | None, str | None], list[Anchor]] = {}
-        seen: set[tuple[tuple[str | None, str | None], Anchor]] = set()
-
-        for token in references:
-            reference = self.resolve(token)
-            if reference is None:
-                continue
-            patched = self._patchset[reference.file]
-            line = patched[reference.hunk][reference.line]
-            pair = (
-                self._normalize_path(patched.source_file, source=True),
-                self._normalize_path(patched.target_file, source=False),
-            )
-            anchor = self._anchor(line)
-            if anchor is None:
-                continue
-            key = (pair, anchor)
-            if key in seen:
-                continue
-            seen.add(key)
-            grouped.setdefault(pair, []).append(anchor)
-
-        return [
-            Slice(file=pair, anchors=anchors)
-            for pair, anchors in grouped.items()
-        ]
 
     def _anchor(self, line: patch.Line) -> Anchor | None:
         base = (
@@ -715,6 +721,7 @@ class SourceDelta:
                     after += 1
 
         return line
+    
     def _overlaps(
         self,
         candidate: tuple[int, int],

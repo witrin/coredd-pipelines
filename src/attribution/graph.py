@@ -4,7 +4,7 @@ from typing import Protocol, TypedDict
 from pydantic import BaseModel, ValidationError
 
 from benchmark.attribution.domain import Anchor, Change, Slice
-from benchmark.attribution.diff import PatchRenderer, SourceDelta
+from benchmark.attribution.diff import PatchView, SourceDelta
 from benchmark.attribution.tracing import (
     AttributionRunnable,
 )
@@ -720,9 +720,9 @@ class HintNode:
             },
         }
 
-    def _renderer(self, expansion: str) -> PatchRenderer:
+    def _renderer(self, expansion: str) -> PatchView:
         try:
-            return PatchRenderer(expansion)
+            return PatchView(expansion)
         except Exception as error:
             raise ValueError(
                 f"HintNode requires parseable expanded patch content: {expansion!r}"
@@ -847,9 +847,9 @@ class RefineNode:
             return {"nodes": {**nodes, "refine": {}}}
         try:
             slices = self._anchors(
-                PatchRenderer(
+                PatchView(
                     expansion if expansion.endswith("\n") else f"{expansion}\n"
-                ).slices(references),
+                ).resolve(references),
                 "base",
             )
             if not slices:
@@ -947,9 +947,9 @@ class VerifyNode:
             },
         }
 
-    def _renderer(self, refinement: str) -> PatchRenderer:
+    def _renderer(self, refinement: str) -> PatchView:
         try:
-            return PatchRenderer(refinement)
+            return PatchView(refinement)
         except Exception as error:
             raise ValueError(
                 f"VerifyNode requires parseable refined patch content: {refinement!r}"
@@ -1087,14 +1087,14 @@ class BlameNode:
 
         source = expansion if expansion.endswith("\n") else f"{expansion}\n"
         try:
-            renderer = PatchRenderer(source)
+            renderer = PatchView(source)
         except Exception as error:
             raise ValueError(
                 f"BlameNode requires parseable expanded patch contentt: {source!r}"
             ) from error
 
         blame = nodes.get("blame") or {}
-        slices = renderer.slices(
+        slices = renderer.resolve(
             [
                 reference
                 for item in causes
@@ -1352,9 +1352,9 @@ class CompareNode:
             ),
         )
 
-    def _renderer(self, refinement: str) -> PatchRenderer:
+    def _renderer(self, refinement: str) -> PatchView:
         try:
-            return PatchRenderer(refinement)
+            return PatchView(refinement)
         except Exception as error:
             raise ValueError(
                 f"CompareNode requires parseable unified patch content: {refinement!r}"
@@ -1474,8 +1474,13 @@ class SelectNode:
         compare = nodes.get("compare") or {}
         candidate = compare.get("candidate") or {}
         parent = compare.get("parent") or {}
-        if candidate.get("defect") is True and parent.get("defect") is False:
-            return {"introducer": candidate.get("commit")}
+        commit = candidate.get("commit")
+        if (
+            candidate.get("defect") is True
+            and parent.get("defect") is False
+            and commit
+        ):
+            return {"introducer": commit}
         return {}
 
 
@@ -1492,7 +1497,7 @@ class FinalizeNode:
 
     def run(self, state: AttributionGraphState) -> dict[str, object]:
         """Assemble the final attribution artifact."""
-        return {}
+        return {"aborted": False}
 
 
 class AttributionGraph:

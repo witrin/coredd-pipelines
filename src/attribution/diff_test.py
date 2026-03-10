@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from textwrap import dedent
 
-from benchmark.attribution.diff import Context, PatchRenderer, SourceDelta
+from benchmark.attribution.diff import Context, PatchView, SourceDelta
 from benchmark.attribution.domain import Anchor, FileOperation, OperationType, Slice
 from benchmark.attribution.history import VersionControl
 from benchmark.attribution.history_fixture import HistoryFixture
@@ -13,7 +13,7 @@ from unidiff import PatchSet
 
 class TestPatchRenderer(unittest.TestCase):
     def test_render_aligns_references_with_separator(self) -> None:
-        renderer = PatchRenderer(
+        renderer = PatchView(
             "\n".join(
                 [
                     "diff --git a/a.py b/a.py",
@@ -39,7 +39,7 @@ class TestPatchRenderer(unittest.TestCase):
         self.assertTrue(all(" | " in line for line in lines))
 
     def test_resolve_validates_reference_bounds(self) -> None:
-        renderer = PatchRenderer(
+        renderer = PatchView(
             "\n".join(
                 [
                     "diff --git a/a.py b/a.py",
@@ -65,7 +65,7 @@ class TestPatchRenderer(unittest.TestCase):
         self.assertIsNone(renderer.resolve("-1-0-0"))
 
     def test_base_projects_plain_code_blocks(self) -> None:
-        renderer = PatchRenderer(
+        renderer = PatchView(
             "\n".join(
                 [
                     "diff --git a/a.py b/a.py",
@@ -93,7 +93,7 @@ class TestPatchRenderer(unittest.TestCase):
         )
 
     def test_after_projects_plain_code_blocks(self) -> None:
-        renderer = PatchRenderer(
+        renderer = PatchView(
             "\n".join(
                 [
                     "diff --git a/a.py b/a.py",
@@ -121,7 +121,7 @@ class TestPatchRenderer(unittest.TestCase):
         )
 
     def test_projection_uses_version_specific_paths_for_moves(self) -> None:
-        renderer = PatchRenderer(
+        renderer = PatchView(
             "\n".join(
                 [
                     "diff --git a/old.py b/new.py",
@@ -138,7 +138,7 @@ class TestPatchRenderer(unittest.TestCase):
         self.assertIn("File: new.py", renderer.after())
 
     def test_slices_groups_references_by_file(self) -> None:
-        renderer = PatchRenderer(
+        renderer = PatchView(
             "\n".join(
                 [
                     "diff --git a/a.py b/a.py",
@@ -153,7 +153,7 @@ class TestPatchRenderer(unittest.TestCase):
         )
 
         self.assertEqual(
-            renderer.slices(["0-0-0", "0-0-1", "0-0-2"]),
+            renderer.resolve(["0-0-0", "0-0-1", "0-0-2"]),
             [
                 Slice(
                     file=("a.py", "a.py"),
@@ -167,7 +167,7 @@ class TestPatchRenderer(unittest.TestCase):
         )
 
     def test_slices_support_add_only_reference(self) -> None:
-        renderer = PatchRenderer(
+        renderer = PatchView(
             "\n".join(
                 [
                     "diff --git a/file.py b/file.py",
@@ -182,7 +182,7 @@ class TestPatchRenderer(unittest.TestCase):
         )
 
         self.assertEqual(
-            renderer.slices(["0-0-0"]),
+            renderer.resolve(["0-0-0"]),
             [
                 Slice(
                     file=(None, "file.py"),
@@ -192,7 +192,7 @@ class TestPatchRenderer(unittest.TestCase):
         )
 
     def test_slices_support_delete_only_reference(self) -> None:
-        renderer = PatchRenderer(
+        renderer = PatchView(
             "\n".join(
                 [
                     "diff --git a/file.py b/file.py",
@@ -207,7 +207,7 @@ class TestPatchRenderer(unittest.TestCase):
         )
 
         self.assertEqual(
-            renderer.slices(["0-0-0"]),
+            renderer.resolve(["0-0-0"]),
             [
                 Slice(
                     file=("file.py", None),
@@ -3465,7 +3465,7 @@ class TestSourceDelta(unittest.TestCase):
         self.assertIn("diff --git /dev/null b/a.ts", rendered)
         self.assertIn("diff --git /dev/null b/b.ts", rendered)
         self.assertEqual(
-            PatchRenderer(rendered).slices(["0-0-0", "1-0-0"]),
+            PatchView(rendered).resolve(["0-0-0", "1-0-0"]),
             [
                 Slice(file=(None, "a.ts"), anchors=[Anchor(base=(0, 0), after=(1, 2))]),
                 Slice(file=(None, "b.ts"), anchors=[Anchor(base=(0, 0), after=(1, 2))]),

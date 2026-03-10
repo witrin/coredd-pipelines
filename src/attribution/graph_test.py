@@ -28,6 +28,7 @@ from benchmark.attribution.graph import (
     ExplainNode,
     ExplainResponseSchema,
     ExplainState,
+    FinalizeNode,
     HintResponseSchema,
     HintNode,
     HintState,
@@ -1705,6 +1706,21 @@ class TestAttributionGraph(unittest.TestCase):
 
         self.assertEqual(result, {"introducer": "sha-a"})
 
+    def test_select_node_requires_candidate_commit(self) -> None:
+        self.assertEqual(
+            SelectNode().run(
+                {
+                    "nodes": {
+                        "compare": {
+                            "candidate": {"commit": None, "defect": True},
+                            "parent": {"commit": "sha-b", "defect": False},
+                        }
+                    }
+                }
+            ),
+            {},
+        )
+
     def test_select_node_leaves_state_when_no_match_exists(self) -> None:
         self.assertEqual(
             SelectNode().run(
@@ -1719,6 +1735,9 @@ class TestAttributionGraph(unittest.TestCase):
             ),
             {},
         )
+
+    def test_finalize_node_sets_success_state(self) -> None:
+        self.assertEqual(FinalizeNode().run({}), {"aborted": False})
 
     def test_verify_node_checks_base_and_after(self) -> None:
         llm = Mock(spec_set=["with_structured_output"])
