@@ -133,6 +133,7 @@ The current implementation still has several unresolved high-level problems in t
 2. `Hint Generation` appears to have recall problems and does not always reference all relevant locations.
 3. The hint reasons used in verification are not strong enough to reliably exclude similar but irrelevant locations inside the same snippet.
 4. The paper requires fixing hints to be generated, but their downstream role remains unclear because later steps explicitly operate on buggy statements while the use of fixing hints is never specified precisely.
+5. `VerifyNode` and both `CompareNode` checks still show unstable dichotomic outputs in structured JSON mode. The returned `present` or `defect` boolean can contradict the accompanying reason, which directly destabilizes the intended `(base, after) = (1, 0)` and `(candidate, parent) = (1, 0)` decisions across iterations.
 
 ## Notebook Quick Start
 

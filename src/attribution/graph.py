@@ -1,4 +1,5 @@
 from __future__ import annotations
+from textwrap import dedent
 from typing import Protocol, TypedDict
 
 from pydantic import BaseModel, ValidationError
@@ -20,15 +21,6 @@ NodeState = dict[str, object]
 # Open per-node working-state mapping stored under AttributionGraphState["nodes"].
 
 
-class CandidateState(TypedDict, total=False):
-    """Current candidate comparison state."""
-
-    index: int
-    commit: str | None
-    parent: str | None
-    comparison: tuple[int, int] | None
-
-
 class ExplainRunState(TypedDict, total=False):
     """One explain pass result."""
 
@@ -42,27 +34,6 @@ class AggregateState(TypedDict, total=False):
 
     rationale: str
     files: list[str]
-
-
-class ExplainState(TypedDict, total=False):
-    """Explain-phase working state."""
-
-    samples: int
-    runs: list[ExplainRunState]
-    aggregate: AggregateState
-
-
-class ExpandState(TypedDict, total=False):
-    """Expand-phase working state."""
-
-    expansion: str
-
-
-class HintState(TypedDict, total=False):
-    """Hint-phase working state."""
-
-    causes: list[HintItemState]
-    corrections: list[HintItemState]
 
 
 class HintItemState(TypedDict, total=False):
@@ -80,49 +51,6 @@ class HintStatementState(TypedDict, total=False):
     excerpt: str | None
 
 
-class RefineState(TypedDict, total=False):
-    """Refine-phase working state."""
-
-    refinement: str
-
-
-class VerifyItemState(TypedDict, total=False):
-    """One verify pass result."""
-
-    defect: bool
-    reason: str
-
-
-class VerifyState(TypedDict, total=False):
-    """Verify-phase working state."""
-
-    base: VerifyItemState
-    after: VerifyItemState
-    verified: bool
-
-
-class BlameState(TypedDict, total=False):
-    """Blame-phase working state."""
-
-    candidates: list[BlameCandidateState]
-
-
-class CompareState(TypedDict, total=False):
-    """Compare-phase working state."""
-
-    index: int
-    candidate: CompareItemState
-    parent: CompareItemState
-
-
-class BlameCandidateState(TypedDict, total=False):
-    """One prepared candidate pair."""
-
-    commit: str
-    parent: str | None
-    slices: list[SliceState]
-
-
 class AnchorState(TypedDict, total=False):
     """One serialized anchor."""
 
@@ -135,22 +63,6 @@ class SliceState(TypedDict, total=False):
 
     file: tuple[str | None, str | None]
     anchors: list[AnchorState]
-
-
-class CompareStepState(TypedDict, total=False):
-    """One compare pass result."""
-
-    passed: bool
-    reason: str
-
-
-class CompareItemState(TypedDict, total=False):
-    """One compare-side result."""
-
-    commit: str | None
-    presence: CompareStepState
-    assessment: CompareStepState
-    defect: bool
 
 
 class ExplainResponseSchema(BaseModel):
@@ -205,14 +117,12 @@ class SummarizeNode:
         self,
         factory: PatchFactory | None = None,
         llm: object | None = None,
-        instruction: str | None = None,
         context: int = 3,
     ) -> None:
         if context < 0:
             raise ValueError("context must be non-negative")
         self._factory = factory
         self._llm = llm
-        self._instruction = instruction
         self._context = context
 
     def run(self, state: AttributionGraphState) -> dict[str, object]:
@@ -259,21 +169,22 @@ class SummarizeNode:
                 f"Each hunk may include up to {context} unchanged context lines around "
                 "the edits. Treat unchanged context only as orientation."
             )
-        lines = [
-            self._instruction
-            or (
-                "Analyze the following patch.\n"
-                "Summarize the code changes and the relationships between "
-                "the changed hunks or files.\n"
-                "Output only the summary text."
-            ),
-            "",
-            context_note,
-            "",
-            "Patch:",
-            patch_text,
-        ]
-        return "\n".join(lines)
+        template = dedent(
+            """
+            Analyze the following patch.
+            Summarize the code changes and the relationships between the changed hunks or files.
+            Output only the summary text.
+
+            {context_note}
+
+            Patch:
+            {patch_text}
+            """
+        ).strip()
+        return template.format(
+            context_note=context_note,
+            patch_text=patch_text,
+        )
 
 
 class ExplainNode:
@@ -283,7 +194,6 @@ class ExplainNode:
         self,
         factory: PatchFactory | None = None,
         llm: object | None = None,
-        instruction: str | None = None,
         context: int = 3,
         samples: int = 3,
     ) -> None:
@@ -293,7 +203,6 @@ class ExplainNode:
             raise ValueError("samples must be positive")
         self._factory = factory
         self._llm = llm
-        self._instruction = instruction
         self._context = context
         self._samples = samples
 
@@ -331,8 +240,23 @@ class ExplainNode:
             commit_messages=commit_messages,
             patch_text=patch,
         )
-        response = self._structured_model().invoke(prompt)
-        rationale, files = self._parse_response(response)
+        try:
+            response = self._llm.with_structured_output(
+                ExplainResponseSchema,
+                method="json_schema",
+                strict=True,
+            ).invoke(prompt)
+        except (AttributeError, TypeError) as error:
+            raise ValueError(
+                "ExplainNode requires an llm that supports structured schema mode."
+            ) from error
+        try:
+            payload = ExplainResponseSchema.model_validate(response)
+        except (ValidationError, TypeError, ValueError) as error:
+            raise ValueError(
+                "ExplainNode requires structured explain output."
+            ) from error
+        rationale, files = payload.rationale, list(payload.files)
         run: ExplainRunState = {
             "index": len(runs),
             "rationale": rationale,
@@ -358,46 +282,53 @@ class ExplainNode:
         canonical = list(operations)
         orders: list[list[object]] = []
         seen: set[tuple[str, ...]] = set()
-        self._append_order(orders, seen, canonical)
-        self._append_order(orders, seen, list(reversed(canonical)))
+        for current in (canonical, list(reversed(canonical))):
+            key = tuple(
+                str(
+                    getattr(operation, "after", None)
+                    or getattr(operation, "base", None)
+                    or ""
+                )
+                for operation in current
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            orders.append(current)
         if len(orders) >= requested_runs:
             return orders
-        for offset in self._rotation_offsets(len(canonical)):
+        size = len(canonical)
+        offsets: list[int] = []
+        if size > 1:
+            for offset in ((size + 1) // 2, 1, size // 2, 2):
+                if 0 < offset < size and offset not in offsets:
+                    offsets.append(offset)
+            left = 3
+            right = size - 1
+            while left <= right:
+                if 0 < right < size and right not in offsets:
+                    offsets.append(right)
+                if 0 < left < size and left not in offsets:
+                    offsets.append(left)
+                left += 1
+                right -= 1
+        for offset in offsets:
             if len(orders) >= requested_runs:
                 break
             rotated = canonical[offset:] + canonical[:offset]
-            self._append_order(orders, seen, rotated)
+            key = tuple(
+                str(
+                    getattr(operation, "after", None)
+                    or getattr(operation, "base", None)
+                    or ""
+                )
+                for operation in rotated
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            orders.append(rotated)
         return orders
-
-    def _append_order(
-        self,
-        orders: list[list[object]],
-        seen: set[tuple[str, ...]],
-        operations: list[object],
-    ) -> None:
-        key = tuple(self._operation_name(operation) for operation in operations)
-        if key in seen:
-            return
-        seen.add(key)
-        orders.append(operations)
-
-    def _rotation_offsets(self, size: int) -> list[int]:
-        if size <= 1:
-            return []
-        offsets: list[int] = []
-        for offset in ((size + 1) // 2, 1, size // 2, 2):
-            if 0 < offset < size and offset not in offsets:
-                offsets.append(offset)
-        left = 3
-        right = size - 1
-        while left <= right:
-            if 0 < right < size and right not in offsets:
-                offsets.append(right)
-            if 0 < left < size and left not in offsets:
-                offsets.append(left)
-            left += 1
-            right -= 1
-        return offsets
 
     def _commit_messages(self, correction: Change) -> list[str]:
         shas = [correction.after]
@@ -427,74 +358,36 @@ class ExplainNode:
         commit_messages: list[str],
         patch_text: str,
     ) -> str:
-        lines = [
-            self._instruction
-            or (
-                "Use the modification summary, the pull request description, "
-                "the commit messages, and the patch to identify the likely "
-                "root cause and the related files among the changed files."
-            ),
-            "Respond only in JSON.",
-            'Use this schema: {"rationale": string, "files": [string, ...]}.',
-            "",
-            "Summary:",
-            summary,
-            "",
-            "Pull request description:",
-            "```markdown",
-            description or "(none)",
-            "```",
-            "",
-            "Commit messages in (base, after]:",
-        ]
-        if commit_messages:
-            for message in commit_messages:
-                lines.extend([message, ""])
-            lines.pop()
-        else:
-            lines.append("(none)")
-        lines.extend(
-            [
-                "",
-                "Patch:",
-                patch_text,
-                "",
-                "Return only files that are relevant to the root cause and appear in the provided patch.",
-            ]
+        messages = "\n".join(commit_messages) if commit_messages else "(none)"
+        template = dedent(
+            """
+            Use the modification summary, the pull request description, the commit messages, and the patch to identify the likely root cause and the related files among the changed files.
+            Respond only in JSON.
+            Use this schema: {{"rationale": string, "files": [string, ...]}}.
+
+            Summary:
+            {summary}
+
+            Pull request description:
+            ```markdown
+            {description}
+            ```
+
+            Commit messages in (base, after]:
+            {messages}
+
+            Patch:
+            {patch_text}
+
+            Return only files that are relevant to the root cause and appear in the provided patch.
+            """
+        ).strip()
+        return template.format(
+            summary=summary,
+            description=description or "(none)",
+            messages=messages,
+            patch_text=patch_text,
         )
-        return "\n".join(lines)
-
-    def _structured_model(self) -> object:
-        try:
-            return self._llm.with_structured_output(
-                ExplainResponseSchema,
-                method="json_schema",
-                strict=True,
-            )
-        except AttributeError as error:
-            raise ValueError(
-                "ExplainNode requires an llm that supports structured schema mode."
-            ) from error
-        except TypeError as error:
-            raise ValueError(
-                "ExplainNode requires an llm that supports structured schema mode."
-            ) from error
-
-    def _parse_response(self, response: object) -> tuple[str, list[str]]:
-        try:
-            payload = ExplainResponseSchema.model_validate(response)
-        except (ValidationError, TypeError, ValueError) as error:
-            raise ValueError(
-                "ExplainNode requires structured explain output."
-            ) from error
-        return payload.rationale, list(payload.files)
-
-    @staticmethod
-    def _operation_name(operation: object) -> str:
-        after = getattr(operation, "after", None)
-        base = getattr(operation, "base", None)
-        return str(after or base or "")
-
 
 class AggregateNode:
     """Aggregate the repeated explain runs into a first stable result."""
@@ -502,10 +395,8 @@ class AggregateNode:
     def __init__(
         self,
         llm: object | None = None,
-        instruction: str | None = None,
     ) -> None:
         self._llm = llm
-        self._instruction = instruction
 
     def run(self, state: AttributionGraphState) -> dict[str, object]:
         """Aggregate the repeated explain runs into a first stable result."""
@@ -576,44 +467,48 @@ class AggregateNode:
         files: list[str],
         runs: list[ExplainRunState],
     ) -> str:
-        lines = [
-            self._instruction
-            or (
-                "Review the explanations from repeated explain passes for the same change.\n"
-                "Merge them into one final root-cause rationale using only the provided runs.\n"
-                "Output only the final rationale text."
-            ),
-            "",
-            "Summary:",
-            summary,
-            "",
-            "Final related files:",
-        ]
-        if files:
-            lines.extend(files)
-        else:
-            lines.append("(none)")
-        lines.extend(["", "Explain runs:"])
+        rendered = "\n".join(files) if files else "(none)"
+        values: list[str] = []
         for run in runs:
-            lines.extend(
-                [
-                    f"Run {run.get('index', '?')}:",
-                    f"Rationale: {run['rationale']}",
-                    "Files:",
-                ]
+            run_files = "\n".join(run.get("files") or []) or "(none)"
+            item = dedent(
+                """
+                Run {index}:
+                Rationale: {rationale}
+                Files:
+                {files}
+                """
+            ).strip()
+            values.append(
+                item.format(
+                    index=run.get("index", "?"),
+                    rationale=run["rationale"],
+                    files=run_files,
+                )
             )
-            run_files = run.get("files") or []
-            if run_files:
-                lines.extend(run_files)
-            else:
-                lines.append("(none)")
-            lines.append("")
-        lines.extend(
-            [
-                "Output only the final rationale text.",
-            ]
+        template = dedent(
+            """
+            Review the explanations from repeated explain passes for the same change.
+            Merge them into one final root-cause rationale using only the provided runs.
+            Output only the final rationale text.
+
+            Summary:
+            {summary}
+
+            Final related files:
+            {rendered}
+
+            Explain runs:
+            {runs}
+
+            Output only the final rationale text.
+            """
+        ).strip()
+        return template.format(
+            summary=summary,
+            rendered=rendered,
+            runs="\n".join(values),
         )
-        return "\n".join(lines)
 
 
 class ExpandNode:
@@ -687,11 +582,9 @@ class HintNode:
         self,
         factory: PatchFactory | None = None,
         llm: object | None = None,
-        instruction: str | None = None,
     ) -> None:
         self._factory = factory
         self._llm = llm
-        self._instruction = instruction
 
     def run(self, state: AttributionGraphState) -> dict[str, object]:
         """Generate a localization hint from the expansion context."""
@@ -711,48 +604,58 @@ class HintNode:
                 "HintNode requires correction, rationale, expansion, factory, and llm."
             )
 
-        renderer = self._renderer(expansion)
-        response = self._structured_model().invoke(
-            self._build_prompt(
-                rationale=rationale.strip(),
-                expansion=renderer.render(),
+        try:
+            renderer = PatchView(expansion)
+        except Exception as error:
+            raise ValueError(
+                f"HintNode requires parseable expanded patch content: {expansion!r}"
+            ) from error
+        try:
+            response = self._llm.with_structured_output(
+                HintResponseSchema,
+                method="json_schema",
+                strict=True,
+            ).invoke(
+                self._build_prompt(
+                    rationale=rationale.strip(),
+                    expansion=renderer.render(),
+                )
             )
-        )
+        except (AttributeError, TypeError) as error:
+            raise ValueError(
+                "HintNode requires an llm that supports structured schema mode."
+            ) from error
         try:
             payload = HintResponseSchema.model_validate(response)
         except (ValidationError, TypeError, ValueError) as error:
             raise ValueError("HintNode requires structured hint output.") from error
-        causes = self._parse_items(correction, renderer, payload.causes, "base")
+        scope = PatchScope()
+        paths: dict[tuple[str | None, str | None], object | None] = {}
+        causes = self._parse_items(
+            correction,
+            renderer,
+            payload.causes,
+            "base",
+            scope,
+            paths,
+        )
         corrections = self._parse_items(
             correction,
             renderer,
             payload.corrections,
             "after",
+            scope,
+            paths,
         )
-        hint_state = nodes.get("hint") or {}
-        hint = {
-            key: value
-            for key, value in hint_state.items()
-            if key not in {"references", "cause", "correction", "causes", "corrections"}
-        }
         return {
             "nodes": {
                 **nodes,
                 "hint": {
-                    **hint,
                     "causes": causes,
                     "corrections": corrections,
                 },
             },
         }
-
-    def _renderer(self, expansion: str) -> PatchView:
-        try:
-            return PatchView(expansion)
-        except Exception as error:
-            raise ValueError(
-                f"HintNode requires parseable expanded patch content: {expansion!r}"
-            ) from error
 
     def _build_prompt(
         self,
@@ -760,41 +663,29 @@ class HintNode:
         rationale: str,
         expansion: str,
     ) -> str:
-        lines = [
-            self._instruction
-            or (
-                "Identify every line that is part of the defect.\n"
-                "and every line that is part of the fix.\n"
-                "Use the reference labels from the left column exactly as provided."
-            ),
-            "Respond only in JSON.",
-            (
-                'Use this schema: {"causes": [{"references": [string, ...], "reason": string}], "corrections": [{"references": [string, ...], "reason": string}]}.'
-            ),
-            "",
-            "Root cause rationale:",
-            rationale,
-            "",
-            "Expanded context:",
-            expansion,
-        ]
-        return "\n".join(lines)
+        template = dedent(
+            """
+            Identify every line that is part of the defect and every line that is part of the fix.
+            Put defect lines only in `causes`.
+            Put fix lines only in `corrections`.
+            Do not place fix lines in `causes`.
+            Do not place defect lines in `corrections`.
+            Use the reference labels from the left column exactly as provided.
 
-    def _structured_model(self) -> object:
-        try:
-            return self._llm.with_structured_output(
-                HintResponseSchema,
-                method="json_schema",
-                strict=True,
-            )
-        except AttributeError as error:
-            raise ValueError(
-                "HintNode requires an llm that supports structured schema mode."
-            ) from error
-        except TypeError as error:
-            raise ValueError(
-                "HintNode requires an llm that supports structured schema mode."
-            ) from error
+            Respond only in JSON.
+            Use this schema: {{"causes": [{{"references": [string, ...], "reason": string}}], "corrections": [{{"references": [string, ...], "reason": string}}]}}.
+
+            Root cause rationale:
+            {rationale}
+
+            Expanded context:
+            {expansion}
+            """
+        ).strip()
+        return template.format(
+            rationale=rationale,
+            expansion=expansion,
+        )
 
     def _parse_items(
         self,
@@ -802,6 +693,8 @@ class HintNode:
         renderer: PatchView,
         value: object,
         side: str,
+        scope: PatchScope,
+        paths: dict[tuple[str | None, str | None], object | None],
     ) -> list[HintItemState]:
         parsed: list[HintItemState] = []
         for item in value:
@@ -814,7 +707,14 @@ class HintNode:
                 {
                     "reason": item.reason,
                     "statements": [
-                        self._resolve(correction, renderer, reference, side)
+                        self._resolve(
+                            correction,
+                            renderer,
+                            reference,
+                            side,
+                            scope,
+                            paths,
+                        )
                         for reference in references
                     ],
                 }
@@ -827,17 +727,12 @@ class HintNode:
         renderer: PatchView,
         reference: str,
         side: str,
+        scope: PatchScope,
+        paths: dict[tuple[str | None, str | None], object | None],
     ) -> HintStatementState:
-        scope = PatchScope()
         for current in renderer.resolve([reference]):
-            operation = self._file(current.file)
-            try:
-                path = scope.bind(
-                    operation,
-                    self._factory.read(correction.base, operation.base),
-                    self._factory.read(correction.after, operation.after),
-                )
-            except ValueError:
+            path = self._path(correction, current.file, scope, paths)
+            if path is None:
                 continue
             for anchor in current.anchors:
                 base, after = path.resolve(anchor)
@@ -854,6 +749,25 @@ class HintNode:
             "scope": None,
             "excerpt": None,
         }
+
+    def _path(
+        self,
+        correction: Change,
+        file: tuple[str | None, str | None],
+        scope: PatchScope,
+        paths: dict[tuple[str | None, str | None], object | None],
+    ) -> object | None:
+        if file not in paths:
+            operation = self._file(file)
+            try:
+                paths[file] = scope.bind(
+                    operation,
+                    self._factory.read(correction.base, operation.base),
+                    self._factory.read(correction.after, operation.after),
+                )
+            except ValueError:
+                paths[file] = None
+        return paths[file]
 
     def _file(self, file: tuple[str | None, str | None]) -> FileOperation:
         if file[0] is None:
@@ -958,10 +872,8 @@ class VerifyNode:
     def __init__(
         self,
         llm: object | None = None,
-        instruction: str | None = None,
     ) -> None:
         self._llm = llm
-        self._instruction = instruction
 
     def run(self, state: AttributionGraphState) -> dict[str, object]:
         """Check whether the refined corrective pair is semantically separable."""
@@ -980,30 +892,47 @@ class VerifyNode:
         if not rationale or not refinement or not causes:
             return {"nodes": {**nodes, "verify": {}}}
 
-        renderer = self._renderer(refinement)
+        try:
+            renderer = PatchView(refinement)
+        except Exception as error:
+            raise ValueError(
+                f"VerifyNode requires parseable refined patch content: {refinement!r}"
+            ) from error
         base_snippet = renderer.base()
         after_snippet = renderer.after()
         if not base_snippet.strip() or not after_snippet.strip():
             return {"nodes": {**nodes, "verify": {}}}
-        model = self._structured_model()
-        base = self._parse_response(
-            model.invoke(
-                self._build_prompt(
-                    rationale=rationale.strip(),
-                    hints=self._hint(causes),
-                    snippet=base_snippet,
+        try:
+            model = self._llm.with_structured_output(
+                VerifyResponseSchema,
+                method="json_schema",
+                strict=True,
+            )
+        except (AttributeError, TypeError) as error:
+            raise ValueError(
+                "VerifyNode requires an llm that supports structured schema mode."
+            ) from error
+        try:
+            base = VerifyResponseSchema.model_validate(
+                model.invoke(
+                    self._build_prompt(
+                        rationale=rationale.strip(),
+                        hints=self._hint(causes),
+                        snippet=base_snippet,
+                    )
                 )
             )
-        )
-        after = self._parse_response(
-            model.invoke(
-                self._build_prompt(
-                    rationale=rationale.strip(),
-                    hints=self._hint(causes),
-                    snippet=after_snippet,
+            after = VerifyResponseSchema.model_validate(
+                model.invoke(
+                    self._build_prompt(
+                        rationale=rationale.strip(),
+                        hints=self._hint(causes),
+                        snippet=after_snippet,
+                    )
                 )
             )
-        )
+        except (ValidationError, TypeError, ValueError) as error:
+            raise ValueError("VerifyNode requires structured verify output.") from error
         verify = nodes.get("verify") or {}
         return {
             "nodes": {
@@ -1023,14 +952,6 @@ class VerifyNode:
             },
         }
 
-    def _renderer(self, refinement: str) -> PatchView:
-        try:
-            return PatchView(refinement)
-        except Exception as error:
-            raise ValueError(
-                f"VerifyNode requires parseable refined patch content: {refinement!r}"
-            ) from error
-
     def _build_prompt(
         self,
         *,
@@ -1038,91 +959,58 @@ class VerifyNode:
         hints: str,
         snippet: str,
     ) -> str:
-        return "\n".join(
-            [
-                self._instruction
-                or (
-                    "You will be given:\n"
-                    "- a code snippet\n"
-                    "- the root cause of a bug\n"
-                    "- defect statements\n"
-                    "\n"
-                    "Your task is to check whether the defect described by the "
-                    "root cause and defect statements appears in the code snippet.\n"
-                    "Your boolean and your reason must agree."
-                ),
-                "Respond only in JSON.",
-                'Use this schema: {"defect": boolean, "reason": string}.',
-                "",
-                "Root cause:",
-                rationale,
-                "",
-                "Defect statements:",
-                hints,
-                "",
-                "Code snippet:",
-                snippet,
-            ]
+        template = dedent(
+            """
+            Determine whether the provided code snippet contains the defect described by the root cause and defect statements.
+            Be conservative. If you are unsure, return `defect: false`.
+            Your boolean and your reason must agree.
+
+            Respond only in JSON.
+            Use this schema: {{"defect": boolean, "reason": string}}.
+
+            Root cause:
+            {rationale}
+
+            Defect statements:
+            {hints}
+
+            Code snippet:
+            {snippet}
+            """
+        ).strip()
+        return template.format(
+            rationale=rationale,
+            hints=hints,
+            snippet=snippet,
         )
 
     def _hint(
         self,
         causes: list[object],
     ) -> str:
-        lines = [
-            self._item(item)
-            for item in causes
-            if self._item(item) is not None
-        ]
+        lines: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for item in causes:
+            statements: list[str] = []
+            for current in list(item.get("statements") or []):
+                scope = current.get("scope")
+                excerpt = current.get("excerpt")
+                if not scope or not excerpt:
+                    continue
+                key = (scope, excerpt)
+                if key in seen:
+                    continue
+                seen.add(key)
+                statements.append(f"- {scope} {excerpt}")
+            if statements:
+                lines.append("\n".join(statements))
+                continue
+            reason = item.get("reason")
+            if reason and reason.strip():
+                lines.append(f"- {reason.strip()}")
         if not lines:
             raise ValueError("VerifyNode requires non-empty cause reasons.")
         return "\n".join(lines)
-
-    def _item(self, item: object) -> str | None:
-        statements = self._statements(item)
-        if statements:
-            return "\n".join(statements)
-        reason = item.get("reason")
-        if reason and reason.strip():
-            return f"- {reason.strip()}"
-        return None
-
-    def _statements(self, item: object) -> list[str]:
-        values: list[str] = []
-        seen: set[tuple[str, str]] = set()
-        for current in list(item.get("statements") or []):
-            scope = current.get("scope")
-            excerpt = current.get("excerpt")
-            if not scope or not excerpt:
-                continue
-            key = (scope, excerpt)
-            if key in seen:
-                continue
-            seen.add(key)
-            values.append(f"- {scope} {excerpt}")
-        return values
-
-    def _structured_model(self) -> object:
-        try:
-            return self._llm.with_structured_output(
-                VerifyResponseSchema,
-                method="json_schema",
-                strict=True,
-            )
-        except AttributeError as error:
-            raise ValueError(
-                "VerifyNode requires an llm that supports structured schema mode."
-            ) from error
-        except TypeError as error:
-            raise ValueError(
-                "VerifyNode requires an llm that supports structured schema mode."
-            ) from error
-
-    def _parse_response(self, response: object) -> VerifyResponseSchema:
-        try:
-            return VerifyResponseSchema.model_validate(response)
-        except (ValidationError, TypeError, ValueError) as error:
-            raise ValueError("VerifyNode requires structured verify output.") from error
 
 
 class BlameNode:
@@ -1130,18 +1018,6 @@ class BlameNode:
 
     def __init__(self, factory: PatchFactory | None = None) -> None:
         self._factory = factory
-
-    def _slice(self, value: Slice) -> SliceState:
-        return {
-            "file": value.file,
-            "anchors": [
-                {
-                    "base": anchor.base,
-                    "after": anchor.after,
-                }
-                for anchor in value.anchors
-            ],
-        }
 
     def _empty(
         self,
@@ -1244,7 +1120,19 @@ class BlameNode:
             {
                 "commit": commit,
                 "parent": parent,
-                "slices": [self._slice(item) for item in grouped[(commit, parent)]],
+                "slices": [
+                    {
+                        "file": item.file,
+                        "anchors": [
+                            {
+                                "base": anchor.base,
+                                "after": anchor.after,
+                            }
+                            for anchor in item.anchors
+                        ],
+                    }
+                    for item in grouped[(commit, parent)]
+                ],
             }
             for commit, parent in sorted(
                 grouped,
@@ -1271,11 +1159,9 @@ class CompareNode:
         self,
         factory: PatchFactory | None = None,
         llm: object | None = None,
-        instruction: str | None = None,
     ) -> None:
         self._factory = factory
         self._llm = llm
-        self._instruction = instruction
 
     def _empty(
         self,
@@ -1294,39 +1180,6 @@ class CompareNode:
                 },
             },
         }
-
-    def _slices(self, values: list[SliceState]) -> list[Slice]:
-        try:
-            return [
-                Slice(
-                    file=tuple(item["file"]),
-                    anchors=[
-                        Anchor(
-                            base=tuple(anchor["base"]),
-                            after=tuple(anchor["after"]),
-                        )
-                        for anchor in item["anchors"]
-                    ],
-                )
-                for item in values
-            ]
-        except (KeyError, TypeError, ValueError) as error:
-            raise ValueError("CompareNode requires prepared candidate slices.") from error
-
-    def _candidate(
-        self,
-        value: object,
-    ) -> tuple[str, str, list[Slice]]:
-        try:
-            item = dict(value)
-            commit = item["commit"]
-            parent = item["parent"]
-            slices = self._slices(item["slices"])
-        except (TypeError, KeyError, ValueError) as error:
-            raise ValueError("CompareNode requires prepared candidate slices.") from error
-        if not commit or not parent or not slices:
-            raise ValueError("CompareNode requires prepared candidate slices.")
-        return commit, parent, slices
 
     def run(self, state: AttributionGraphState) -> dict[str, object]:
         """Compare the current candidate commit against its parent."""
@@ -1347,7 +1200,27 @@ class CompareNode:
         index = current + 1
         if index < 0 or index >= len(candidates):
             return self._empty(nodes, compare, current)
-        commit, parent, slices = self._candidate(candidates[index])
+        try:
+            item = dict(candidates[index])
+            commit = item["commit"]
+            parent = item["parent"]
+            slices = [
+                Slice(
+                    file=tuple(value["file"]),
+                    anchors=[
+                        Anchor(
+                            base=tuple(anchor["base"]),
+                            after=tuple(anchor["after"]),
+                        )
+                        for anchor in value["anchors"]
+                    ],
+                )
+                for value in item["slices"]
+            ]
+        except (TypeError, KeyError, ValueError) as error:
+            raise ValueError("CompareNode requires prepared candidate slices.") from error
+        if not commit or not parent or not slices:
+            raise ValueError("CompareNode requires prepared candidate slices.")
         refinement = str(
             self._factory.refine(
                 parent,
@@ -1357,13 +1230,31 @@ class CompareNode:
                 force=False,
             )
         )
-        renderer = self._renderer(refinement)
+        try:
+            renderer = PatchView(refinement)
+        except Exception as error:
+            raise ValueError(
+                f"CompareNode requires parseable unified patch content: {refinement!r}"
+            ) from error
         before = renderer.base()
         after = renderer.after()
 
         hints = self._hint(causes)
-        presence = self._presence_model()
-        assessment = self._assessment_model()
+        try:
+            presence = self._llm.with_structured_output(
+                CompareResponseSchema,
+                method="json_schema",
+                strict=True,
+            )
+            assessment = self._llm.with_structured_output(
+                VerifyResponseSchema,
+                method="json_schema",
+                strict=True,
+            )
+        except (AttributeError, TypeError) as error:
+            raise ValueError(
+                "CompareNode requires an llm that supports structured schema mode."
+            ) from error
         candidate_presence, candidate_assessment = self._compare(
             presence=presence,
             assessment=assessment,
@@ -1439,10 +1330,10 @@ class CompareNode:
                 ),
             )
         return (
-            self._parse_presence(
+            CompareResponseSchema.model_validate(
                 presence.invoke(self._presence_prompt(hints=hints, snippet=snippet))
             ),
-            self._parse_assessment(
+            VerifyResponseSchema.model_validate(
                 assessment.invoke(
                     self._assessment_prompt(
                         rationale=rationale,
@@ -1453,66 +1344,51 @@ class CompareNode:
             ),
         )
 
-    def _renderer(self, refinement: str) -> PatchView:
-        try:
-            return PatchView(refinement)
-        except Exception as error:
-            raise ValueError(
-                f"CompareNode requires parseable unified patch content: {refinement!r}"
-            ) from error
-
     def _hint(self, causes: list[object]) -> str:
-        lines = [
-            self._item(item)
-            for item in causes
-            if self._item(item) is not None
-        ]
+        lines: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for item in causes:
+            statements: list[str] = []
+            for current in list(item.get("statements") or []):
+                scope = current.get("scope")
+                excerpt = current.get("excerpt")
+                if not scope or not excerpt:
+                    continue
+                key = (scope, excerpt)
+                if key in seen:
+                    continue
+                seen.add(key)
+                statements.append(f"- {scope} {excerpt}")
+            if statements:
+                lines.append("\n".join(statements))
+                continue
+            reason = item.get("reason")
+            if reason and reason.strip():
+                lines.append(f"- {reason.strip()}")
         if not lines:
             return ""
         return "\n".join(lines)
 
-    def _item(self, item: object) -> str | None:
-        statements = self._statements(item)
-        if statements:
-            return "\n".join(statements)
-        reason = item.get("reason")
-        if reason and reason.strip():
-            return f"- {reason.strip()}"
-        return None
-
-    def _statements(self, item: object) -> list[str]:
-        values: list[str] = []
-        seen: set[tuple[str, str]] = set()
-        for current in list(item.get("statements") or []):
-            scope = current.get("scope")
-            excerpt = current.get("excerpt")
-            if not scope or not excerpt:
-                continue
-            key = (scope, excerpt)
-            if key in seen:
-                continue
-            seen.add(key)
-            values.append(f"- {scope} {excerpt}")
-        return values
-
     def _presence_prompt(self, *, hints: str, snippet: str) -> str:
-        return "\n".join(
-            [
-                self._instruction
-                or (
-                    "Check whether the code shown in the snippet matches the "
-                    "defect statements.\n"
-                    "Be conservative. If you are unsure, return `present: false`."
-                ),
-                "Respond only in JSON.",
-                'Use this schema: {"present": boolean, "reason": string}.',
-                "",
-                "Defect statements:",
-                hints,
-                "",
-                "Code snippet:",
-                snippet,
-            ]
+        template = dedent(
+            """
+            Determine whether the provided code snippet matches the defect statements.
+            Be conservative. If you are unsure, return `present: false`.
+            Your boolean and your reason must agree.
+
+            Respond only in JSON.
+            Use this schema: {{"present": boolean, "reason": string}}.
+
+            Defect statements:
+            {hints}
+
+            Code snippet:
+            {snippet}
+            """
+        ).strip()
+        return template.format(
+            hints=hints,
+            snippet=snippet,
         )
 
     def _assessment_prompt(
@@ -1522,72 +1398,30 @@ class CompareNode:
         hints: str,
         snippet: str,
     ) -> str:
-        return "\n".join(
-            [
-                self._instruction
-                or (
-                    "Check whether the defect described by the "
-                    "root cause and defect statements appears in the code snippet.\n"
-                    "Your boolean and your reason must agree.\n"
-                    "Be conservative. If you are unsure, return `defect: false`."
-                ),
-                "Respond only in JSON.",
-                'Use this schema: {"defect": boolean, "reason": string}.',
-                "",
-                "Root cause:",
-                rationale,
-                "",
-                "Defect statements:",
-                hints,
-                "",
-                "Code snippet:",
-                snippet,
-            ]
+        template = dedent(
+            """
+            Determine whether the provided code snippet contains the defect described by the root cause and defect statements.
+            Be conservative. If you are unsure, return `defect: false`.
+            Your boolean and your reason must agree.
+
+            Respond only in JSON.
+            Use this schema: {{"defect": boolean, "reason": string}}.
+
+            Root cause:
+            {rationale}
+
+            Defect statements:
+            {hints}
+
+            Code snippet:
+            {snippet}
+            """
+        ).strip()
+        return template.format(
+            rationale=rationale,
+            hints=hints,
+            snippet=snippet,
         )
-
-    def _presence_model(self) -> object:
-        try:
-            return self._llm.with_structured_output(
-                CompareResponseSchema,
-                method="json_schema",
-                strict=True,
-            )
-        except AttributeError as error:
-            raise ValueError(
-                "CompareNode requires an llm that supports structured schema mode."
-            ) from error
-        except TypeError as error:
-            raise ValueError(
-                "CompareNode requires an llm that supports structured schema mode."
-            ) from error
-
-    def _assessment_model(self) -> object:
-        try:
-            return self._llm.with_structured_output(
-                VerifyResponseSchema,
-                method="json_schema",
-                strict=True,
-            )
-        except AttributeError as error:
-            raise ValueError(
-                "CompareNode requires an llm that supports structured schema mode."
-            ) from error
-        except TypeError as error:
-            raise ValueError(
-                "CompareNode requires an llm that supports structured schema mode."
-            ) from error
-
-    def _parse_presence(self, response: object) -> CompareResponseSchema:
-        try:
-            return CompareResponseSchema.model_validate(response)
-        except (ValidationError, TypeError, ValueError) as error:
-            raise ValueError("CompareNode requires structured presence output.") from error
-
-    def _parse_assessment(self, response: object) -> VerifyResponseSchema:
-        try:
-            return VerifyResponseSchema.model_validate(response)
-        except (ValidationError, TypeError, ValueError) as error:
-            raise ValueError("CompareNode requires structured assessment output.") from error
 
 
 class SelectNode:

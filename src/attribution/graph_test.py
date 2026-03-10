@@ -18,7 +18,6 @@ from benchmark.attribution.domain import (
 )
 from benchmark.attribution.history import VersionControl
 from benchmark.attribution.graph import (
-    AggregateState,
     AggregateNode,
     AttributionGraph,
     AttributionGraphState,
@@ -27,11 +26,9 @@ from benchmark.attribution.graph import (
     ExpandNode,
     ExplainNode,
     ExplainResponseSchema,
-    ExplainState,
     FinalizeNode,
     HintResponseSchema,
     HintNode,
-    HintState,
     RefineNode,
     SelectNode,
     SummarizeNode,
@@ -733,6 +730,10 @@ class TestAttributionGraph(unittest.TestCase):
         self.assertIn("0-0-0 | -old", prompt)
         self.assertIn("0-0-1 | +new", prompt)
         self.assertIn("0-0-2 |  context", prompt)
+        self.assertIn("Put defect lines only in `causes`.", prompt)
+        self.assertIn("Put fix lines only in `corrections`.", prompt)
+        self.assertIn("Do not place fix lines in `causes`.", prompt)
+        self.assertIn("Do not place defect lines in `corrections`.", prompt)
         self.assertNotIn("1 -old", prompt)
 
     def test_hint_node_writes_structured_hint(self) -> None:
@@ -1630,6 +1631,18 @@ class TestAttributionGraph(unittest.TestCase):
                                     ],
                                 }
                             ],
+                            "corrections": [
+                                {
+                                    "reason": "Fix line.",
+                                    "statements": [
+                                        {
+                                            "reference": "0-0-1",
+                                            "scope": "scope:program",
+                                            "excerpt": "import fix_only",
+                                        }
+                                    ],
+                                }
+                            ],
                         },
                         "blame": {
                             "candidates": [
@@ -1669,11 +1682,17 @@ class TestAttributionGraph(unittest.TestCase):
         self.assertEqual(presence.invoke.call_count, 2)
         self.assertEqual(assessment.invoke.call_count, 2)
         self.assertIn("Defect statements:", presence.invoke.call_args_list[0].args[0])
+        self.assertIn("- Old line.", presence.invoke.call_args_list[0].args[0])
+        self.assertNotIn("import fix_only", presence.invoke.call_args_list[0].args[0])
+        self.assertNotIn("Fix line.", presence.invoke.call_args_list[0].args[0])
         self.assertIn("File: a.py", presence.invoke.call_args_list[0].args[0])
         self.assertIn("old", presence.invoke.call_args_list[1].args[0])
         self.assertIn("new", presence.invoke.call_args_list[0].args[0])
         self.assertIn("Root cause:", assessment.invoke.call_args_list[0].args[0])
         self.assertIn("Defect statements:", assessment.invoke.call_args_list[0].args[0])
+        self.assertIn("- Old line.", assessment.invoke.call_args_list[0].args[0])
+        self.assertNotIn("import fix_only", assessment.invoke.call_args_list[0].args[0])
+        self.assertNotIn("Fix line.", assessment.invoke.call_args_list[0].args[0])
         self.assertEqual(
             result["nodes"]["compare"],
             {
@@ -1703,6 +1722,94 @@ class TestAttributionGraph(unittest.TestCase):
                     "defect": False,
                 },
             },
+        )
+
+    def test_compare_node_deduplicates_defect_statements_across_items(self) -> None:
+        repository = object.__new__(VersionControl)
+        llm = Mock(spec_set=["with_structured_output"])
+        presence = Mock(spec_set=["invoke"])
+        assessment = Mock(spec_set=["invoke"])
+        llm.with_structured_output.side_effect = [presence, assessment]
+        presence.invoke.side_effect = [
+            {"present": True, "reason": "Candidate still matches."},
+            {"present": False, "reason": "Parent does not match."},
+        ]
+        assessment.invoke.side_effect = [
+            {"defect": True, "reason": "Candidate contains the bug."},
+            {"defect": False, "reason": "Parent does not contain the bug."},
+        ]
+
+        with patch.object(
+            PatchFactory,
+            "refine",
+            autospec=True,
+            return_value=PatchSet(
+                "\n".join(
+                    [
+                        "diff --git a/a.py b/a.py",
+                        "--- a/a.py",
+                        "+++ b/a.py",
+                        "@@ -1,2 +1,2 @@",
+                        " old_context",
+                        "-old",
+                        "+new",
+                    ]
+                )
+            ),
+        ):
+            CompareNode(factory=PatchFactory(repository), llm=llm).run(
+                {
+                    "rationale": "Validation fails before normalization.",
+                    "nodes": {
+                        "hint": {
+                            "causes": [
+                                {
+                                    "reason": "Old line.",
+                                    "statements": [
+                                        {
+                                            "reference": "0-0-0",
+                                            "scope": "scope:program",
+                                            "excerpt": "import old",
+                                        }
+                                    ],
+                                },
+                                {
+                                    "reason": "Old line again.",
+                                    "statements": [
+                                        {
+                                            "reference": "0-0-1",
+                                            "scope": "scope:program",
+                                            "excerpt": "import old",
+                                        }
+                                    ],
+                                },
+                            ],
+                        },
+                        "blame": {
+                            "candidates": [
+                                {
+                                    "commit": "candidate-sha",
+                                    "parent": "parent-sha",
+                                    "slices": [
+                                        {
+                                            "file": ("a.py", "a.py"),
+                                            "anchors": [{"base": (2, 3), "after": (2, 3)}],
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
+                    },
+                }
+            )
+
+        self.assertEqual(
+            presence.invoke.call_args_list[0].args[0].count("- scope:program import old"),
+            1,
+        )
+        self.assertEqual(
+            assessment.invoke.call_args_list[0].args[0].count("- scope:program import old"),
+            1,
         )
 
     def test_compare_node_advances_to_next_candidate(self) -> None:
@@ -2007,6 +2114,18 @@ class TestAttributionGraph(unittest.TestCase):
                                 ],
                             }
                         ],
+                        "corrections": [
+                            {
+                                "reason": "Fix line.",
+                                "statements": [
+                                    {
+                                        "reference": "0-0-1",
+                                        "scope": "scope:program",
+                                        "excerpt": "import fix_only",
+                                    }
+                                ],
+                            }
+                        ],
                     },
                     "refine": {
                         "refinement": "\n".join(
@@ -2031,9 +2150,14 @@ class TestAttributionGraph(unittest.TestCase):
             strict=True,
         )
         self.assertEqual(structured.invoke.call_count, 2)
-        self.assertIn("the root cause of a bug", structured.invoke.call_args_list[0].args[0])
+        self.assertIn(
+            "Determine whether the provided code snippet contains the defect",
+            structured.invoke.call_args_list[0].args[0],
+        )
         self.assertIn("Defect statements:", structured.invoke.call_args_list[0].args[0])
         self.assertIn("- scope:program import old", structured.invoke.call_args_list[0].args[0])
+        self.assertNotIn("import fix_only", structured.invoke.call_args_list[0].args[0])
+        self.assertNotIn("Fix line.", structured.invoke.call_args_list[0].args[0])
         self.assertNotIn("0-0-0", structured.invoke.call_args_list[0].args[0])
         self.assertIn("File: a.py", structured.invoke.call_args_list[0].args[0])
         self.assertIn("old_context", structured.invoke.call_args_list[0].args[0])
@@ -2041,6 +2165,8 @@ class TestAttributionGraph(unittest.TestCase):
         self.assertNotIn("new", structured.invoke.call_args_list[0].args[0])
         self.assertIn("File: a.py", structured.invoke.call_args_list[1].args[0])
         self.assertIn("new", structured.invoke.call_args_list[1].args[0])
+        self.assertNotIn("import fix_only", structured.invoke.call_args_list[1].args[0])
+        self.assertNotIn("Fix line.", structured.invoke.call_args_list[1].args[0])
         self.assertNotIn("-old", structured.invoke.call_args_list[1].args[0])
         self.assertEqual(
             result["nodes"]["verify"],
@@ -2055,6 +2181,65 @@ class TestAttributionGraph(unittest.TestCase):
                 },
                 "verified": True,
             },
+        )
+
+    def test_verify_node_deduplicates_defect_statements_across_items(self) -> None:
+        llm = Mock(spec_set=["with_structured_output"])
+        structured = Mock(spec_set=["invoke"])
+        llm.with_structured_output.return_value = structured
+        structured.invoke.side_effect = [
+            {"defect": True, "reason": "The snippet still contains the bug."},
+            {"defect": False, "reason": "The snippet is corrected."},
+        ]
+
+        VerifyNode(llm=llm).run(
+            {
+                "rationale": "Validation fails before normalization.",
+                "nodes": {
+                    "hint": {
+                        "causes": [
+                            {
+                                "reason": "Old line.",
+                                "statements": [
+                                    {
+                                        "reference": "0-0-0",
+                                        "scope": "scope:program",
+                                        "excerpt": "import old",
+                                    }
+                                ],
+                            },
+                            {
+                                "reason": "Old line again.",
+                                "statements": [
+                                    {
+                                        "reference": "0-0-1",
+                                        "scope": "scope:program",
+                                        "excerpt": "import old",
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    "refine": {
+                        "refinement": "\n".join(
+                            [
+                                "diff --git a/a.py b/a.py",
+                                "--- a/a.py",
+                                "+++ b/a.py",
+                                "@@ -1,2 +1,2 @@",
+                                " old_context",
+                                "-old",
+                                "+new",
+                            ]
+                        )
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(
+            structured.invoke.call_args_list[0].args[0].count("- scope:program import old"),
+            1,
         )
 
     def test_verify_node_rejects_malformed_refinement(self) -> None:
@@ -2232,13 +2417,6 @@ class TestAttributionGraph(unittest.TestCase):
                     }
                 },
             })
-
-    def test_state_docstrings_describe_nodes_structure(self) -> None:
-        self.assertIsNotNone(AttributionGraphState.__doc__)
-        self.assertIn("nodes", AttributionGraphState.__doc__)
-        self.assertIsNotNone(ExplainState.__doc__)
-        self.assertIsNotNone(AggregateState.__doc__)
-        self.assertIsNotNone(HintState.__doc__)
 
     def test_trace_seed_and_sequence_are_injected(self) -> None:
         trace = Trace(seed="seed-123")
