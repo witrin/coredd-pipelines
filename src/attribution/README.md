@@ -64,6 +64,10 @@ $$
 
 > “[...] we first require the LLM to generate a hint [...] we ask the LLM to identify the code statements leading to the bug and provide a reason [...] we require the LLM to identify the code statements that fix the bug and provide a reason [...] we do not limit the LLM to choosing code statements only from deleted lines [...] It can select any code statements from the expanded context”
 
+> *Implementation Hint* The current graph keeps `causes` and `corrections` separated so that corrective references do not contaminate downstream defect prompts.
+
+Only `causes` are currently consumed by `VerifyNode` and `CompareNode`.
+
 ### Context Refinement
 
 The pipeline reduces the large expanded context to a smaller focused view around the locations named in the hint.

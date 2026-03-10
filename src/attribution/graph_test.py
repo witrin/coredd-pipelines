@@ -57,12 +57,34 @@ class TestAttributionGraph(unittest.TestCase):
             explain=ExplainNode(),
             aggregate=AggregateNode(),
             expand=ExpandNode(),
-            hint=HintNode(),
+            hint=HintNode(factory=factory),
             refine=RefineNode(factory=factory),
             verify=VerifyNode(),
             blame=BlameNode(factory=factory),
             compare=CompareNode(factory=factory),
         )
+
+    def _correction(self) -> Change:
+        return Change(
+            number=1,
+            base="base-sha",
+            after="after-sha",
+            description="Fix parser",
+        )
+
+    def _hint_factory(
+        self,
+        values: dict[tuple[str, str | None], bytes | None] | None = None,
+    ) -> Mock:
+        factory = Mock(spec_set=["read"])
+        store = values or {
+            ("base-sha", "a.py"): b"import old\nimport context\n",
+            ("after-sha", "a.py"): b"import new\nimport context\n",
+            ("base-sha", "b.py"): b"import old_b\n",
+            ("after-sha", "b.py"): b"import new_b\n",
+        }
+        factory.read.side_effect = lambda commit, path: store.get((commit, path))
+        return factory
 
     def test_import_smoke(self) -> None:
         self.assertIsNotNone(AttributionGraph)
@@ -161,7 +183,7 @@ class TestAttributionGraph(unittest.TestCase):
             explain=ExplainNode(),
             aggregate=AggregateNode(),
             expand=ExpandNode(),
-            hint=HintNode(),
+            hint=HintNode(factory=PatchFactory(object.__new__(VersionControl))),
             refine=RefineNode(factory=PatchFactory(object.__new__(VersionControl))),
             verify=VerifyNode(),
             blame=BlameNode(factory=PatchFactory(object.__new__(VersionControl))),
@@ -652,7 +674,7 @@ class TestAttributionGraph(unittest.TestCase):
     def test_hint_node_returns_empty_state_for_empty_upstream(self) -> None:
         llm = Mock(spec_set=["with_structured_output"])
 
-        result = HintNode(llm=llm).run(
+        result = HintNode(factory=self._hint_factory(), llm=llm).run(
             {
                 "rationale": "",
                 "nodes": {
@@ -674,10 +696,11 @@ class TestAttributionGraph(unittest.TestCase):
             "causes": [{"references": ["0-0-0"], "reason": "Old line."}],
             "corrections": [{"references": ["0-0-1"], "reason": "New line."}],
         }
-        node = HintNode(llm=llm)
+        node = HintNode(factory=self._hint_factory(), llm=llm)
 
         node.run(
             {
+                "correction": self._correction(),
                 "rationale": "Validation fails before normalization.",
                 "nodes": {
                     "expand": {
@@ -725,15 +748,16 @@ class TestAttributionGraph(unittest.TestCase):
             ],
             "corrections": [
                 {
-                    "references": ["0-0-1", "0-0-2"],
-                    "reason": "The new branch fixes the validation.",
+                    "references": ["0-0-1"],
+                    "reason": "The new validation logic fixes it.",
                 }
             ],
         }
-        node = HintNode(llm=llm)
+        node = HintNode(factory=self._hint_factory(), llm=llm)
 
         result = node.run(
             {
+                "correction": self._correction(),
                 "rationale": "Validation fails before normalization.",
                 "nodes": {
                     "expand": {
@@ -757,8 +781,19 @@ class TestAttributionGraph(unittest.TestCase):
             result["nodes"]["hint"]["causes"],
             [
                 {
-                    "references": ["0-0-0", "0-0-2"],
                     "reason": "The old validation logic fails.",
+                    "statements": [
+                        {
+                            "reference": "0-0-0",
+                            "scope": "scope:program",
+                            "excerpt": "import old",
+                        },
+                        {
+                            "reference": "0-0-2",
+                            "scope": "scope:program",
+                            "excerpt": "import context",
+                        },
+                    ],
                 }
             ],
         )
@@ -766,12 +801,17 @@ class TestAttributionGraph(unittest.TestCase):
             result["nodes"]["hint"]["corrections"],
             [
                 {
-                    "references": ["0-0-1", "0-0-2"],
-                    "reason": "The new branch fixes the validation.",
-                }
+                    "reason": "The new validation logic fixes it.",
+                    "statements": [
+                        {
+                            "reference": "0-0-1",
+                            "scope": "scope:program",
+                            "excerpt": "import new",
+                        }
+                    ],
+                },
             ],
         )
-        self.assertNotIn("references", result["nodes"]["hint"])
         self.assertNotIn("cause", result["nodes"]["hint"])
         self.assertNotIn("correction", result["nodes"]["hint"])
         self.assertNotIn("files", result)
@@ -795,11 +835,12 @@ class TestAttributionGraph(unittest.TestCase):
         structured = Mock(spec_set=["invoke"])
         llm.with_structured_output.return_value = structured
         structured.invoke.return_value = "not json"
-        node = HintNode(llm=llm)
+        node = HintNode(factory=self._hint_factory(), llm=llm)
 
         with self.assertRaises(ValueError):
             node.run(
                 {
+                    "correction": self._correction(),
                     "rationale": "Validation fails before normalization.",
                     "nodes": {
                         "expand": {
@@ -825,10 +866,11 @@ class TestAttributionGraph(unittest.TestCase):
             "causes": [{"references": ["9-9-9"], "reason": "Bad reference."}],
             "corrections": [],
         }
-        node = HintNode(llm=llm)
+        node = HintNode(factory=self._hint_factory(), llm=llm)
 
         result = node.run(
             {
+                "correction": self._correction(),
                 "rationale": "Validation fails before normalization.",
                 "nodes": {
                     "expand": {
@@ -851,13 +893,18 @@ class TestAttributionGraph(unittest.TestCase):
             result["nodes"]["hint"]["causes"],
             [
                 {
-                    "references": ["9-9-9"],
                     "reason": "Bad reference.",
+                    "statements": [
+                        {
+                            "reference": "9-9-9",
+                            "scope": None,
+                            "excerpt": None,
+                        }
+                    ],
                 }
             ],
         )
         self.assertEqual(result["nodes"]["hint"]["corrections"], [])
-        self.assertNotIn("references", result["nodes"]["hint"])
 
     def test_hint_node_keeps_cause_references_as_is(self) -> None:
         llm = Mock(spec_set=["with_structured_output"])
@@ -869,10 +916,11 @@ class TestAttributionGraph(unittest.TestCase):
             ],
             "corrections": [],
         }
-        node = HintNode(llm=llm)
+        node = HintNode(factory=self._hint_factory(), llm=llm)
 
         result = node.run(
             {
+                "correction": self._correction(),
                 "rationale": "Validation fails before normalization.",
                 "nodes": {
                     "expand": {
@@ -895,27 +943,34 @@ class TestAttributionGraph(unittest.TestCase):
             result["nodes"]["hint"]["causes"],
             [
                 {
-                    "references": ["0-0-1"],
                     "reason": "Bad cause projection.",
+                    "statements": [
+                        {
+                            "reference": "0-0-1",
+                            "scope": None,
+                            "excerpt": None,
+                        }
+                    ],
                 }
             ],
         )
-        self.assertNotIn("references", result["nodes"]["hint"])
+        self.assertEqual(result["nodes"]["hint"]["corrections"], [])
 
-    def test_hint_node_keeps_correction_references_as_is(self) -> None:
+    def test_hint_node_derives_statement_and_scope_from_single_reference(self) -> None:
         llm = Mock(spec_set=["with_structured_output"])
         structured = Mock(spec_set=["invoke"])
         llm.with_structured_output.return_value = structured
         structured.invoke.return_value = {
-            "causes": [],
-            "corrections": [
-                {"references": ["0-0-0"], "reason": "Bad correction projection."}
+            "causes": [
+                {"references": ["0-0-0"], "reason": "Derived from reference."}
             ],
+            "corrections": [{"references": ["0-0-1"], "reason": "Derived from fix."}],
         }
-        node = HintNode(llm=llm)
+        node = HintNode(factory=self._hint_factory(), llm=llm)
 
         result = node.run(
             {
+                "correction": self._correction(),
                 "rationale": "Validation fails before normalization.",
                 "nodes": {
                     "expand": {
@@ -935,15 +990,35 @@ class TestAttributionGraph(unittest.TestCase):
         )
 
         self.assertEqual(
-            result["nodes"]["hint"]["corrections"],
+            result["nodes"]["hint"]["causes"],
             [
                 {
-                    "references": ["0-0-0"],
-                    "reason": "Bad correction projection.",
+                    "reason": "Derived from reference.",
+                    "statements": [
+                        {
+                            "reference": "0-0-0",
+                            "scope": "scope:program",
+                            "excerpt": "import old",
+                        }
+                    ],
                 }
             ],
         )
-        self.assertNotIn("references", result["nodes"]["hint"])
+        self.assertEqual(
+            result["nodes"]["hint"]["corrections"],
+            [
+                {
+                    "reason": "Derived from fix.",
+                    "statements": [
+                        {
+                            "reference": "0-0-1",
+                            "scope": "scope:program",
+                            "excerpt": "import new",
+                        }
+                    ],
+                }
+            ],
+        )
 
     def test_hint_node_keeps_references_across_files(self) -> None:
         llm = Mock(spec_set=["with_structured_output"])
@@ -956,12 +1031,18 @@ class TestAttributionGraph(unittest.TestCase):
                     "reason": "Two files are involved.",
                 }
             ],
-            "corrections": [],
+            "corrections": [
+                {
+                    "references": ["0-0-1", "1-0-1"],
+                    "reason": "Two fixes are involved.",
+                }
+            ],
         }
-        node = HintNode(llm=llm)
+        node = HintNode(factory=self._hint_factory(), llm=llm)
 
         result = node.run(
             {
+                "correction": self._correction(),
                 "rationale": "Validation fails before normalization.",
                 "nodes": {
                     "expand": {
@@ -976,7 +1057,7 @@ class TestAttributionGraph(unittest.TestCase):
                                 "diff --git a/b.py b/b.py",
                                 "--- a/b.py",
                                 "+++ b/b.py",
-                                "@@ -2 +2 @@",
+                                "@@ -1 +1 @@",
                                 "-old_b",
                                 "+new_b",
                             ]
@@ -990,8 +1071,39 @@ class TestAttributionGraph(unittest.TestCase):
             result["nodes"]["hint"]["causes"],
             [
                 {
-                    "references": ["0-0-0", "1-0-0"],
                     "reason": "Two files are involved.",
+                    "statements": [
+                        {
+                            "reference": "0-0-0",
+                            "scope": "scope:program",
+                            "excerpt": "import old",
+                        },
+                        {
+                            "reference": "1-0-0",
+                            "scope": "scope:program",
+                            "excerpt": "import old_b",
+                        },
+                    ],
+                },
+            ],
+        )
+        self.assertEqual(
+            result["nodes"]["hint"]["corrections"],
+            [
+                {
+                    "reason": "Two fixes are involved.",
+                    "statements": [
+                        {
+                            "reference": "0-0-1",
+                            "scope": "scope:program",
+                            "excerpt": "import new",
+                        },
+                        {
+                            "reference": "1-0-1",
+                            "scope": "scope:program",
+                            "excerpt": "import new_b",
+                        },
+                    ],
                 },
             ],
         )
@@ -1041,11 +1153,26 @@ class TestAttributionGraph(unittest.TestCase):
                         },
                         "hint": {
                             "causes": [
-                                {"references": ["0-0-0"], "reason": "Bug line."},
-                                {"references": ["0-0-1"], "reason": "Also selected."},
-                            ],
-                            "corrections": [
-                                {"references": ["9-9-9"], "reason": "Ignore here."}
+                                {
+                                    "reason": "Bug line.",
+                                    "statements": [
+                                        {
+                                            "reference": "0-0-0",
+                                            "scope": None,
+                                            "excerpt": None,
+                                        }
+                                    ],
+                                },
+                                {
+                                    "reason": "Also selected.",
+                                    "statements": [
+                                        {
+                                            "reference": "0-0-1",
+                                            "scope": None,
+                                            "excerpt": None,
+                                        }
+                                    ],
+                                },
                             ],
                         },
                     },
@@ -1182,12 +1309,24 @@ class TestAttributionGraph(unittest.TestCase):
                         "hint": {
                             "causes": [
                                 {
-                                    "references": [
-                                        "0-0-1",
-                                        "0-0-2",
-                                        "1-0-1",
-                                    ],
                                     "reason": "Bug lines.",
+                                    "statements": [
+                                        {
+                                            "reference": "0-0-1",
+                                            "scope": None,
+                                            "excerpt": None,
+                                        },
+                                        {
+                                            "reference": "0-0-2",
+                                            "scope": None,
+                                            "excerpt": None,
+                                        },
+                                        {
+                                            "reference": "1-0-1",
+                                            "scope": None,
+                                            "excerpt": None,
+                                        },
+                                    ],
                                 }
                             ]
                         },
@@ -1293,8 +1432,24 @@ class TestAttributionGraph(unittest.TestCase):
                         "hint": {
                             "causes": [
                                 {
-                                    "references": ["x", "0-0-1", "0-0-2"],
-                                    "reason": "Bug line.",
+                                    "reason": "Bug lines.",
+                                    "statements": [
+                                        {
+                                            "reference": "x",
+                                            "scope": None,
+                                            "excerpt": None,
+                                        },
+                                        {
+                                            "reference": "0-0-1",
+                                            "scope": None,
+                                            "excerpt": None,
+                                        },
+                                        {
+                                            "reference": "0-0-2",
+                                            "scope": None,
+                                            "excerpt": None,
+                                        },
+                                    ],
                                 }
                             ]
                         },
@@ -1345,7 +1500,21 @@ class TestAttributionGraph(unittest.TestCase):
                     },
                     "hint": {
                         "causes": [
-                            {"references": ["0-0-0", "bad"], "reason": "Bug line."}
+                            {
+                                "reason": "Bug line.",
+                                "statements": [
+                                    {
+                                        "reference": "0-0-0",
+                                        "scope": None,
+                                        "excerpt": None,
+                                    },
+                                    {
+                                        "reference": "bad",
+                                        "scope": None,
+                                        "excerpt": None,
+                                    },
+                                ],
+                            }
                         ]
                     },
                 },
@@ -1387,7 +1556,16 @@ class TestAttributionGraph(unittest.TestCase):
                         },
                         "hint": {
                             "causes": [
-                                {"references": ["0-0-1"], "reason": "Bug line."}
+                                {
+                                    "reason": "Bug line.",
+                                    "statements": [
+                                        {
+                                            "reference": "0-0-1",
+                                            "scope": None,
+                                            "excerpt": None,
+                                        }
+                                    ],
+                                }
                             ]
                         },
                     },
@@ -1440,7 +1618,18 @@ class TestAttributionGraph(unittest.TestCase):
                     "rationale": "Validation fails before normalization.",
                     "nodes": {
                         "hint": {
-                            "causes": [{"references": ["0-0-0"], "reason": "Old line."}],
+                            "causes": [
+                                {
+                                    "reason": "Old line.",
+                                    "statements": [
+                                        {
+                                            "reference": "0-0-0",
+                                            "scope": None,
+                                            "excerpt": None,
+                                        }
+                                    ],
+                                }
+                            ],
                         },
                         "blame": {
                             "candidates": [
@@ -1479,12 +1668,12 @@ class TestAttributionGraph(unittest.TestCase):
         self.assertEqual(materialize.call_args.kwargs, {"force": False})
         self.assertEqual(presence.invoke.call_count, 2)
         self.assertEqual(assessment.invoke.call_count, 2)
-        self.assertIn("Explanations:", presence.invoke.call_args_list[0].args[0])
+        self.assertIn("Defect statements:", presence.invoke.call_args_list[0].args[0])
         self.assertIn("File: a.py", presence.invoke.call_args_list[0].args[0])
         self.assertIn("old", presence.invoke.call_args_list[1].args[0])
         self.assertIn("new", presence.invoke.call_args_list[0].args[0])
         self.assertIn("Root cause:", assessment.invoke.call_args_list[0].args[0])
-        self.assertIn("Explanations:", assessment.invoke.call_args_list[0].args[0])
+        self.assertIn("Defect statements:", assessment.invoke.call_args_list[0].args[0])
         self.assertEqual(
             result["nodes"]["compare"],
             {
@@ -1552,7 +1741,20 @@ class TestAttributionGraph(unittest.TestCase):
                 {
                     "rationale": "Validation fails before normalization.",
                     "nodes": {
-                        "hint": {"causes": [{"references": ["0-0-0"], "reason": "Old line."}]},
+                        "hint": {
+                            "causes": [
+                                {
+                                    "reason": "Old line.",
+                                    "statements": [
+                                        {
+                                            "reference": "0-0-0",
+                                            "scope": None,
+                                            "excerpt": None,
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
                         "blame": {
                             "candidates": [
                                 {
@@ -1588,7 +1790,20 @@ class TestAttributionGraph(unittest.TestCase):
             {
                 "rationale": "Validation fails before normalization.",
                 "nodes": {
-                    "hint": {"causes": [{"references": ["0-0-0"], "reason": "Old line."}]},
+                    "hint": {
+                        "causes": [
+                            {
+                                "reason": "Old line.",
+                                "statements": [
+                                    {
+                                        "reference": "0-0-0",
+                                        "scope": None,
+                                        "excerpt": None,
+                                    }
+                                ],
+                            }
+                        ]
+                    },
                     "blame": {"candidates": []},
                 },
             }
@@ -1607,7 +1822,20 @@ class TestAttributionGraph(unittest.TestCase):
             {
                 "rationale": "Validation fails before normalization.",
                 "nodes": {
-                    "hint": {"causes": [{"references": ["0-0-0"], "reason": "Old line."}]},
+                    "hint": {
+                        "causes": [
+                            {
+                                "reason": "Old line.",
+                                "statements": [
+                                    {
+                                        "reference": "0-0-0",
+                                        "scope": None,
+                                        "excerpt": None,
+                                    }
+                                ],
+                            }
+                        ]
+                    },
                     "blame": {"candidates": [{"commit": "a", "parent": "b", "slices": []}]},
                     "compare": {"index": 0},
                 },
@@ -1654,7 +1882,20 @@ class TestAttributionGraph(unittest.TestCase):
                 {
                     "rationale": "Validation fails before normalization.",
                     "nodes": {
-                        "hint": {"causes": [{"references": ["0-0-0"], "reason": "Old line."}]},
+                        "hint": {
+                            "causes": [
+                                {
+                                    "reason": "Old line.",
+                                    "statements": [
+                                        {
+                                            "reference": "0-0-0",
+                                            "scope": None,
+                                            "excerpt": None,
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
                         "blame": {
                             "candidates": [
                                 {
@@ -1754,9 +1995,17 @@ class TestAttributionGraph(unittest.TestCase):
                 "rationale": "Validation fails before normalization.",
                 "nodes": {
                     "hint": {
-                        "causes": [{"references": ["0-0-0"], "reason": "Old line."}],
-                        "corrections": [
-                            {"references": ["0-0-1"], "reason": "New line."}
+                        "causes": [
+                            {
+                                "reason": "Old line.",
+                                "statements": [
+                                    {
+                                        "reference": "0-0-0",
+                                        "scope": "scope:program",
+                                        "excerpt": "import old",
+                                    }
+                                ],
+                            }
                         ],
                     },
                     "refine": {
@@ -1783,10 +2032,9 @@ class TestAttributionGraph(unittest.TestCase):
         )
         self.assertEqual(structured.invoke.call_count, 2)
         self.assertIn("the root cause of a bug", structured.invoke.call_args_list[0].args[0])
-        self.assertIn("Bug explanations:", structured.invoke.call_args_list[0].args[0])
-        self.assertIn("- Old line.", structured.invoke.call_args_list[0].args[0])
+        self.assertIn("Defect statements:", structured.invoke.call_args_list[0].args[0])
+        self.assertIn("- scope:program import old", structured.invoke.call_args_list[0].args[0])
         self.assertNotIn("0-0-0", structured.invoke.call_args_list[0].args[0])
-        self.assertNotIn("New line.", structured.invoke.call_args_list[0].args[0])
         self.assertIn("File: a.py", structured.invoke.call_args_list[0].args[0])
         self.assertIn("old_context", structured.invoke.call_args_list[0].args[0])
         self.assertIn("old", structured.invoke.call_args_list[0].args[0])
@@ -1820,8 +2068,18 @@ class TestAttributionGraph(unittest.TestCase):
                     "rationale": "Validation fails before normalization.",
                     "nodes": {
                         "hint": {
-                            "causes": [{"references": ["0-0-0"], "reason": "Old line."}],
-                            "corrections": [{"references": ["0-0-1"], "reason": "New line."}],
+                            "causes": [
+                                {
+                                    "reason": "Old line.",
+                                    "statements": [
+                                        {
+                                            "reference": "0-0-0",
+                                            "scope": None,
+                                            "excerpt": None,
+                                        }
+                                    ],
+                                }
+                            ],
                         },
                         "refine": {"refinement": 1},
                     },
@@ -1839,7 +2097,7 @@ class TestAttributionGraph(unittest.TestCase):
             {
                 "rationale": "Validation fails before normalization.",
                 "nodes": {
-                    "hint": {"causes": [], "corrections": []},
+                    "hint": {"causes": []},
                     "refine": {"refinement": ""},
                 },
             }
@@ -1860,8 +2118,18 @@ class TestAttributionGraph(unittest.TestCase):
                     "rationale": "Validation fails before normalization.",
                     "nodes": {
                         "hint": {
-                            "causes": [{"references": ["0-0-0"], "reason": "Old line."}],
-                            "corrections": [{"references": ["0-0-1"], "reason": "New line."}],
+                            "causes": [
+                                {
+                                    "reason": "Old line.",
+                                    "statements": [
+                                        {
+                                            "reference": "0-0-0",
+                                            "scope": None,
+                                            "excerpt": None,
+                                        }
+                                    ],
+                                }
+                            ],
                         },
                         "refine": {
                             "refinement": "\n".join(

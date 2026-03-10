@@ -3,8 +3,14 @@ from typing import Protocol, TypedDict
 
 from pydantic import BaseModel, ValidationError
 
-from benchmark.attribution.domain import Anchor, Change, Slice
-from benchmark.attribution.diff import PatchFactory, PatchView
+from benchmark.attribution.domain import (
+    Anchor,
+    Change,
+    FileOperation,
+    OperationType,
+    Slice,
+)
+from benchmark.attribution.diff import PatchFactory, PatchScope, PatchView
 from benchmark.attribution.tracing import (
     AttributionRunnable,
 )
@@ -62,8 +68,16 @@ class HintState(TypedDict, total=False):
 class HintItemState(TypedDict, total=False):
     """One referenced hint item."""
 
-    references: list[str]
     reason: str
+    statements: list[HintStatementState]
+
+
+class HintStatementState(TypedDict, total=False):
+    """One resolved hint reference."""
+
+    reference: str
+    scope: str | None
+    excerpt: str | None
 
 
 class RefineState(TypedDict, total=False):
@@ -671,14 +685,17 @@ class HintNode:
 
     def __init__(
         self,
+        factory: PatchFactory | None = None,
         llm: object | None = None,
         instruction: str | None = None,
     ) -> None:
+        self._factory = factory
         self._llm = llm
         self._instruction = instruction
 
     def run(self, state: AttributionGraphState) -> dict[str, object]:
         """Generate a localization hint from the expansion context."""
+        correction = state.get("correction")
         rationale = state.get("rationale")
         nodes = state.get("nodes") or {}
         expand = nodes.get("expand") or {}
@@ -689,6 +706,10 @@ class HintNode:
             return {"nodes": {**nodes, "hint": {"causes": [], "corrections": []}}}
         if not rationale.strip() or not expansion.strip():
             return {"nodes": {**nodes, "hint": {"causes": [], "corrections": []}}}
+        if correction is None or self._factory is None:
+            raise ValueError(
+                "HintNode requires correction, rationale, expansion, factory, and llm."
+            )
 
         renderer = self._renderer(expansion)
         response = self._structured_model().invoke(
@@ -701,13 +722,18 @@ class HintNode:
             payload = HintResponseSchema.model_validate(response)
         except (ValidationError, TypeError, ValueError) as error:
             raise ValueError("HintNode requires structured hint output.") from error
-        causes = self._parse_items(payload.causes)
-        corrections = self._parse_items(payload.corrections)
+        causes = self._parse_items(correction, renderer, payload.causes, "base")
+        corrections = self._parse_items(
+            correction,
+            renderer,
+            payload.corrections,
+            "after",
+        )
         hint_state = nodes.get("hint") or {}
         hint = {
             key: value
             for key, value in hint_state.items()
-            if key not in {"references", "cause", "correction"}
+            if key not in {"references", "cause", "correction", "causes", "corrections"}
         }
         return {
             "nodes": {
@@ -737,14 +763,13 @@ class HintNode:
         lines = [
             self._instruction
             or (
-                "Identify every line that is part of the defect and every line that "
-                "is part of the fix.\n"
+                "Identify every line that is part of the defect.\n"
+                "and every line that is part of the fix.\n"
                 "Use the reference labels from the left column exactly as provided."
             ),
             "Respond only in JSON.",
             (
-                'Use this schema: {"causes": [{"references": [string, ...], "reason": string}], '
-                '"corrections": [{"references": [string, ...], "reason": string}]}.'
+                'Use this schema: {"causes": [{"references": [string, ...], "reason": string}], "corrections": [{"references": [string, ...], "reason": string}]}.'
             ),
             "",
             "Root cause rationale:",
@@ -773,7 +798,10 @@ class HintNode:
 
     def _parse_items(
         self,
+        correction: Change,
+        renderer: PatchView,
         value: object,
+        side: str,
     ) -> list[HintItemState]:
         parsed: list[HintItemState] = []
         for item in value:
@@ -784,12 +812,59 @@ class HintNode:
                 )
             parsed.append(
                 {
-                    "references": references,
                     "reason": item.reason,
+                    "statements": [
+                        self._resolve(correction, renderer, reference, side)
+                        for reference in references
+                    ],
                 }
             )
         return parsed
 
+    def _resolve(
+        self,
+        correction: Change,
+        renderer: PatchView,
+        reference: str,
+        side: str,
+    ) -> HintStatementState:
+        scope = PatchScope()
+        for current in renderer.resolve([reference]):
+            operation = self._file(current.file)
+            try:
+                path = scope.bind(
+                    operation,
+                    self._factory.read(correction.base, operation.base),
+                    self._factory.read(correction.after, operation.after),
+                )
+            except ValueError:
+                continue
+            for anchor in current.anchors:
+                base, after = path.resolve(anchor)
+                statement = base if side == "base" else after
+                if statement is None:
+                    continue
+                return {
+                    "reference": reference,
+                    "scope": statement.scope,
+                    "excerpt": statement.excerpt,
+                }
+        return {
+            "reference": reference,
+            "scope": None,
+            "excerpt": None,
+        }
+
+    def _file(self, file: tuple[str | None, str | None]) -> FileOperation:
+        if file[0] is None:
+            return FileOperation(base=file[0], after=file[1], operation=OperationType.ADD)
+        if file[1] is None:
+            return FileOperation(
+                base=file[0],
+                after=file[1],
+                operation=OperationType.DELETE,
+            )
+        return FileOperation(base=file[0], after=file[1], operation=OperationType.EDIT)
 
 class RefineNode:
     """Reduce the expansion context to a focused view."""
@@ -839,9 +914,10 @@ class RefineNode:
             return self._empty(nodes)
 
         references = [
-            reference
+            current["reference"]
             for item in causes
-            for reference in list(item.get("references") or [])
+            for current in list(item.get("statements") or [])
+            if current.get("reference")
         ]
         if not references:
             return {"nodes": {**nodes, "refine": {}}}
@@ -969,10 +1045,10 @@ class VerifyNode:
                     "You will be given:\n"
                     "- a code snippet\n"
                     "- the root cause of a bug\n"
-                    "- explanations of that bug\n"
+                    "- defect statements\n"
                     "\n"
                     "Your task is to check whether the defect described by the "
-                    "root cause and explanations appears in the code snippet.\n"
+                    "root cause and defect statements appears in the code snippet.\n"
                     "Your boolean and your reason must agree."
                 ),
                 "Respond only in JSON.",
@@ -981,7 +1057,7 @@ class VerifyNode:
                 "Root cause:",
                 rationale,
                 "",
-                "Bug explanations:",
+                "Defect statements:",
                 hints,
                 "",
                 "Code snippet:",
@@ -994,13 +1070,37 @@ class VerifyNode:
         causes: list[object],
     ) -> str:
         lines = [
-            f"- {item['reason'].strip()}"
+            self._item(item)
             for item in causes
-            if item.get("reason") and item["reason"].strip()
+            if self._item(item) is not None
         ]
         if not lines:
             raise ValueError("VerifyNode requires non-empty cause reasons.")
         return "\n".join(lines)
+
+    def _item(self, item: object) -> str | None:
+        statements = self._statements(item)
+        if statements:
+            return "\n".join(statements)
+        reason = item.get("reason")
+        if reason and reason.strip():
+            return f"- {reason.strip()}"
+        return None
+
+    def _statements(self, item: object) -> list[str]:
+        values: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for current in list(item.get("statements") or []):
+            scope = current.get("scope")
+            excerpt = current.get("excerpt")
+            if not scope or not excerpt:
+                continue
+            key = (scope, excerpt)
+            if key in seen:
+                continue
+            seen.add(key)
+            values.append(f"- {scope} {excerpt}")
+        return values
 
     def _structured_model(self) -> object:
         try:
@@ -1096,9 +1196,10 @@ class BlameNode:
         blame = nodes.get("blame") or {}
         slices = renderer.resolve(
             [
-                reference
+                current["reference"]
                 for item in causes
-                for reference in list(item.get("references") or [])
+                for current in list(item.get("statements") or [])
+                if current.get("reference")
             ]
         )
         if not slices:
@@ -1362,13 +1463,37 @@ class CompareNode:
 
     def _hint(self, causes: list[object]) -> str:
         lines = [
-            f"- {item['reason'].strip()}"
+            self._item(item)
             for item in causes
-            if item.get("reason") and item["reason"].strip()
+            if self._item(item) is not None
         ]
         if not lines:
             return ""
         return "\n".join(lines)
+
+    def _item(self, item: object) -> str | None:
+        statements = self._statements(item)
+        if statements:
+            return "\n".join(statements)
+        reason = item.get("reason")
+        if reason and reason.strip():
+            return f"- {reason.strip()}"
+        return None
+
+    def _statements(self, item: object) -> list[str]:
+        values: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for current in list(item.get("statements") or []):
+            scope = current.get("scope")
+            excerpt = current.get("excerpt")
+            if not scope or not excerpt:
+                continue
+            key = (scope, excerpt)
+            if key in seen:
+                continue
+            seen.add(key)
+            values.append(f"- {scope} {excerpt}")
+        return values
 
     def _presence_prompt(self, *, hints: str, snippet: str) -> str:
         return "\n".join(
@@ -1376,13 +1501,13 @@ class CompareNode:
                 self._instruction
                 or (
                     "Check whether the code shown in the snippet matches the "
-                    "explanations.\n"
+                    "defect statements.\n"
                     "Be conservative. If you are unsure, return `present: false`."
                 ),
                 "Respond only in JSON.",
                 'Use this schema: {"present": boolean, "reason": string}.',
                 "",
-                "Explanations:",
+                "Defect statements:",
                 hints,
                 "",
                 "Code snippet:",
@@ -1402,7 +1527,7 @@ class CompareNode:
                 self._instruction
                 or (
                     "Check whether the defect described by the "
-                    "root cause and explanations appears in the code snippet.\n"
+                    "root cause and defect statements appears in the code snippet.\n"
                     "Your boolean and your reason must agree.\n"
                     "Be conservative. If you are unsure, return `defect: false`."
                 ),
@@ -1412,7 +1537,7 @@ class CompareNode:
                 "Root cause:",
                 rationale,
                 "",
-                "Explanations:",
+                "Defect statements:",
                 hints,
                 "",
                 "Code snippet:",
