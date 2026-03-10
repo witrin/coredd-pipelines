@@ -4,14 +4,14 @@ import unittest
 from pathlib import Path
 from textwrap import dedent
 
-from benchmark.attribution.diff import Context, PatchContext, PatchView, SourceDelta
+from benchmark.attribution.diff import Context, PatchContext, PatchFactory, PatchView
 from benchmark.attribution.domain import Anchor, FileOperation, OperationType, Slice
 from benchmark.attribution.history import VersionControl
 from benchmark.attribution.history_fixture import HistoryFixture
 from unidiff import PatchSet
 
 
-class TestPatchRenderer(unittest.TestCase):
+class TestPatchView(unittest.TestCase):
     def test_render_aligns_references_with_separator(self) -> None:
         renderer = PatchView(
             "\n".join(
@@ -217,14 +217,14 @@ class TestPatchRenderer(unittest.TestCase):
         )
 
 
-class TestSourceDelta(unittest.TestCase):
+class TestPatchFactory(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.TemporaryDirectory()
         self._root = Path(self._tmpdir.name)
         self._history_fixture = HistoryFixture()
         self._history_fixture.__enter__()
         self._repository = VersionControl(self._history_fixture.repository)
-        self._candidate = SourceDelta(self._repository)
+        self._candidate = PatchFactory(self._repository)
 
     def tearDown(self) -> None:
         self._history_fixture.__exit__(None, None, None)
@@ -2776,7 +2776,7 @@ class TestSourceDelta(unittest.TestCase):
             ".toml",
         )
 
-        patch = self._candidate.patch(
+        patch = self._candidate.create(
             base=base_sha,
             after=after_sha,
             files=self._repository.manifest(base_sha, after_sha),
@@ -2818,7 +2818,7 @@ class TestSourceDelta(unittest.TestCase):
         )
         after_sha = self._history_fixture.commit(after_tree, [base_sha], "after")
 
-        patch = self._candidate.patch(base_sha, after_sha, n=0)
+        patch = self._candidate.create(base_sha, after_sha, n=0)
 
         self.assertEqual(len(patch), 4)
         self.assertEqual(
@@ -2852,7 +2852,7 @@ class TestSourceDelta(unittest.TestCase):
                 operation=OperationType.MOVE,
             ),
         ]
-        patch = self._candidate.patch(base_sha, after_sha, files=selected, n=0)
+        patch = self._candidate.create(base_sha, after_sha, files=selected, n=0)
 
         self.assertEqual(len(patch), 3)
         self.assertEqual(
@@ -2868,7 +2868,7 @@ class TestSourceDelta(unittest.TestCase):
         )
 
         with self.assertRaises(ValueError):
-            self._candidate.materialize(base_sha, after_sha, [], "base")
+            self._candidate.refine(base_sha, after_sha, [], "base")
 
     def test_materialize_rejects_after_only_anchor_for_base_mode(self) -> None:
         base_sha, after_sha = self._commit(
@@ -2878,7 +2878,7 @@ class TestSourceDelta(unittest.TestCase):
         )
 
         with self.assertRaises(ValueError):
-            self._candidate.materialize(
+            self._candidate.refine(
                 base_sha,
                 after_sha,
                 [
@@ -2898,7 +2898,7 @@ class TestSourceDelta(unittest.TestCase):
         )
 
         with self.assertRaises(ValueError):
-            self._candidate.materialize(
+            self._candidate.refine(
                 base_sha,
                 after_sha,
                 [
@@ -2934,7 +2934,7 @@ class TestSourceDelta(unittest.TestCase):
         ]
 
         self.assertEqual(
-            str(self._candidate.materialize(base_sha, after_sha, slices, "base")),
+            str(self._candidate.refine(base_sha, after_sha, slices, "base")),
             self._patch(
                 """
                 --- a/file.toml
@@ -2949,7 +2949,7 @@ class TestSourceDelta(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            str(self._candidate.materialize(base_sha, after_sha, slices, "after")),
+            str(self._candidate.refine(base_sha, after_sha, slices, "after")),
             self._patch(
                 """
                 --- a/file.toml
@@ -2982,7 +2982,7 @@ class TestSourceDelta(unittest.TestCase):
             ".toml",
         )
 
-        patchset = self._candidate.materialize(
+        patchset = self._candidate.refine(
             base_sha,
             after_sha,
             [
@@ -3026,7 +3026,7 @@ class TestSourceDelta(unittest.TestCase):
             ".toml",
         )
 
-        patchset = self._candidate.materialize(
+        patchset = self._candidate.refine(
             base_sha,
             after_sha,
             [
@@ -3070,7 +3070,7 @@ class TestSourceDelta(unittest.TestCase):
             ".toml",
         )
 
-        patchset = self._candidate.materialize(
+        patchset = self._candidate.refine(
             base_sha,
             after_sha,
             [
@@ -3115,7 +3115,7 @@ class TestSourceDelta(unittest.TestCase):
             ".toml",
         )
 
-        patchset = self._candidate.materialize(
+        patchset = self._candidate.refine(
             base_sha,
             after_sha,
             [
@@ -3157,7 +3157,7 @@ class TestSourceDelta(unittest.TestCase):
             ".toml",
         )
 
-        patchset = self._candidate.materialize(
+        patchset = self._candidate.refine(
             base_sha,
             after_sha,
             [
@@ -3201,7 +3201,7 @@ class TestSourceDelta(unittest.TestCase):
             ".toml",
         )
 
-        patchset = self._candidate.materialize(
+        patchset = self._candidate.refine(
             base_sha,
             after_sha,
             [
@@ -3243,7 +3243,7 @@ class TestSourceDelta(unittest.TestCase):
             ".toml",
         )
 
-        patchset = self._candidate.materialize(
+        patchset = self._candidate.refine(
             base_sha,
             after_sha,
             [
@@ -3284,7 +3284,7 @@ class TestSourceDelta(unittest.TestCase):
             ".toml",
         )
 
-        patchset = self._candidate.materialize(
+        patchset = self._candidate.refine(
             base_sha,
             after_sha,
             [
@@ -3344,7 +3344,7 @@ class TestSourceDelta(unittest.TestCase):
             ".toml",
         )
 
-        patchset = self._candidate.materialize(
+        patchset = self._candidate.refine(
             base_sha,
             after_sha,
             [
@@ -3395,7 +3395,7 @@ class TestSourceDelta(unittest.TestCase):
         )
         after_sha = self._history_fixture.commit(after_tree, [base_sha], "after")
 
-        patchset = self._candidate.materialize(
+        patchset = self._candidate.refine(
             base_sha,
             after_sha,
             [
@@ -3444,7 +3444,7 @@ class TestSourceDelta(unittest.TestCase):
         )
         after_sha = self._history_fixture.commit(after_tree, [base_sha], "after")
 
-        patchset = self._candidate.materialize(
+        patchset = self._candidate.refine(
             base_sha,
             after_sha,
             [

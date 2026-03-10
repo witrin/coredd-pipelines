@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from benchmark.attribution.diff import SourceDelta
+from benchmark.attribution.diff import PatchFactory
 from benchmark.attribution.domain import (
     Anchor,
     Change,
@@ -51,17 +51,17 @@ from unidiff import PatchSet
 class TestAttributionGraph(unittest.TestCase):
     def _graph(self) -> AttributionGraph:
         repository = object.__new__(VersionControl)
-        delta = SourceDelta(repository)
+        factory = PatchFactory(repository)
         return AttributionGraph(
             summarize=SummarizeNode(),
             explain=ExplainNode(),
             aggregate=AggregateNode(),
             expand=ExpandNode(),
             hint=HintNode(),
-            refine=RefineNode(diff=delta),
+            refine=RefineNode(factory=factory),
             verify=VerifyNode(),
-            blame=BlameNode(diff=delta),
-            compare=CompareNode(diff=delta),
+            blame=BlameNode(factory=factory),
+            compare=CompareNode(factory=factory),
         )
 
     def test_import_smoke(self) -> None:
@@ -162,10 +162,10 @@ class TestAttributionGraph(unittest.TestCase):
             aggregate=AggregateNode(),
             expand=ExpandNode(),
             hint=HintNode(),
-            refine=RefineNode(diff=SourceDelta(object.__new__(VersionControl))),
+            refine=RefineNode(factory=PatchFactory(object.__new__(VersionControl))),
             verify=VerifyNode(),
-            blame=BlameNode(diff=SourceDelta(object.__new__(VersionControl))),
-            compare=CompareNode(diff=SourceDelta(object.__new__(VersionControl))),
+            blame=BlameNode(factory=PatchFactory(object.__new__(VersionControl))),
+            compare=CompareNode(factory=PatchFactory(object.__new__(VersionControl))),
         )
 
         self.assertEqual(
@@ -180,7 +180,7 @@ class TestAttributionGraph(unittest.TestCase):
             "aggregate",
         )
 
-    @patch.object(SourceDelta, "patch", autospec=True)
+    @patch.object(PatchFactory, "create", autospec=True)
     @patch.object(VersionControl, "manifest", autospec=True)
     def test_summarize_node_uses_patch_and_llm(
         self,
@@ -189,11 +189,11 @@ class TestAttributionGraph(unittest.TestCase):
     ) -> None:
         operations = [FileOperation(base="old.py", after="new.py", operation=OperationType.EDIT)]
         repository = object.__new__(VersionControl)
-        delta = SourceDelta(repository)
+        factory = PatchFactory(repository)
         llm = Mock(spec_set=["invoke"])
         llm.invoke.return_value = SimpleNamespace(text="Fixes the bug.")
         node = SummarizeNode(
-            diff=delta,
+            factory=factory,
             llm=llm,
             context=2,
         )
@@ -215,7 +215,7 @@ class TestAttributionGraph(unittest.TestCase):
             "after-sha",
         )
         delta_patch.assert_called_once_with(
-            delta,
+            factory,
             "base-sha",
             "after-sha",
             files=operations,
@@ -234,7 +234,7 @@ class TestAttributionGraph(unittest.TestCase):
         self.assertEqual(result["files"], ["new.py"])
         self.assertNotIn("expanded", result)
 
-    @patch.object(SourceDelta, "patch", autospec=True)
+    @patch.object(PatchFactory, "create", autospec=True)
     @patch.object(VersionControl, "manifest", autospec=True)
     def test_summarize_node_skips_empty_patch(
         self,
@@ -246,10 +246,10 @@ class TestAttributionGraph(unittest.TestCase):
             FileOperation(base="only-old.py", after=None, operation=OperationType.DELETE),
         ]
         repository = object.__new__(VersionControl)
-        delta = SourceDelta(repository)
+        factory = PatchFactory(repository)
         llm = Mock(spec_set=["invoke"])
         node = SummarizeNode(
-            diff=delta,
+            factory=factory,
             llm=llm,
         )
         manifest.return_value = operations
@@ -270,7 +270,7 @@ class TestAttributionGraph(unittest.TestCase):
             "after-sha",
         )
         delta_patch.assert_called_once_with(
-            delta,
+            factory,
             "base-sha",
             "after-sha",
             files=operations,
@@ -280,7 +280,7 @@ class TestAttributionGraph(unittest.TestCase):
         self.assertEqual(result["summary"], "")
         self.assertEqual(result["files"], ["new.py", "only-old.py"])
 
-    @patch.object(SourceDelta, "patch", autospec=True)
+    @patch.object(PatchFactory, "create", autospec=True)
     @patch.object(VersionControl, "manifest", autospec=True)
     def test_summarize_node_prompt_explains_zero_context(
         self,
@@ -289,11 +289,11 @@ class TestAttributionGraph(unittest.TestCase):
     ) -> None:
         operations = [FileOperation(base="old.py", after="new.py", operation=OperationType.EDIT)]
         repository = object.__new__(VersionControl)
-        delta = SourceDelta(repository)
+        factory = PatchFactory(repository)
         llm = Mock(spec_set=["invoke"])
         llm.invoke.return_value = SimpleNamespace(text="Summary")
         node = SummarizeNode(
-            diff=delta,
+            factory=factory,
             llm=llm,
             context=0,
         )
@@ -318,7 +318,7 @@ class TestAttributionGraph(unittest.TestCase):
         with self.assertRaises(ValueError):
             SummarizeNode(context=-1)
 
-    @patch.object(SourceDelta, "patch", autospec=True)
+    @patch.object(PatchFactory, "create", autospec=True)
     @patch.object(VersionControl, "meta", autospec=True)
     @patch.object(VersionControl, "log", autospec=True)
     @patch.object(VersionControl, "manifest", autospec=True)
@@ -335,7 +335,7 @@ class TestAttributionGraph(unittest.TestCase):
             FileOperation(base="c.py", after="c.py", operation=OperationType.EDIT),
         ]
         repository = object.__new__(VersionControl)
-        delta = SourceDelta(repository)
+        factory = PatchFactory(repository)
         llm = Mock(spec_set=["with_structured_output"])
         structured = Mock(spec_set=["invoke"])
         llm.with_structured_output.return_value = structured
@@ -344,7 +344,7 @@ class TestAttributionGraph(unittest.TestCase):
             "files": ["c.py", "missing.py", "a.py", "c.py"],
         }
         node = ExplainNode(
-            diff=delta,
+            factory=factory,
             llm=llm,
             context=2,
         )
@@ -436,12 +436,12 @@ class TestAttributionGraph(unittest.TestCase):
 
     def test_explain_node_rejects_invalid_json(self) -> None:
         repository = object.__new__(VersionControl)
-        delta = SourceDelta(repository)
+        factory = PatchFactory(repository)
         llm = Mock(spec_set=["with_structured_output"])
         structured = Mock(spec_set=["invoke"])
         llm.with_structured_output.return_value = structured
         structured.invoke.return_value = "not json"
-        node = ExplainNode(diff=delta, llm=llm)
+        node = ExplainNode(factory=factory, llm=llm)
 
         with (
             patch.object(
@@ -462,7 +462,7 @@ class TestAttributionGraph(unittest.TestCase):
                     "a",
                 ),
             ),
-            patch.object(SourceDelta, "patch", autospec=True, return_value="a.py"),
+            patch.object(PatchFactory, "create", autospec=True, return_value="a.py"),
         ):
             with self.assertRaises(ValueError):
                 node.run({
@@ -477,7 +477,7 @@ class TestAttributionGraph(unittest.TestCase):
 
     def test_explain_node_uses_distinct_orders_per_run(self) -> None:
         repository = object.__new__(VersionControl)
-        delta = SourceDelta(repository)
+        factory = PatchFactory(repository)
         llm = Mock(spec_set=["with_structured_output"])
         structured = Mock(spec_set=["invoke"])
         llm.with_structured_output.return_value = structured
@@ -485,7 +485,7 @@ class TestAttributionGraph(unittest.TestCase):
             "rationale": "Rationale",
             "files": ["a.py"],
         }
-        node = ExplainNode(diff=delta, llm=llm, samples=3)
+        node = ExplainNode(factory=factory, llm=llm, samples=3)
         state = {
             "correction": Change(
                 number=1,
@@ -515,7 +515,7 @@ class TestAttributionGraph(unittest.TestCase):
                     Commit("after-sha", "", datetime(2024, 1, 1, tzinfo=timezone.utc), "a"),
                 ],
             ),
-            patch.object(SourceDelta, "patch", autospec=True, side_effect=["a.py\nb.py", "b.py\na.py"]) as delta_patch,
+            patch.object(PatchFactory, "create", autospec=True, side_effect=["a.py\nb.py", "b.py\na.py"]) as delta_patch,
         ):
             first = node.run(state)
             second = node.run({
@@ -576,8 +576,8 @@ class TestAttributionGraph(unittest.TestCase):
 
     def test_expand_node_expands_selected_operations(self) -> None:
         repository = object.__new__(VersionControl)
-        delta = SourceDelta(repository)
-        node = ExpandNode(diff=delta, level=2, context=1)
+        factory = PatchFactory(repository)
+        node = ExpandNode(factory=factory, level=2, context=1)
 
         with (
             patch.object(
@@ -590,7 +590,7 @@ class TestAttributionGraph(unittest.TestCase):
                     FileOperation(base="c.py", after="c.py", operation=OperationType.EDIT),
                 ],
             ) as manifest,
-            patch.object(SourceDelta, "expand", autospec=True, return_value="expanded") as expand,
+            patch.object(PatchFactory, "expand", autospec=True, return_value="expanded") as expand,
         ):
             result = node.run({
                 "correction": Change(
@@ -622,8 +622,8 @@ class TestAttributionGraph(unittest.TestCase):
 
     def test_expand_node_returns_empty_state_for_unmatched_files(self) -> None:
         repository = object.__new__(VersionControl)
-        delta = SourceDelta(repository)
-        node = ExpandNode(diff=delta)
+        factory = PatchFactory(repository)
+        node = ExpandNode(factory=factory)
 
         with patch.object(
             VersionControl,
@@ -998,12 +998,12 @@ class TestAttributionGraph(unittest.TestCase):
 
     def test_refine_node_uses_cause_references_and_sets_refinement(self) -> None:
         repository = object.__new__(VersionControl)
-        delta = SourceDelta(repository)
-        node = RefineNode(diff=delta)
+        factory = PatchFactory(repository)
+        node = RefineNode(factory=factory)
 
         with patch.object(
-            SourceDelta,
-            "materialize",
+            PatchFactory,
+            "refine",
             autospec=True,
             return_value=PatchSet(
                 "\n".join(
@@ -1077,8 +1077,8 @@ class TestAttributionGraph(unittest.TestCase):
 
     def test_refine_node_returns_empty_state_for_empty_causes(self) -> None:
         repository = object.__new__(VersionControl)
-        delta = SourceDelta(repository)
-        node = RefineNode(diff=delta)
+        factory = PatchFactory(repository)
+        node = RefineNode(factory=factory)
 
         result = node.run(
             {
@@ -1110,7 +1110,7 @@ class TestAttributionGraph(unittest.TestCase):
 
     def test_blame_node_collects_candidates_across_files(self) -> None:
         repository = object.__new__(VersionControl)
-        node = BlameNode(diff=SourceDelta(repository))
+        node = BlameNode(factory=PatchFactory(repository))
 
         with (
             patch.object(
@@ -1240,7 +1240,7 @@ class TestAttributionGraph(unittest.TestCase):
 
     def test_blame_node_ignores_invalid_and_target_only_references(self) -> None:
         repository = object.__new__(VersionControl)
-        node = BlameNode(diff=SourceDelta(repository))
+        node = BlameNode(factory=PatchFactory(repository))
 
         with (
             patch.object(
@@ -1321,7 +1321,7 @@ class TestAttributionGraph(unittest.TestCase):
 
     def test_blame_node_returns_empty_candidates_without_source_lines(self) -> None:
         repository = object.__new__(VersionControl)
-        node = BlameNode(diff=SourceDelta(repository))
+        node = BlameNode(factory=PatchFactory(repository))
 
         result = node.run(
             {
@@ -1356,7 +1356,7 @@ class TestAttributionGraph(unittest.TestCase):
 
     def test_blame_node_returns_empty_candidates_when_blame_is_empty(self) -> None:
         repository = object.__new__(VersionControl)
-        node = BlameNode(diff=SourceDelta(repository))
+        node = BlameNode(factory=PatchFactory(repository))
 
         with patch.object(
             VersionControl,
@@ -1415,11 +1415,11 @@ class TestAttributionGraph(unittest.TestCase):
             {"defect": True, "reason": "Candidate contains the bug."},
             {"defect": False, "reason": "Parent does not contain the bug."},
         ]
-        node = CompareNode(diff=SourceDelta(repository), llm=llm)
+        node = CompareNode(factory=PatchFactory(repository), llm=llm)
 
         with patch.object(
-            SourceDelta,
-            "materialize",
+            PatchFactory,
+            "refine",
             autospec=True,
             return_value=PatchSet(
                 "\n".join(
@@ -1532,8 +1532,8 @@ class TestAttributionGraph(unittest.TestCase):
         ]
 
         with patch.object(
-            SourceDelta,
-            "materialize",
+            PatchFactory,
+            "refine",
             autospec=True,
             return_value=PatchSet(
                 "\n".join(
@@ -1548,7 +1548,7 @@ class TestAttributionGraph(unittest.TestCase):
                 )
             ),
         ):
-            result = CompareNode(diff=SourceDelta(repository), llm=llm).run(
+            result = CompareNode(factory=PatchFactory(repository), llm=llm).run(
                 {
                     "rationale": "Validation fails before normalization.",
                     "nodes": {
@@ -1584,7 +1584,7 @@ class TestAttributionGraph(unittest.TestCase):
         repository = object.__new__(VersionControl)
         llm = Mock(spec_set=["with_structured_output"])
 
-        result = CompareNode(diff=SourceDelta(repository), llm=llm).run(
+        result = CompareNode(factory=PatchFactory(repository), llm=llm).run(
             {
                 "rationale": "Validation fails before normalization.",
                 "nodes": {
@@ -1603,7 +1603,7 @@ class TestAttributionGraph(unittest.TestCase):
         repository = object.__new__(VersionControl)
         llm = Mock(spec_set=["with_structured_output"])
 
-        result = CompareNode(diff=SourceDelta(repository), llm=llm).run(
+        result = CompareNode(factory=PatchFactory(repository), llm=llm).run(
             {
                 "rationale": "Validation fails before normalization.",
                 "nodes": {
@@ -1635,8 +1635,8 @@ class TestAttributionGraph(unittest.TestCase):
         ]
 
         with patch.object(
-            SourceDelta,
-            "materialize",
+            PatchFactory,
+            "refine",
             autospec=True,
             return_value=PatchSet(
                 "\n".join(
@@ -1650,7 +1650,7 @@ class TestAttributionGraph(unittest.TestCase):
                 )
             ),
         ):
-            result = CompareNode(diff=SourceDelta(repository), llm=llm).run(
+            result = CompareNode(factory=PatchFactory(repository), llm=llm).run(
                 {
                     "rationale": "Validation fails before normalization.",
                     "nodes": {

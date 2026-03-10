@@ -4,7 +4,7 @@ from typing import Protocol, TypedDict
 from pydantic import BaseModel, ValidationError
 
 from benchmark.attribution.domain import Anchor, Change, Slice
-from benchmark.attribution.diff import PatchView, SourceDelta
+from benchmark.attribution.diff import PatchFactory, PatchView
 from benchmark.attribution.tracing import (
     AttributionRunnable,
 )
@@ -189,14 +189,14 @@ class SummarizeNode:
 
     def __init__(
         self,
-        diff: SourceDelta | None = None,
+        factory: PatchFactory | None = None,
         llm: object | None = None,
         instruction: str | None = None,
         context: int = 3,
     ) -> None:
         if context < 0:
             raise ValueError("context must be non-negative")
-        self._diff = diff
+        self._factory = factory
         self._llm = llm
         self._instruction = instruction
         self._context = context
@@ -204,14 +204,14 @@ class SummarizeNode:
     def run(self, state: AttributionGraphState) -> dict[str, object]:
         """Summarize the corrective delta."""
         correction = state.get("correction")
-        if correction is None or self._diff is None or self._llm is None:
+        if correction is None or self._factory is None or self._llm is None:
             return {}
 
-        operations = self._diff.repository.manifest(
+        operations = self._factory.repository.manifest(
             correction.base,
             correction.after,
         )
-        patch = self._diff.patch(
+        patch = self._factory.create(
             correction.base,
             correction.after,
             files=operations,
@@ -267,7 +267,7 @@ class ExplainNode:
 
     def __init__(
         self,
-        diff: SourceDelta | None = None,
+        factory: PatchFactory | None = None,
         llm: object | None = None,
         instruction: str | None = None,
         context: int = 3,
@@ -277,7 +277,7 @@ class ExplainNode:
             raise ValueError("context must be non-negative")
         if samples < 1:
             raise ValueError("samples must be positive")
-        self._diff = diff
+        self._factory = factory
         self._llm = llm
         self._instruction = instruction
         self._context = context
@@ -287,8 +287,8 @@ class ExplainNode:
         """Derive a rationale for the corrective change."""
         correction = state.get("correction")
         summary = state.get("summary")
-        if correction is None or summary is None or self._diff is None or self._llm is None:
-            raise ValueError("ExplainNode requires correction, summary, diff, and llm")
+        if correction is None or summary is None or self._factory is None or self._llm is None:
+            raise ValueError("ExplainNode requires correction, summary, factory, and llm")
 
         nodes = state.get("nodes") or {}
         explain = nodes.get("explain") or {}
@@ -296,14 +296,14 @@ class ExplainNode:
         samples = explain.get("samples", self._samples)
         if samples is None or samples < 1:
             samples = self._samples
-        operations = self._diff.repository.manifest(
+        operations = self._factory.repository.manifest(
             correction.base,
             correction.after,
         )
         orders = self._file_orders(operations, samples)
         selected = orders[len(runs)]
         patch = str(
-            self._diff.patch(
+            self._factory.create(
                 correction.base,
                 correction.after,
                 files=selected,
@@ -388,7 +388,7 @@ class ExplainNode:
     def _commit_messages(self, correction: Change) -> list[str]:
         shas = [correction.after]
         shas.extend(
-            self._diff.repository.log(
+            self._factory.repository.log(
                 correction.base,
                 correction.after,
                 merge=True,
@@ -400,7 +400,7 @@ class ExplainNode:
             if sha in seen:
                 continue
             seen.add(sha)
-            message = self._diff.repository.meta(sha).message.strip()
+            message = self._factory.repository.meta(sha).message.strip()
             if message:
                 messages.append(message)
         return messages
@@ -607,7 +607,7 @@ class ExpandNode:
 
     def __init__(
         self,
-        diff: SourceDelta | None = None,
+        factory: PatchFactory | None = None,
         *,
         level: int = 1,
         context: int = 3,
@@ -616,7 +616,7 @@ class ExpandNode:
             raise ValueError("level must be positive")
         if context < 0:
             raise ValueError("context must be non-negative")
-        self._diff = diff
+        self._factory = factory
         self._level = level
         self._context = context
 
@@ -625,8 +625,8 @@ class ExpandNode:
         correction = state.get("correction")
         if correction is None:
             raise ValueError("ExpandNode requires correction.")
-        if self._diff is None:
-            raise ValueError("ExpandNode requires diff.")
+        if self._factory is None:
+            raise ValueError("ExpandNode requires factory.")
         files = state.get("files")
         if files is None:
             return {"nodes": {**(state.get("nodes") or {}), "expand": {}}}
@@ -637,7 +637,7 @@ class ExpandNode:
         selected_paths = set(selected_files)
         operations = [
             operation
-            for operation in self._diff.repository.manifest(
+            for operation in self._factory.repository.manifest(
                 correction.base,
                 correction.after,
             )
@@ -646,7 +646,7 @@ class ExpandNode:
         if not operations:
             return {"nodes": {**(state.get("nodes") or {}), "expand": {}}}
 
-        expansion = self._diff.expand(
+        expansion = self._factory.expand(
             correction.base,
             correction.after,
             files=operations,
@@ -794,8 +794,8 @@ class HintNode:
 class RefineNode:
     """Reduce the expansion context to a focused view."""
 
-    def __init__(self, diff: SourceDelta | None = None) -> None:
-        self._diff = diff
+    def __init__(self, factory: PatchFactory | None = None) -> None:
+        self._factory = factory
 
     def _empty(
         self,
@@ -831,8 +831,8 @@ class RefineNode:
         hint = nodes.get("hint") or {}
         expansion = expand.get("expansion")
         causes = hint.get("causes")
-        if correction is None or self._diff is None:
-            raise ValueError("RefineNode requires correction, expansion, causes, and diff.")
+        if correction is None or self._factory is None:
+            raise ValueError("RefineNode requires correction, expansion, causes, and factory.")
         if expansion is None or causes is None:
             return self._empty(nodes)
         if not expansion.strip() or not causes:
@@ -854,7 +854,7 @@ class RefineNode:
             )
             if not slices:
                 return self._empty(nodes)
-            refinement = self._diff.materialize(
+            refinement = self._factory.refine(
                 correction.base,
                 correction.after,
                 slices,
@@ -1028,8 +1028,8 @@ class VerifyNode:
 class BlameNode:
     """Extract candidate commits from the expanded hint references."""
 
-    def __init__(self, diff: SourceDelta | None = None) -> None:
-        self._diff = diff
+    def __init__(self, factory: PatchFactory | None = None) -> None:
+        self._factory = factory
 
     def _slice(self, value: Slice) -> SliceState:
         return {
@@ -1065,7 +1065,7 @@ class BlameNode:
         if commit is None:
             return False
         try:
-            self._diff.repository.blob(commit, path)
+            self._factory.repository.blob(commit, path)
         except FileNotFoundError:
             return False
         return True
@@ -1078,8 +1078,8 @@ class BlameNode:
         hint = nodes.get("hint") or {}
         expansion = expand.get("expansion")
         causes = hint.get("causes")
-        if correction is None or self._diff is None:
-            raise ValueError("BlameNode requires correction, expansion, causes, and diff.")
+        if correction is None or self._factory is None:
+            raise ValueError("BlameNode requires correction, expansion, causes, and factory.")
         if expansion is None or causes is None:
             return self._empty(nodes)
         if not expansion.strip() or not causes:
@@ -1118,13 +1118,13 @@ class BlameNode:
             ]
             if not entries:
                 continue
-            blamed = self._diff.repository.blame(path, correction.base, entries)
+            blamed = self._factory.repository.blame(path, correction.base, entries)
 
             for _, item in zip(entries, blamed):
                 commit, origin = item
                 if commit is None or origin is None:
                     continue
-                parents = self._diff.repository.parents(commit)
+                parents = self._factory.repository.parents(commit)
                 parent = parents[0] if parents else None
                 anchor = Anchor(
                     base=(0, 0),
@@ -1137,7 +1137,7 @@ class BlameNode:
                     )
                 )
                 if commit not in times:
-                    times[commit] = self._diff.repository.meta(commit).time
+                    times[commit] = self._factory.repository.meta(commit).time
 
         candidates = [
             {
@@ -1168,11 +1168,11 @@ class CompareNode:
 
     def __init__(
         self,
-        diff: SourceDelta | None = None,
+        factory: PatchFactory | None = None,
         llm: object | None = None,
         instruction: str | None = None,
     ) -> None:
-        self._diff = diff
+        self._factory = factory
         self._llm = llm
         self._instruction = instruction
 
@@ -1237,7 +1237,7 @@ class CompareNode:
         causes = hint.get("causes")
         candidates = blame.get("candidates")
         current = compare.get("index", -1)
-        if self._llm is None or self._diff is None:
+        if self._llm is None or self._factory is None:
             raise ValueError("CompareNode requires rationale, causes, candidates, and llm.")
         if rationale is None or causes is None or candidates is None:
             return self._empty(nodes, compare, current if current is not None else -1)
@@ -1248,7 +1248,7 @@ class CompareNode:
             return self._empty(nodes, compare, current)
         commit, parent, slices = self._candidate(candidates[index])
         refinement = str(
-            self._diff.materialize(
+            self._factory.refine(
                 parent,
                 commit,
                 slices,

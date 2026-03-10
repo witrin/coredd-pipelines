@@ -517,7 +517,7 @@ class PatchContext:
         return out
 
 
-class SourceDelta:
+class PatchFactory:
     # TODO: Add the paper's explicit line-based expansion for supported-language
     # changes outside enclosing scopes. The current implementation always expands
     # to the next structural scope and does not implement the exact "three
@@ -568,7 +568,7 @@ class SourceDelta:
     def __init__(self, repository: VersionControl) -> None:
         self.repository = repository
 
-    def patch(
+    def create(
         self,
         base: str,
         after: str,
@@ -691,7 +691,7 @@ class SourceDelta:
 
         return result
 
-    def materialize(
+    def refine(
         self,
         base: str,
         after: str,
@@ -701,9 +701,9 @@ class SourceDelta:
         force: bool = False,
     ) -> patch.PatchSet:
         if not slices:
-            raise ValueError("SourceDelta.materialize requires non-empty slices.")
+            raise ValueError("PatchFactory.refine requires non-empty slices.")
         if anchor not in {"base", "after"}:
-            raise ValueError("SourceDelta.materialize requires anchor to be 'base' or 'after'.")
+            raise ValueError("PatchFactory.refine requires anchor to be 'base' or 'after'.")
 
         result = patch.PatchSet("")
         operations = {
@@ -856,14 +856,14 @@ class SourceDelta:
             if current == (0, 0):
                 if opposite != (0, 0):
                     raise ValueError(
-                        "SourceDelta.materialize requires anchors on the selected side."
+                        "PatchFactory.refine requires anchors on the selected side."
                     )
                 continue
             intervals.append(current)
 
         if not intervals:
             raise ValueError(
-                "SourceDelta.materialize requires anchors on the selected side."
+                "PatchFactory.refine requires anchors on the selected side."
             )
 
         start = min(item[0] for item in intervals)

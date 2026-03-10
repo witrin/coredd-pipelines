@@ -52,7 +52,7 @@ Here $\Delta_{b \to a}^{+}$ denotes the expanded delta-context.
 
 > “[...] we provide the LLM with sufficient context through a process that we call context expanding [...] for each modified function, we expand its context by extracting the full content of both buggy and fixed versions and generating their diffs [...] For modified lines outside the function, we expand their context by extracting three unmodified lines around them”
 
-> **Implementation deviation.** The current `ExpandNode` relies on `SourceDelta.expand(...)`, which expands supported languages by walking to the next enclosing structural scope in the syntax tree instead of reproducing the paper's exact “full function vs. three surrounding lines” split. In practice this means the expansion follows higher structural elements such as functions, methods, classes, and the module or program root. Some node kinds are intentionally kept local and are not expanded further, including comments and top-level import statements.
+> **Implementation deviation.** The current `ExpandNode` relies on `PatchFactory.expand(...)`, which expands supported languages by walking to the next enclosing structural scope in the syntax tree instead of reproducing the paper's exact “full function vs. three surrounding lines” split. In practice this means the expansion follows higher structural elements such as functions, methods, classes, and the module or program root. Some node kinds are intentionally kept local and are not expanded further, including comments and top-level import statements.
 
 ### Hint Generation
 
@@ -133,14 +133,14 @@ The current implementation still has several unresolved high-level problems in t
 ## Notebook Quick Start
 
 The graph expects an already available `Change` object in the state under the `correction` key.
-The first implemented node is `SummarizeNode`, which currently summarizes the regular corrective patch produced by `SourceDelta.patch(...)`.
+The first implemented node is `SummarizeNode`, which currently summarizes the regular corrective patch produced by `PatchFactory.create(...)`.
 
 ### Run The First Node
 
 ```python
 import os
 
-from benchmark.attribution.diff import SourceDelta
+from benchmark.attribution.diff import PatchFactory
 from benchmark.attribution.graph import (
     AggregateNode,
     AttributionGraph,
@@ -168,27 +168,27 @@ llm = ChatOpenAI(
     base_url=base_url,
 )
 
-delta = SourceDelta(repository)
+factory = PatchFactory(repository)
 graph = AttributionGraph(
     summarize=SummarizeNode(
-        diff=delta,
+        factory=factory,
         llm=llm,
     ),
     explain=ExplainNode(
-        diff=delta,
+        factory=factory,
         llm=llm,
     ),
     aggregate=AggregateNode(
         llm=llm,
     ),
     expand=ExpandNode(
-        diff=delta,
+        factory=factory,
     ),
     hint=HintNode(
         llm=llm,
     ),
     refine=RefineNode(
-        diff=delta,
+        factory=factory,
     ),
     verify=VerifyNode(
         llm=llm,
