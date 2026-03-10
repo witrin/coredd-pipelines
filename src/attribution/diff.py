@@ -12,7 +12,9 @@ from benchmark.attribution.domain import (
     Anchor,
     Context,
     FileOperation,
+    OperationType,
     Reference,
+    Slice,
 )
 from benchmark.attribution.history import VersionControl
 
@@ -132,17 +134,17 @@ class ScopeRule:
 
 
 class PatchRenderer:
-    def __init__(self, unified_patch_text: str) -> None:
-        source = (
-            unified_patch_text
-            if unified_patch_text.endswith("\n")
-            else f"{unified_patch_text}\n"
-        )
+    def __init__(self, unified_patch_text: patch.PatchSet | str) -> None:
+        source = unified_patch_text
+        if isinstance(source, patch.PatchSet):
+            self._patchset = source
+            return
+        rendered = source if source.endswith("\n") else f"{source}\n"
         try:
-            self._patchset = patch.PatchSet(source)
+            self._patchset = patch.PatchSet(rendered)
         except Exception as error:
             raise ValueError(
-                "PatchRenderer requires parseable unified patch content."
+                f"PatchRenderer requires parseable unified patch content: {rendered!r}"
             ) from error
 
     def render(self) -> str:
@@ -186,7 +188,6 @@ class PatchRenderer:
                     "\n".join(
                         [
                             f"File: {path}",
-                            f"Lines: {lines[0][0]}-{lines[-1][0]}",
                             *[line[1] for line in lines],
                         ]
                     )
@@ -214,7 +215,6 @@ class PatchRenderer:
                     "\n".join(
                         [
                             f"File: {path}",
-                            f"Lines: {lines[0][0]}-{lines[-1][0]}",
                             *[line[1] for line in lines],
                         ]
                     )
@@ -241,6 +241,49 @@ class PatchRenderer:
         if line >= len(patched[hunk]):
             return None
         return Reference(file=file, hunk=hunk, line=line)
+
+    def slices(self, references: list[str]) -> list[Slice]:
+        grouped: dict[tuple[str | None, str | None], list[Anchor]] = {}
+        seen: set[tuple[tuple[str | None, str | None], Anchor]] = set()
+
+        for token in references:
+            reference = self.resolve(token)
+            if reference is None:
+                continue
+            patched = self._patchset[reference.file]
+            line = patched[reference.hunk][reference.line]
+            pair = (
+                self._normalize_path(patched.source_file, source=True),
+                self._normalize_path(patched.target_file, source=False),
+            )
+            anchor = self._anchor(line)
+            if anchor is None:
+                continue
+            key = (pair, anchor)
+            if key in seen:
+                continue
+            seen.add(key)
+            grouped.setdefault(pair, []).append(anchor)
+
+        return [
+            Slice(file=pair, anchors=anchors)
+            for pair, anchors in grouped.items()
+        ]
+
+    def _anchor(self, line: patch.Line) -> Anchor | None:
+        base = (
+            (line.source_line_no, line.source_line_no + 1)
+            if isinstance(line.source_line_no, int)
+            else (0, 0)
+        )
+        after = (
+            (line.target_line_no, line.target_line_no + 1)
+            if isinstance(line.target_line_no, int)
+            else (0, 0)
+        )
+        if base == (0, 0) and after == (0, 0):
+            return None
+        return Anchor(base=base, after=after)
 
     def _file_headers(self, patched: PatchedFile) -> list[str]:
         source = self._normalize_path(patched.source_file, source=True)
@@ -345,23 +388,29 @@ class SourceDelta:
         *,
         n: int = 3,
     ) -> patch.PatchSet:
-        result = patch.PatchSet("")
-        diff = self.repository.diff(base, after, context_lines=n)
-        selected = self.repository.manifest(base, after) if files is None else files
+        parsed = patch.PatchSet(
+            self.repository.diff(base, after, context=n).patch
+        )
+        if files is None:
+            return parsed
 
-        for file in selected:
-            delta = self._locate(diff, file)
-            if delta is None:
-                continue
+        selected = {(file.base, file.after) for file in files}
 
-            source = self.read(base, file.base)
-            target = self.read(after, file.after)
-            hunks = self.extract(delta)
+        for index in range(len(parsed) - 1, -1, -1):
+            source = parsed[index].source_file
+            target = parsed[index].target_file
+            if source == "/dev/null":
+                source = None
+            elif isinstance(source, str) and source.startswith("a/"):
+                source = source[2:]
+            if target == "/dev/null":
+                target = None
+            elif isinstance(target, str) and target.startswith("b/"):
+                target = target[2:]
+            if (source, target) not in selected:
+                del parsed[index]
 
-            if hunks:
-                result.append(self.project(file, source, target, hunks))
-
-        return result
+        return parsed
 
     def expand(
         self,
@@ -443,7 +492,7 @@ class SourceDelta:
                 hunks = [hunk for hunk in self.merge(hunks)]
             else:
                 delta = self._locate(
-                    self.repository.diff(base, after, context_lines=n), file
+                    self.repository.diff(base, after, context=n), file
                 )
                 if delta is None:
                     continue
@@ -454,141 +503,229 @@ class SourceDelta:
 
         return result
 
-    def refine(
+    def materialize(
         self,
-        expansion: patch.PatchSet,
-        references: list[str],
         base: str,
         after: str,
+        slices: list[Slice],
+        anchor: str,
+        n: int = 2,
+        force: bool = False,
     ) -> patch.PatchSet:
-        renderer = PatchRenderer(str(expansion))
-        selection: dict[str, set[int]] = {}
-
-        for reference in references:
-            resolved = renderer.resolve(reference)
-            if resolved is None:
-                continue
-            patched = expansion[resolved.file]
-            line = patched[resolved.hunk][resolved.line]
-            if not isinstance(line.source_line_no, int):
-                continue
-            path = patched.source_file
-            if not isinstance(path, str):
-                continue
-            if path.startswith("a/"):
-                path = path[2:]
-            if path == "" or path == "/dev/null":
-                continue
-            selection.setdefault(path, set()).add(line.source_line_no)
-
-        if not selection:
-            raise ValueError(
-                "SourceDelta.refine requires references that resolve to base lines."
-            )
+        if not slices:
+            raise ValueError("SourceDelta.materialize requires non-empty slices.")
+        if anchor not in {"base", "after"}:
+            raise ValueError("SourceDelta.materialize requires anchor to be 'base' or 'after'.")
 
         result = patch.PatchSet("")
-        operations = list(self.repository.manifest(base, after))
+        operations = {
+            (operation.base, operation.after): operation
+            for operation in self.repository.manifest(base, after)
+        }
+        groups: dict[tuple[str | None, str | None], list[Anchor]] = {}
 
-        for operation in operations:
-            path = operation.base
-            if not isinstance(path, str) or path not in selection:
+        for item in slices:
+            if not item.anchors:
                 continue
+            groups.setdefault(item.file, []).extend(item.anchors)
 
+        diff = self.repository.diff(base, after, context=3)
+
+        for file, anchors in groups.items():
+            operation = operations.get(file)
+            if operation is None:
+                operation = FileOperation(
+                    base=file[0],
+                    after=file[1],
+                    operation=(
+                        OperationType.ADD if file[0] is None
+                        else OperationType.DELETE if file[1] is None
+                        else OperationType.EDIT
+                    ),
+                )
             source = self.read(base, operation.base)
             target = self.read(after, operation.after)
-            size = (
-                len(source.decode("utf-8", "ignore").splitlines()) if source else 0,
-                len(target.decode("utf-8", "ignore").splitlines()) if target else 0,
+            size = {
+                "base": len(source.decode("utf-8", "ignore").splitlines())
+                if source is not None
+                else 0,
+                "after": len(target.decode("utf-8", "ignore").splitlines())
+                if target is not None
+                else 0,
+            }
+            primary = self._primary_window(size[anchor], anchors, anchor, n)
+            delta = self._locate(diff, operation)
+            lower = primary[0]
+            upper = primary[1] - 1
+
+            if force:
+                mapped_lower = self._map_line(delta, lower, anchor)
+                while mapped_lower is None and lower > 1:
+                    lower -= 1
+                    mapped_lower = self._map_line(delta, lower, anchor)
+                mapped_upper = self._map_line(delta, upper, anchor)
+                while mapped_upper is None and upper < size[anchor]:
+                    upper += 1
+                    mapped_upper = self._map_line(delta, upper, anchor)
+                if mapped_lower is None or mapped_upper is None:
+                    continue
+                primary = (lower, upper + 1)
+                secondary = (mapped_lower, mapped_upper + 1)
+            else:
+                mapped = [
+                    target
+                    for line in range(primary[0], primary[1])
+                    for target in [self._map_line(delta, line, anchor)]
+                    if target is not None
+                ]
+                secondary = (
+                    (min(mapped), max(mapped) + 1)
+                    if mapped
+                    else (0, 0)
+                )
+
+            base_range, after_range = (
+                (primary, secondary)
+                if anchor == "base"
+                else (secondary, primary)
             )
-            if size[0] == 0 or size[1] == 0:
-                continue
 
-            bounds = (min(selection[path]), max(selection[path]))
-            padding = 3
-            base_interval = bounds
-            after_interval: tuple[int | None, int | None] = (None, None)
-            delta: pygit2.Patch | None = None
-
-            while True:
-                delta = self._locate(
-                    self.repository.diff(base, after, context_lines=padding),
-                    operation,
+            if base_range == (0, 0) or after_range == (0, 0):
+                context = Context(
+                    base=base_range,
+                    after=after_range,
+                    changes=[Anchor(base=base_range, after=after_range)],
                 )
+            else:
                 if delta is None:
-                    break
-
-                mapping: dict[int, int] = {}
-                for hunk in delta.hunks:
-                    source_line = hunk.old_start + (1 if hunk.old_lines == 0 else 0)
-                    target_line = hunk.new_start + (1 if hunk.new_lines == 0 else 0)
-                    for line in hunk.lines:
-                        if line.origin == " ":
-                            mapping[source_line] = target_line
-                            source_line += 1
-                            target_line += 1
+                    continue
+                primary_range = base_range if anchor == "base" else after_range
+                for current in self.extract(delta):
+                    for change in current.changes:
+                        if not self._overlaps(
+                            change.base if anchor == "base" else change.after,
+                            primary_range,
+                        ):
                             continue
-                        if line.origin == "-":
-                            source_line += 1
-                            continue
-                        if line.origin == "+":
-                            target_line += 1
+                        base_range = (
+                            min(base_range[0], change.base[0]),
+                            max(base_range[1], change.base[1]),
+                        )
+                        after_range = (
+                            min(after_range[0], change.after[0]),
+                            max(after_range[1], change.after[1]),
+                        )
 
-                base_interval = (
-                    max(1, bounds[0] - padding),
-                    min(size[0], bounds[1] + padding),
+                scopes = [
+                    current
+                    for current in self.extract(delta)
+                    if self._overlaps(current.base, base_range)
+                    or self._overlaps(current.after, after_range)
+                ]
+                changes = [
+                    change
+                    for current in scopes
+                    for change in current.changes
+                    if self._overlaps(change.base, base_range)
+                    or self._overlaps(change.after, after_range)
+                ]
+                if not changes and scopes:
+                    changes = [
+                        change
+                        for current in scopes
+                        for change in current.changes
+                    ]
+                if not changes:
+                    continue
+                context = Context(
+                    base=base_range,
+                    after=after_range,
+                    changes=changes,
                 )
-                after_interval = (
-                    mapping.get(base_interval[0]),
-                    mapping.get(base_interval[1]),
-                )
-
-                if after_interval[0] is not None and after_interval[1] is not None:
-                    break
-
-                if base_interval == (1, size[0]):
-                    keys = sorted(mapping)
-                    if not keys:
-                        break
-                    base_interval = (keys[0], keys[-1])
-                    after_interval = (
-                        mapping[base_interval[0]],
-                        mapping[base_interval[1]],
-                    )
-                    break
-
-                padding += 1
-
-            if delta is None or after_interval[0] is None or after_interval[1] is None:
-                raise ValueError(
-                    f"SourceDelta.refine could not map interval for file {path}."
-                )
-
-            anchors = [
-                anchor
-                for context in self.extract(delta)
-                for anchor in context.changes
-                if not (
-                    anchor.base[1] <= base_interval[0]
-                    or anchor.base[0] >= base_interval[1] + 1
-                )
-            ]
 
             result.append(
                 self.project(
                     operation,
                     source,
                     target,
-                    [
-                        Context(
-                            base=(base_interval[0], base_interval[1] + 1),
-                            after=(after_interval[0], after_interval[1] + 1),
-                            changes=anchors,
-                        )
-                    ],
+                    [context],
                 )
             )
 
         return result
+
+    def _primary_window(
+        self,
+        size: int,
+        anchors: list[Anchor],
+        anchor: str,
+        n: int,
+    ) -> tuple[int, int]:
+        intervals: list[tuple[int, int]] = []
+        for item in anchors:
+            current = item.base if anchor == "base" else item.after
+            opposite = item.after if anchor == "base" else item.base
+            if current == (0, 0):
+                if opposite != (0, 0):
+                    raise ValueError(
+                        "SourceDelta.materialize requires anchors on the selected side."
+                    )
+                continue
+            intervals.append(current)
+
+        if not intervals:
+            raise ValueError(
+                "SourceDelta.materialize requires anchors on the selected side."
+            )
+
+        start = min(item[0] for item in intervals)
+        end = max(item[1] for item in intervals)
+        return (max(1, start - n), min(size + 1, end + n))
+
+    def _map_line(
+        self,
+        delta: pygit2.Patch | None,
+        line: int,
+        anchor: str,
+    ) -> int | None:
+        if delta is None:
+            return line
+
+        for hunk in delta.hunks:
+            base = hunk.old_start + (1 if hunk.old_lines == 0 else 0)
+            after = hunk.new_start + (1 if hunk.new_lines == 0 else 0)
+
+            for item in hunk.lines:
+                if item.origin == " ":
+                    if anchor == "base" and base == line:
+                        return after
+                    if anchor == "after" and after == line:
+                        return base
+                    base += 1
+                    after += 1
+                    continue
+                if item.origin == "-":
+                    if anchor == "base" and base == line:
+                        return None
+                    base += 1
+                    continue
+                if item.origin == "+":
+                    if anchor == "after" and after == line:
+                        return None
+                    after += 1
+
+        return line
+    def _overlaps(
+        self,
+        candidate: tuple[int, int],
+        interval: tuple[int, int],
+    ) -> bool:
+        if candidate == (0, 0) or interval == (0, 0):
+            return False
+        return not (
+            candidate[1] <= interval[0]
+            or candidate[0] >= interval[1]
+        )
 
     def _locate(self, diff: pygit2.Diff, file: FileOperation) -> pygit2.Patch | None:
         for item in diff:
@@ -805,10 +942,12 @@ class SourceDelta:
         after: bytes | None,
         hunks: List[Context],
     ) -> PatchedFile:
+        source_ref = f"a/{file.base}" if file.base else "/dev/null"
+        target_ref = f"b/{file.after}" if file.after else "/dev/null"
         result = PatchedFile(
-            patch_info=PatchInfo(),
-            source=f"a/{file.base}" if file.base else "/dev/null",
-            target=f"b/{file.after}" if file.after else "/dev/null",
+            patch_info=PatchInfo([f"diff --git {source_ref} {target_ref}\n"]),
+            source=source_ref,
+            target=target_ref,
         )
 
         source = (

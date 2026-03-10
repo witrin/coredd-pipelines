@@ -103,33 +103,67 @@ class VersionControl:
 
     def blame(
         self, path: str, commit: str, lines: list[tuple[int, int]]
-    ) -> list[str]:
-        """Return deduplicated commit SHAs that last touched *lines* at *commit*.
+    ) -> list[tuple[str | None, tuple[int, int] | None]]:
+        """Return aligned blame results for *lines* at *commit*.
 
-        *lines* is a list of ``(start_line, end_line)`` 1-indexed ranges.
-        Results are sorted by commit date descending.
+        *lines* is a list of ``(start_line, end_line)`` 1-indexed inclusive
+        ranges. The result has the same length and order. Each entry contains
+        the blamed commit SHA and the corresponding origin line range in that
+        blamed commit, or ``(None, None)`` when the range cannot be resolved to
+        one contiguous blame hunk.
         """
         oid = pygit2.Oid(hex=commit)
         blame_result = self._repository.blame(path, newest_commit=oid)
-
-        commits: dict[str, int] = {}
+        result: list[tuple[str | None, tuple[int, int] | None]] = []
 
         for start_line, end_line in lines:
-            for lineno in range(start_line, end_line + 1):
-                try:
-                    hunk = blame_result.for_line(lineno)
-                except IndexError:
-                    continue
-                sha = str(hunk.final_commit_id)
-                if sha not in commits:
-                    obj = self._repository.get(sha)
-                    if obj is not None:
-                        c = obj.peel(pygit2.Commit)
-                        commits[sha] = c.commit_time
-                    else:
-                        commits[sha] = 0
+            if start_line > end_line:
+                result.append((None, None))
+                continue
 
-        return sorted(commits, key=lambda s: commits[s], reverse=True)
+            commit_sha: str | None = None
+            origin_start: int | None = None
+            origin_end: int | None = None
+            valid = True
+
+            for line in range(start_line, end_line + 1):
+                try:
+                    hunk = blame_result.for_line(line)
+                except IndexError:
+                    valid = False
+                    break
+
+                sha = str(hunk.final_commit_id)
+                origin_line = (
+                    hunk.orig_start_line_number
+                    + line
+                    - hunk.final_start_line_number
+                )
+
+                if commit_sha is None:
+                    commit_sha = sha
+                    origin_start = origin_line
+                    origin_end = origin_line
+                    continue
+
+                if sha != commit_sha or origin_line != origin_end + 1:
+                    valid = False
+                    break
+
+                origin_end = origin_line
+
+            if (
+                not valid
+                or commit_sha is None
+                or origin_start is None
+                or origin_end is None
+            ):
+                result.append((None, None))
+                continue
+
+            result.append((commit_sha, (origin_start, origin_end)))
+
+        return result
 
     def materialize(
         self, base: str, after: str, directory: str | Path
@@ -253,7 +287,7 @@ class VersionControl:
         base: str,
         after: str,
         *,
-        context_lines: int = 0,
+        context: int = 0,
     ) -> pygit2.Diff:
         """
         Return libgit2-backed diff between base and after.
@@ -275,7 +309,7 @@ class VersionControl:
         diff = self._repository.diff(
             base_commit.tree,
             after_commit.tree,
-            context_lines=context_lines,
+            context_lines=context,
             interhunk_lines=0,
         )
 

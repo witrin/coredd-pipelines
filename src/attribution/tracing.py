@@ -277,6 +277,7 @@ class TracingCallbackHandler(BaseCallbackHandler):
             event="llm_end",
             payload={
                 "duration": self._duration(started_at),
+                "llm_output": response.llm_output,
                 "llm_output_type": type(response.llm_output).__name__,
                 "llm_output_keys": (
                     sorted(str(key) for key in response.llm_output.keys())
@@ -287,6 +288,10 @@ class TracingCallbackHandler(BaseCallbackHandler):
                 "generation_count": sum(
                     len(batch) for batch in response.generations
                 ),
+                "generations": [
+                    [self._generation(item) for item in batch]
+                    for batch in response.generations
+                ],
                 "logprobs": self._logprobs(response),
             },
         )
@@ -365,6 +370,16 @@ class TracingCallbackHandler(BaseCallbackHandler):
             "name": getattr(message, "name", None),
             "additional_kwargs": getattr(message, "additional_kwargs", None),
             "response_metadata": getattr(message, "response_metadata", None),
+        }
+
+    @classmethod
+    def _generation(cls, item: object) -> dict[str, object]:
+        message = getattr(item, "message", None)
+        return {
+            "type": type(item).__name__,
+            "text": getattr(item, "text", None),
+            "message": cls._message(message) if message is not None else None,
+            "generation_info": getattr(item, "generation_info", None),
         }
 
     @classmethod

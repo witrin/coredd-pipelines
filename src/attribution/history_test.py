@@ -102,20 +102,36 @@ class TestVersionControlBlame(unittest.TestCase):
     def tearDown(self) -> None:
         self._fix.__exit__(None, None, None)
 
-    def test_blame_returns_feature_and_fix_commits(self) -> None:
-        shas = self.candidate.blame("foo.txt", self.sha_x2, [(1, 5)])
-        self.assertIn(self.sha_i, shas)
-        self.assertIn(self.sha_x1, shas)
-        self.assertIn(self.sha_x2, shas)
+    def test_blame_preserves_input_order(self) -> None:
+        result = self.candidate.blame(
+            "foo.txt",
+            self.sha_x2,
+            [(1, 1), (2, 2), (5, 5)],
+        )
+        self.assertEqual(
+            result,
+            [
+                (self.sha_i, (1, 1)),
+                (self.sha_x1, (2, 2)),
+                (self.sha_x2, (5, 5)),
+            ],
+        )
 
     def test_blame_single_line_fix(self) -> None:
-        shas = self.candidate.blame("foo.txt", self.sha_x2, [(2, 2)])
-        self.assertEqual(shas, [self.sha_x1])
+        result = self.candidate.blame("foo.txt", self.sha_x2, [(2, 2)])
+        self.assertEqual(result, [(self.sha_x1, (2, 2))])
 
     def test_blame_unchanged_line(self) -> None:
-        shas = self.candidate.blame("foo.txt", self.sha_x2, [(1, 1)])
-        self.assertEqual(shas, [self.sha_i])
+        result = self.candidate.blame("foo.txt", self.sha_x2, [(1, 1)])
+        self.assertEqual(result, [(self.sha_i, (1, 1))])
 
+    def test_blame_returns_none_for_mixed_ranges(self) -> None:
+        result = self.candidate.blame("foo.txt", self.sha_x2, [(1, 5)])
+        self.assertEqual(result, [(None, None)])
+
+    def test_blame_returns_none_for_out_of_range_lines(self) -> None:
+        result = self.candidate.blame("foo.txt", self.sha_x2, [(9, 9)])
+        self.assertEqual(result, [(None, None)])
 
 class TestVersionControlMaterialize(unittest.TestCase):
     def setUp(self) -> None:

@@ -61,6 +61,12 @@ class Context:
 
 
 @dataclass(frozen=True)
+class Slice:
+    file: tuple[str | None, str | None]
+    anchors: list[Anchor]
+
+
+@dataclass(frozen=True)
 class Change:
     number: int
     description: str

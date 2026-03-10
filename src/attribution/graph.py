@@ -2,9 +2,8 @@ from __future__ import annotations
 from typing import Protocol, TypedDict
 
 from pydantic import BaseModel, ValidationError
-from unidiff import patch
 
-from benchmark.attribution.domain import Change
+from benchmark.attribution.domain import Anchor, Change, Slice
 from benchmark.attribution.diff import PatchRenderer, SourceDelta
 from benchmark.attribution.tracing import (
     AttributionRunnable,
@@ -91,13 +90,53 @@ class VerifyState(TypedDict, total=False):
 class BlameState(TypedDict, total=False):
     """Blame-phase working state."""
 
-    candidates: list[str]
+    candidates: list[BlameCandidateState]
 
 
 class CompareState(TypedDict, total=False):
     """Compare-phase working state."""
 
-    candidate: CandidateState
+    index: int
+    candidate: CompareItemState
+    parent: CompareItemState
+
+
+class BlameCandidateState(TypedDict, total=False):
+    """One prepared candidate pair."""
+
+    commit: str
+    parent: str | None
+    slices: list[SliceState]
+
+
+class AnchorState(TypedDict, total=False):
+    """One serialized anchor."""
+
+    base: tuple[int, int]
+    after: tuple[int, int]
+
+
+class SliceState(TypedDict, total=False):
+    """One serialized slice."""
+
+    file: tuple[str | None, str | None]
+    anchors: list[AnchorState]
+
+
+class CompareStepState(TypedDict, total=False):
+    """One compare pass result."""
+
+    passed: bool
+    reason: str
+
+
+class CompareItemState(TypedDict, total=False):
+    """One compare-side result."""
+
+    commit: str | None
+    presence: CompareStepState
+    assessment: CompareStepState
+    defect: bool
 
 
 class ExplainResponseSchema(BaseModel):
@@ -117,6 +156,11 @@ class HintResponseSchema(BaseModel):
 
 class VerifyResponseSchema(BaseModel):
     defect: bool
+    reason: str
+
+
+class CompareResponseSchema(BaseModel):
+    present: bool
     reason: str
 
 
@@ -243,19 +287,14 @@ class ExplainNode:
         """Derive a rationale for the corrective change."""
         correction = state.get("correction")
         summary = state.get("summary")
-        if (
-            correction is None
-            or not isinstance(summary, str)
-            or self._diff is None
-            or self._llm is None
-        ):
+        if correction is None or summary is None or self._diff is None or self._llm is None:
             raise ValueError("ExplainNode requires correction, summary, diff, and llm")
 
         nodes = state.get("nodes") or {}
         explain = nodes.get("explain") or {}
         runs = list(explain.get("runs") or [])
         samples = explain.get("samples", self._samples)
-        if not isinstance(samples, int) or samples < 1:
+        if samples is None or samples < 1:
             samples = self._samples
         operations = self._diff.repository.manifest(
             correction.base,
@@ -388,7 +427,9 @@ class ExplainNode:
             summary,
             "",
             "Pull request description:",
+            "```markdown",
             description or "(none)",
+            "```",
             "",
             "Commit messages in (base, after]:",
         ]
@@ -463,7 +504,7 @@ class AggregateNode:
             raise ValueError("AggregateNode requires llm.")
 
         summary = state.get("summary")
-        if not isinstance(summary, str):
+        if summary is None:
             raise ValueError("AggregateNode requires summary.")
 
         allowed = list(state.get("files") or [])
@@ -476,11 +517,7 @@ class AggregateNode:
             valid_files: list[str] = []
             valid_seen: set[str] = set()
             for path in run.get("files") or []:
-                if (
-                    not isinstance(path, str)
-                    or path in valid_seen
-                    or path not in allowed_set
-                ):
+                if path in valid_seen or path not in allowed_set:
                     continue
                 valid_seen.add(path)
                 valid_files.append(path)
@@ -488,7 +525,7 @@ class AggregateNode:
                     continue
                 seen.add(path)
                 files.append(path)
-            if isinstance(rationale, str) and rationale.strip():
+            if rationale and rationale.strip():
                 hypotheses.append(
                     {
                         "index": run.get("index"),
@@ -586,13 +623,16 @@ class ExpandNode:
     def run(self, state: AttributionGraphState) -> dict[str, object]:
         """Expand semantic context around the selected changes."""
         correction = state.get("correction")
-        selected_files = list(state.get("files") or [])
         if correction is None:
             raise ValueError("ExpandNode requires correction.")
         if self._diff is None:
             raise ValueError("ExpandNode requires diff.")
+        files = state.get("files")
+        if files is None:
+            return {"nodes": {**(state.get("nodes") or {}), "expand": {}}}
+        selected_files = [path for path in files if path]
         if not selected_files:
-            raise ValueError("ExpandNode requires files.")
+            return {"nodes": {**(state.get("nodes") or {}), "expand": {}}}
 
         selected_paths = set(selected_files)
         operations = [
@@ -604,7 +644,7 @@ class ExpandNode:
             if (operation.after or operation.base) in selected_paths
         ]
         if not operations:
-            raise ValueError("ExpandNode requires files present in the correction.")
+            return {"nodes": {**(state.get("nodes") or {}), "expand": {}}}
 
         expansion = self._diff.expand(
             correction.base,
@@ -643,14 +683,12 @@ class HintNode:
         nodes = state.get("nodes") or {}
         expand = nodes.get("expand") or {}
         expansion = expand.get("expansion")
-        if (
-            self._llm is None
-            or not isinstance(rationale, str)
-            or not rationale.strip()
-            or not isinstance(expansion, str)
-            or not expansion.strip()
-        ):
+        if self._llm is None:
             raise ValueError("HintNode requires rationale, expansion, and llm.")
+        if rationale is None or expansion is None:
+            return {"nodes": {**nodes, "hint": {"causes": [], "corrections": []}}}
+        if not rationale.strip() or not expansion.strip():
+            return {"nodes": {**nodes, "hint": {"causes": [], "corrections": []}}}
 
         renderer = self._renderer(expansion)
         response = self._structured_model().invoke(
@@ -687,7 +725,7 @@ class HintNode:
             return PatchRenderer(expansion)
         except Exception as error:
             raise ValueError(
-                "HintNode requires parseable expanded patch content."
+                f"HintNode requires parseable expanded patch content: {expansion!r}"
             ) from error
 
     def _build_prompt(
@@ -699,10 +737,9 @@ class HintNode:
         lines = [
             self._instruction
             or (
-                "Identify the lines that describe the causes of the bug and the lines that "
-                "implement the corrections.\n"
-                "Use the reference labels from the left column exactly as provided.\n"
-                "Use only the visible referenced lines from the provided context."
+                "Identify every line that is part of the defect and every line that "
+                "is part of the fix.\n"
+                "Use the reference labels from the left column exactly as provided."
             ),
             "Respond only in JSON.",
             (
@@ -760,6 +797,32 @@ class RefineNode:
     def __init__(self, diff: SourceDelta | None = None) -> None:
         self._diff = diff
 
+    def _empty(
+        self,
+        nodes: dict[str, object],
+    ) -> dict[str, object]:
+        return {"nodes": {**nodes, "refine": {}}}
+
+    def _anchors(
+        self,
+        slices: list[Slice],
+        anchor: str,
+    ) -> list[Slice]:
+        result: list[Slice] = []
+        for item in slices:
+            anchors = [
+                current
+                for current in item.anchors
+                if (
+                    current.base != (0, 0)
+                    if anchor == "base"
+                    else current.after != (0, 0)
+                )
+            ]
+            if anchors:
+                result.append(Slice(file=item.file, anchors=anchors))
+        return result
+
     def run(self, state: AttributionGraphState) -> dict[str, object]:
         """Reduce the expansion context to a focused view."""
         correction = state.get("correction")
@@ -768,35 +831,38 @@ class RefineNode:
         hint = nodes.get("hint") or {}
         expansion = expand.get("expansion")
         causes = hint.get("causes")
-        if (
-            correction is None
-            or self._diff is None
-            or not isinstance(expansion, str)
-            or not expansion.strip()
-            or not isinstance(causes, list)
-        ):
+        if correction is None or self._diff is None:
             raise ValueError("RefineNode requires correction, expansion, causes, and diff.")
+        if expansion is None or causes is None:
+            return self._empty(nodes)
+        if not expansion.strip() or not causes:
+            return self._empty(nodes)
 
         references = [
             reference
             for item in causes
-            if isinstance(item, dict)
             for reference in list(item.get("references") or [])
-            if isinstance(reference, str)
         ]
+        if not references:
+            return {"nodes": {**nodes, "refine": {}}}
         try:
-            refined = self._diff.refine(
-                patch.PatchSet(
+            slices = self._anchors(
+                PatchRenderer(
                     expansion if expansion.endswith("\n") else f"{expansion}\n"
-                ),
-                references,
+                ).slices(references),
+                "base",
+            )
+            if not slices:
+                return self._empty(nodes)
+            refinement = self._diff.materialize(
                 correction.base,
                 correction.after,
+                slices,
+                "base",
+                force=True,
             )
         except Exception as error:
-            if isinstance(error, ValueError):
-                raise
-            raise ValueError("RefineNode requires parseable expanded patch content.") from error
+            raise ValueError(f"RefineNode requires parseable expanded patch content: {expansion!r}") from error
 
         refine = nodes.get("refine") or {}
         return {
@@ -804,7 +870,7 @@ class RefineNode:
                 **nodes,
                 "refine": {
                     **refine,
-                    "refinement": str(refined),
+                    "refinement": str(refinement),
                 },
             },
         }
@@ -829,31 +895,26 @@ class VerifyNode:
         refine = nodes.get("refine") or {}
         refinement = refine.get("refinement")
         causes = hint.get("causes")
-        corrections = hint.get("corrections")
-        if (
-            self._llm is None
-            or not isinstance(rationale, str)
-            or not rationale.strip()
-            or not isinstance(refinement, str)
-            or not refinement.strip()
-            or not isinstance(causes, list)
-            or not isinstance(corrections, list)
-        ):
+        if self._llm is None:
             raise ValueError(
                 "VerifyNode requires rationale, hint, refinement, and llm."
             )
+        if rationale is None or refinement is None or causes is None:
+            return {"nodes": {**nodes, "verify": {}}}
+        if not rationale or not refinement or not causes:
+            return {"nodes": {**nodes, "verify": {}}}
 
         renderer = self._renderer(refinement)
         base_snippet = renderer.base()
         after_snippet = renderer.after()
         if not base_snippet.strip() or not after_snippet.strip():
-            raise ValueError("VerifyNode requires projected refined contexts.")
+            return {"nodes": {**nodes, "verify": {}}}
         model = self._structured_model()
         base = self._parse_response(
             model.invoke(
                 self._build_prompt(
                     rationale=rationale.strip(),
-                    hints=self._hint(causes, corrections),
+                    hints=self._hint(causes),
                     snippet=base_snippet,
                 )
             )
@@ -862,7 +923,7 @@ class VerifyNode:
             model.invoke(
                 self._build_prompt(
                     rationale=rationale.strip(),
-                    hints=self._hint(causes, corrections),
+                    hints=self._hint(causes),
                     snippet=after_snippet,
                 )
             )
@@ -891,7 +952,7 @@ class VerifyNode:
             return PatchRenderer(refinement)
         except Exception as error:
             raise ValueError(
-                "VerifyNode requires parseable refined patch content."
+                f"VerifyNode requires parseable refined patch content: {refinement!r}"
             ) from error
 
     def _build_prompt(
@@ -910,8 +971,9 @@ class VerifyNode:
                     "- the root cause of a bug\n"
                     "- explanations of that bug\n"
                     "\n"
-                    "Your task is to determine whether the provided code snippet "
-                    "contains that bug."
+                    "Your task is to check whether the defect described by the "
+                    "root cause and explanations appears in the code snippet.\n"
+                    "Your boolean and your reason must agree."
                 ),
                 "Respond only in JSON.",
                 'Use this schema: {"defect": boolean, "reason": string}.',
@@ -930,14 +992,11 @@ class VerifyNode:
     def _hint(
         self,
         causes: list[object],
-        corrections: list[object],
     ) -> str:
         lines = [
             f"- {item['reason'].strip()}"
             for item in causes
-            if isinstance(item, dict)
-            and isinstance(item.get("reason"), str)
-            and item["reason"].strip()
+            if item.get("reason") and item["reason"].strip()
         ]
         if not lines:
             raise ValueError("VerifyNode requires non-empty cause reasons.")
@@ -972,6 +1031,45 @@ class BlameNode:
     def __init__(self, diff: SourceDelta | None = None) -> None:
         self._diff = diff
 
+    def _slice(self, value: Slice) -> SliceState:
+        return {
+            "file": value.file,
+            "anchors": [
+                {
+                    "base": anchor.base,
+                    "after": anchor.after,
+                }
+                for anchor in value.anchors
+            ],
+        }
+
+    def _empty(
+        self,
+        nodes: dict[str, object],
+    ) -> dict[str, object]:
+        return {
+            "nodes": {
+                **nodes,
+                "blame": {
+                    **(nodes.get("blame") or {}),
+                    "candidates": [],
+                },
+            },
+        }
+
+    def _exists(
+        self,
+        commit: str | None,
+        path: str,
+    ) -> bool:
+        if commit is None:
+            return False
+        try:
+            self._diff.repository.blob(commit, path)
+        except FileNotFoundError:
+            return False
+        return True
+
     def run(self, state: AttributionGraphState) -> dict[str, object]:
         """Extract candidate commits from the expanded hint references."""
         correction = state.get("correction")
@@ -980,89 +1078,79 @@ class BlameNode:
         hint = nodes.get("hint") or {}
         expansion = expand.get("expansion")
         causes = hint.get("causes")
-        if (
-            correction is None
-            or self._diff is None
-            or not isinstance(expansion, str)
-            or not expansion.strip()
-            or not isinstance(causes, list)
-        ):
+        if correction is None or self._diff is None:
             raise ValueError("BlameNode requires correction, expansion, causes, and diff.")
+        if expansion is None or causes is None:
+            return self._empty(nodes)
+        if not expansion.strip() or not causes:
+            return self._empty(nodes)
 
         source = expansion if expansion.endswith("\n") else f"{expansion}\n"
         try:
             renderer = PatchRenderer(source)
-            expansion = patch.PatchSet(source)
         except Exception as error:
             raise ValueError(
-                "BlameNode requires parseable expanded patch content."
+                f"BlameNode requires parseable expanded patch contentt: {source!r}"
             ) from error
 
-        grouped: dict[str, set[int]] = {}
-        for item in causes:
-            if not isinstance(item, dict):
-                continue
-            for reference in list(item.get("references") or []):
-                if not isinstance(reference, str):
-                    continue
-                resolved = renderer.resolve(reference)
-                if resolved is None:
-                    continue
-                patched = expansion[resolved.file]
-                line = patched[resolved.hunk][resolved.line]
-                if not isinstance(line.source_line_no, int):
-                    continue
-                path = patched.source_file
-                if not isinstance(path, str):
-                    continue
-                if path.startswith("a/"):
-                    path = path[2:]
-                if path == "" or path == "/dev/null":
-                    continue
-                grouped.setdefault(path, set()).add(line.source_line_no)
-
         blame = nodes.get("blame") or {}
-        if not grouped:
-            return {
-                "nodes": {
-                    **nodes,
-                    "blame": {
-                        **blame,
-                        "candidates": [],
-                    },
-                },
-            }
+        slices = renderer.slices(
+            [
+                reference
+                for item in causes
+                for reference in list(item.get("references") or [])
+            ]
+        )
+        if not slices:
+            return self._empty(nodes)
 
-        ranked: dict[str, object] = {}
-        for path, lines in grouped.items():
-            ranges: list[tuple[int, int]] = []
-            start: int | None = None
-            stop: int | None = None
-            for line in sorted(lines):
-                if start is None:
-                    start = line
-                    stop = line
+        grouped: dict[tuple[str, str | None], list[Slice]] = {}
+        times: dict[str, object] = {}
+
+        for current in slices:
+            path = current.file[0]
+            if path is None or path == "":
+                continue
+            entries = [
+                (anchor.base[0], anchor.base[1] - 1)
+                for anchor in current.anchors
+                if anchor.base != (0, 0)
+            ]
+            if not entries:
+                continue
+            blamed = self._diff.repository.blame(path, correction.base, entries)
+
+            for _, item in zip(entries, blamed):
+                commit, origin = item
+                if commit is None or origin is None:
                     continue
-                if line == stop + 1:
-                    stop = line
-                    continue
-                ranges.append((start, stop))
-                start = line
-                stop = line
-            if start is not None and stop is not None:
-                ranges.append((start, stop))
-            for commit in self._diff.repository.blame(path, correction.base, ranges):
-                if commit in ranked:
-                    continue
-                ranked[commit] = self._diff.repository.meta(commit).time
+                parents = self._diff.repository.parents(commit)
+                parent = parents[0] if parents else None
+                anchor = Anchor(
+                    base=(0, 0),
+                    after=(origin[0], origin[1] + 1),
+                )
+                grouped.setdefault((commit, parent), []).append(
+                    Slice(
+                        file=((path if self._exists(parent, path) else None), path),
+                        anchors=[anchor],
+                    )
+                )
+                if commit not in times:
+                    times[commit] = self._diff.repository.meta(commit).time
 
         candidates = [
-            commit
-            for commit, _ in sorted(
-                ranked.items(),
-                key=lambda item: item[1],
+            {
+                "commit": commit,
+                "parent": parent,
+                "slices": [self._slice(item) for item in grouped[(commit, parent)]],
+            }
+            for commit, parent in sorted(
+                grouped,
+                key=lambda key: times[key[0]],
                 reverse=True,
             )
+            if grouped[(commit, parent)]
         ]
         return {
             "nodes": {
@@ -1078,9 +1166,303 @@ class BlameNode:
 class CompareNode:
     """Compare the current candidate commit against its parent."""
 
+    def __init__(
+        self,
+        diff: SourceDelta | None = None,
+        llm: object | None = None,
+        instruction: str | None = None,
+    ) -> None:
+        self._diff = diff
+        self._llm = llm
+        self._instruction = instruction
+
+    def _empty(
+        self,
+        nodes: dict[str, object],
+        compare: dict[str, object],
+        index: int,
+    ) -> dict[str, object]:
+        return {
+            "nodes": {
+                **nodes,
+                "compare": {
+                    **compare,
+                    "index": index,
+                    "candidate": {},
+                    "parent": {},
+                },
+            },
+        }
+
+    def _slices(self, values: list[SliceState]) -> list[Slice]:
+        try:
+            return [
+                Slice(
+                    file=tuple(item["file"]),
+                    anchors=[
+                        Anchor(
+                            base=tuple(anchor["base"]),
+                            after=tuple(anchor["after"]),
+                        )
+                        for anchor in item["anchors"]
+                    ],
+                )
+                for item in values
+            ]
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("CompareNode requires prepared candidate slices.") from error
+
+    def _candidate(
+        self,
+        value: object,
+    ) -> tuple[str, str, list[Slice]]:
+        try:
+            item = dict(value)
+            commit = item["commit"]
+            parent = item["parent"]
+            slices = self._slices(item["slices"])
+        except (TypeError, KeyError, ValueError) as error:
+            raise ValueError("CompareNode requires prepared candidate slices.") from error
+        if not commit or not parent or not slices:
+            raise ValueError("CompareNode requires prepared candidate slices.")
+        return commit, parent, slices
+
     def run(self, state: AttributionGraphState) -> dict[str, object]:
         """Compare the current candidate commit against its parent."""
-        return {}
+        rationale = state.get("rationale")
+        nodes = state.get("nodes") or {}
+        blame = nodes.get("blame") or {}
+        hint = nodes.get("hint") or {}
+        compare = nodes.get("compare") or {}
+        causes = hint.get("causes")
+        candidates = blame.get("candidates")
+        current = compare.get("index", -1)
+        if self._llm is None or self._diff is None:
+            raise ValueError("CompareNode requires rationale, causes, candidates, and llm.")
+        if rationale is None or causes is None or candidates is None:
+            return self._empty(nodes, compare, current if current is not None else -1)
+        if not rationale or not causes or not candidates:
+            return self._empty(nodes, compare, current if current is not None else -1)
+        index = current + 1
+        if index < 0 or index >= len(candidates):
+            return self._empty(nodes, compare, current)
+        commit, parent, slices = self._candidate(candidates[index])
+        refinement = str(
+            self._diff.materialize(
+                parent,
+                commit,
+                slices,
+                "after",
+                force=False,
+            )
+        )
+        renderer = self._renderer(refinement)
+        before = renderer.base()
+        after = renderer.after()
+
+        hints = self._hint(causes)
+        presence = self._presence_model()
+        assessment = self._assessment_model()
+        candidate_presence, candidate_assessment = self._compare(
+            presence=presence,
+            assessment=assessment,
+            rationale=rationale.strip(),
+            hints=hints,
+            snippet=after,
+        )
+        parent_presence, parent_assessment = self._compare(
+            presence=presence,
+            assessment=assessment,
+            rationale=rationale.strip(),
+            hints=hints,
+            snippet=before,
+        )
+        return {
+            "nodes": {
+                **nodes,
+                "compare": {
+                    **compare,
+                    "index": index,
+                    "candidate": {
+                        "commit": commit,
+                        "presence": {
+                            "passed": candidate_presence.present,
+                            "reason": candidate_presence.reason,
+                        },
+                        "assessment": {
+                            "passed": candidate_assessment.defect,
+                            "reason": candidate_assessment.reason,
+                        },
+                        "defect": (
+                            candidate_presence.present is True
+                            and candidate_assessment.defect is True
+                        ),
+                    },
+                    "parent": {
+                        "commit": parent,
+                        "presence": {
+                            "passed": parent_presence.present,
+                            "reason": parent_presence.reason,
+                        },
+                        "assessment": {
+                            "passed": parent_assessment.defect,
+                            "reason": parent_assessment.reason,
+                        },
+                        "defect": (
+                            parent_presence.present is True
+                            and parent_assessment.defect is True
+                        ),
+                    },
+                },
+            },
+        }
+
+    def _compare(
+        self,
+        *,
+        presence: object,
+        assessment: object,
+        rationale: str,
+        hints: str,
+        snippet: str,
+    ) -> tuple[CompareResponseSchema, VerifyResponseSchema]:
+        if not snippet.strip():
+            return (
+                CompareResponseSchema(
+                    present=False,
+                    reason="Code snippet is empty.",
+                ),
+                VerifyResponseSchema(
+                    defect=False,
+                    reason="Code snippet is empty.",
+                ),
+            )
+        return (
+            self._parse_presence(
+                presence.invoke(self._presence_prompt(hints=hints, snippet=snippet))
+            ),
+            self._parse_assessment(
+                assessment.invoke(
+                    self._assessment_prompt(
+                        rationale=rationale,
+                        hints=hints,
+                        snippet=snippet,
+                    )
+                )
+            ),
+        )
+
+    def _renderer(self, refinement: str) -> PatchRenderer:
+        try:
+            return PatchRenderer(refinement)
+        except Exception as error:
+            raise ValueError(
+                f"CompareNode requires parseable unified patch content: {refinement!r}"
+            ) from error
+
+    def _hint(self, causes: list[object]) -> str:
+        lines = [
+            f"- {item['reason'].strip()}"
+            for item in causes
+            if item.get("reason") and item["reason"].strip()
+        ]
+        if not lines:
+            return ""
+        return "\n".join(lines)
+
+    def _presence_prompt(self, *, hints: str, snippet: str) -> str:
+        return "\n".join(
+            [
+                self._instruction
+                or (
+                    "Check whether the code shown in the snippet matches the "
+                    "explanations.\n"
+                    "Be conservative. If you are unsure, return `present: false`."
+                ),
+                "Respond only in JSON.",
+                'Use this schema: {"present": boolean, "reason": string}.',
+                "",
+                "Explanations:",
+                hints,
+                "",
+                "Code snippet:",
+                snippet,
+            ]
+        )
+
+    def _assessment_prompt(
+        self,
+        *,
+        rationale: str,
+        hints: str,
+        snippet: str,
+    ) -> str:
+        return "\n".join(
+            [
+                self._instruction
+                or (
+                    "Check whether the defect described by the "
+                    "root cause and explanations appears in the code snippet.\n"
+                    "Your boolean and your reason must agree.\n"
+                    "Be conservative. If you are unsure, return `defect: false`."
+                ),
+                "Respond only in JSON.",
+                'Use this schema: {"defect": boolean, "reason": string}.',
+                "",
+                "Root cause:",
+                rationale,
+                "",
+                "Explanations:",
+                hints,
+                "",
+                "Code snippet:",
+                snippet,
+            ]
+        )
+
+    def _presence_model(self) -> object:
+        try:
+            return self._llm.with_structured_output(
+                CompareResponseSchema,
+                method="json_schema",
+                strict=True,
+            )
+        except AttributeError as error:
+            raise ValueError(
+                "CompareNode requires an llm that supports structured schema mode."
+            ) from error
+        except TypeError as error:
+            raise ValueError(
+                "CompareNode requires an llm that supports structured schema mode."
+            ) from error
+
+    def _assessment_model(self) -> object:
+        try:
+            return self._llm.with_structured_output(
+                VerifyResponseSchema,
+                method="json_schema",
+                strict=True,
+            )
+        except AttributeError as error:
+            raise ValueError(
+                "CompareNode requires an llm that supports structured schema mode."
+            ) from error
+        except TypeError as error:
+            raise ValueError(
+                "CompareNode requires an llm that supports structured schema mode."
+            ) from error
+
+    def _parse_presence(self, response: object) -> CompareResponseSchema:
+        try:
+            return CompareResponseSchema.model_validate(response)
+        except (ValidationError, TypeError, ValueError) as error:
+            raise ValueError("CompareNode requires structured presence output.") from error
+
+    def _parse_assessment(self, response: object) -> VerifyResponseSchema:
+        try:
+            return VerifyResponseSchema.model_validate(response)
+        except (ValidationError, TypeError, ValueError) as error:
+            raise ValueError("CompareNode requires structured assessment output.") from error
 
 
 class SelectNode:
@@ -1088,6 +1470,12 @@ class SelectNode:
 
     def run(self, state: AttributionGraphState) -> dict[str, object]:
         """Accept the first candidate whose comparison matches the target dichotomy."""
+        nodes = state.get("nodes") or {}
+        compare = nodes.get("compare") or {}
+        candidate = compare.get("candidate") or {}
+        parent = compare.get("parent") or {}
+        if candidate.get("defect") is True and parent.get("defect") is False:
+            return {"introducer": candidate.get("commit")}
         return {}
 
 
@@ -1245,7 +1633,7 @@ class AttributionGraph:
         explain = nodes.get("explain") or {}
         runs = list(explain.get("runs") or [])
         samples = explain.get("samples")
-        if not isinstance(samples, int) or samples < 1:
+        if samples is None or samples < 1:
             return "explain"
         if len(runs) < min(samples, max(1, len(state.get("files") or []))):
             return "explain"
@@ -1260,8 +1648,9 @@ class AttributionGraph:
         blame = nodes.get("blame") or {}
         compare = nodes.get("compare") or {}
         candidates = blame.get("candidates") or []
-        candidate = compare.get("candidate") or {}
-        current_index = candidate.get("index", 0)
+        if not compare or "index" not in compare:
+            return "abort"
+        current_index = compare.get("index", -1)
         if current_index + 1 < len(candidates):
             return "compare"
 

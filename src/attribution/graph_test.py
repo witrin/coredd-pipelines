@@ -8,7 +8,14 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from benchmark.attribution.diff import SourceDelta
-from benchmark.attribution.domain import Change, Commit, FileOperation, OperationType
+from benchmark.attribution.domain import (
+    Anchor,
+    Change,
+    Commit,
+    FileOperation,
+    OperationType,
+    Slice,
+)
 from benchmark.attribution.history import VersionControl
 from benchmark.attribution.graph import (
     AggregateState,
@@ -16,6 +23,7 @@ from benchmark.attribution.graph import (
     AttributionGraph,
     AttributionGraphState,
     BlameNode,
+    CompareNode,
     ExpandNode,
     ExplainNode,
     ExplainResponseSchema,
@@ -24,6 +32,7 @@ from benchmark.attribution.graph import (
     HintNode,
     HintState,
     RefineNode,
+    SelectNode,
     SummarizeNode,
     VerifyNode,
     VerifyResponseSchema,
@@ -36,17 +45,22 @@ from benchmark.attribution.tracing import (
 )
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
+from unidiff import PatchSet
 
 class TestAttributionGraph(unittest.TestCase):
     def _graph(self) -> AttributionGraph:
+        repository = object.__new__(VersionControl)
+        delta = SourceDelta(repository)
         return AttributionGraph(
             summarize=SummarizeNode(),
             explain=ExplainNode(),
             aggregate=AggregateNode(),
             expand=ExpandNode(),
             hint=HintNode(),
-            refine=RefineNode(),
+            refine=RefineNode(diff=delta),
             verify=VerifyNode(),
+            blame=BlameNode(diff=delta),
+            compare=CompareNode(diff=delta),
         )
 
     def test_import_smoke(self) -> None:
@@ -86,8 +100,8 @@ class TestAttributionGraph(unittest.TestCase):
         self.assertEqual(
             self._graph().route_select({
                 "nodes": {
-                    "blame": {"candidates": ["a", "b"]},
-                    "compare": {"candidate": {"index": 0}},
+                    "blame": {"candidates": [{"commit": "a"}, {"commit": "b"}]},
+                    "compare": {"index": 0},
                 },
             }),
             "compare",
@@ -97,8 +111,19 @@ class TestAttributionGraph(unittest.TestCase):
         self.assertEqual(
             self._graph().route_select({
                 "nodes": {
-                    "blame": {"candidates": ["a"]},
-                    "compare": {"candidate": {"index": 0}},
+                    "blame": {"candidates": [{"commit": "a"}]},
+                    "compare": {"index": 0},
+                },
+            }),
+            "abort",
+        )
+
+    def test_route_select_aborts_when_compare_state_is_empty(self) -> None:
+        self.assertEqual(
+            self._graph().route_select({
+                "nodes": {
+                    "blame": {"candidates": [{"commit": "a"}]},
+                    "compare": {},
                 },
             }),
             "abort",
@@ -136,8 +161,10 @@ class TestAttributionGraph(unittest.TestCase):
             aggregate=AggregateNode(),
             expand=ExpandNode(),
             hint=HintNode(),
-            refine=RefineNode(),
+            refine=RefineNode(diff=SourceDelta(object.__new__(VersionControl))),
             verify=VerifyNode(),
+            blame=BlameNode(diff=SourceDelta(object.__new__(VersionControl))),
+            compare=CompareNode(diff=SourceDelta(object.__new__(VersionControl))),
         )
 
         self.assertEqual(
@@ -592,7 +619,7 @@ class TestAttributionGraph(unittest.TestCase):
         self.assertNotIn("expansion", result)
         self.assertNotIn("files", result)
 
-    def test_expand_node_rejects_unmatched_files(self) -> None:
+    def test_expand_node_returns_empty_state_for_unmatched_files(self) -> None:
         repository = object.__new__(VersionControl)
         delta = SourceDelta(repository)
         node = ExpandNode(diff=delta)
@@ -603,22 +630,40 @@ class TestAttributionGraph(unittest.TestCase):
             autospec=True,
             return_value=[FileOperation(base="a.py", after="a.py", operation=OperationType.EDIT)],
         ):
-            with self.assertRaises(ValueError):
-                node.run({
-                    "correction": Change(
-                        number=1,
-                        base="base-sha",
-                        after="after-sha",
-                        description="Fix the parser",
-                    ),
-                    "files": ["missing.py"],
-                })
+            result = node.run({
+                "correction": Change(
+                    number=1,
+                    base="base-sha",
+                    after="after-sha",
+                    description="Fix the parser",
+                ),
+                "files": ["missing.py"],
+            })
+
+        self.assertEqual(result["nodes"]["expand"], {})
 
     def test_hint_node_requires_inputs(self) -> None:
         node = HintNode()
 
         with self.assertRaises(ValueError):
             node.run({})
+
+    def test_hint_node_returns_empty_state_for_empty_upstream(self) -> None:
+        llm = Mock(spec_set=["with_structured_output"])
+
+        result = HintNode(llm=llm).run(
+            {
+                "rationale": "",
+                "nodes": {
+                    "expand": {"expansion": ""},
+                },
+            }
+        )
+
+        self.assertEqual(
+            result["nodes"]["hint"],
+            {"causes": [], "corrections": []},
+        )
 
     def test_hint_node_renders_references_in_prompt(self) -> None:
         llm = Mock(spec_set=["with_structured_output"])
@@ -955,7 +1000,23 @@ class TestAttributionGraph(unittest.TestCase):
         delta = SourceDelta(repository)
         node = RefineNode(diff=delta)
 
-        with patch.object(SourceDelta, "refine", autospec=True, return_value="refined") as refine:
+        with patch.object(
+            SourceDelta,
+            "materialize",
+            autospec=True,
+            return_value=PatchSet(
+                "\n".join(
+                    [
+                        "diff --git a/a.py b/a.py",
+                        "--- a/a.py",
+                        "+++ b/a.py",
+                        "@@ -1 +1 @@",
+                        "-old",
+                        "+new",
+                    ]
+                )
+            ),
+        ) as materialize:
             result = node.run(
                 {
                     "correction": Change(
@@ -990,14 +1051,61 @@ class TestAttributionGraph(unittest.TestCase):
                 }
             )
 
-        refine.assert_called_once()
-        self.assertEqual(refine.call_args.args[2], ["0-0-0", "0-0-1"])
-        self.assertEqual(refine.call_args.args[3:], ("base-sha", "after-sha"))
-        self.assertEqual(result["nodes"]["refine"]["refinement"], "refined")
+        materialize.assert_called_once()
+        self.assertEqual(materialize.call_args.args[1:5], ("base-sha", "after-sha", [
+            Slice(
+                file=("a.py", "a.py"),
+                anchors=[Anchor(base=(1, 2), after=(0, 0))],
+            )
+        ], "base"))
+        self.assertEqual(materialize.call_args.kwargs, {"force": True})
+        self.assertEqual(
+            materialize.call_args.args[3],
+            [
+                Slice(
+                    file=("a.py", "a.py"),
+                    anchors=[Anchor(base=(1, 2), after=(0, 0))],
+                )
+            ],
+        )
+        self.assertIn("--- a/a.py", result["nodes"]["refine"]["refinement"])
 
     def test_refine_node_requires_inputs(self) -> None:
         with self.assertRaises(ValueError):
             RefineNode().run({})
+
+    def test_refine_node_returns_empty_state_for_empty_causes(self) -> None:
+        repository = object.__new__(VersionControl)
+        delta = SourceDelta(repository)
+        node = RefineNode(diff=delta)
+
+        result = node.run(
+            {
+                "correction": Change(
+                    number=1,
+                    base="base-sha",
+                    after="after-sha",
+                    description="Fix parser",
+                ),
+                "nodes": {
+                    "expand": {
+                        "expansion": "\n".join(
+                            [
+                                "diff --git a/a.py b/a.py",
+                                "--- a/a.py",
+                                "+++ b/a.py",
+                                "@@ -1 +1 @@",
+                                "-old",
+                                "+new",
+                            ]
+                        )
+                    },
+                    "hint": {"causes": []},
+                },
+            }
+        )
+
+        self.assertEqual(result["nodes"]["refine"], {})
 
     def test_blame_node_collects_candidates_across_files(self) -> None:
         repository = object.__new__(VersionControl)
@@ -1008,8 +1116,28 @@ class TestAttributionGraph(unittest.TestCase):
                 VersionControl,
                 "blame",
                 autospec=True,
-                side_effect=[["sha-old", "sha-mid"], ["sha-new", "sha-old"]],
+                side_effect=[
+                    [
+                        ("sha-old", (2, 2)),
+                        ("sha-mid", (3, 3)),
+                    ],
+                    [
+                        ("sha-new", (10, 10)),
+                    ],
+                ],
             ) as blame,
+            patch.object(
+                VersionControl,
+                "parents",
+                autospec=True,
+                return_value=["parent-sha"],
+            ),
+            patch.object(
+                VersionControl,
+                "blob",
+                autospec=True,
+                return_value=b"present\n",
+            ),
             patch.object(
                 VersionControl,
                 "meta",
@@ -1069,13 +1197,44 @@ class TestAttributionGraph(unittest.TestCase):
         self.assertEqual(
             [call.args[1:] for call in blame.call_args_list],
             [
-                ("a.py", "base-sha", [(2, 3)]),
+                ("a.py", "base-sha", [(2, 2), (3, 3)]),
                 ("b.py", "base-sha", [(10, 10)]),
             ],
         )
         self.assertEqual(
             result["nodes"]["blame"]["candidates"],
-            ["sha-new", "sha-mid", "sha-old"],
+            [
+                {
+                    "commit": "sha-new",
+                    "parent": "parent-sha",
+                    "slices": [
+                        {
+                            "file": ("b.py", "b.py"),
+                            "anchors": [{"base": (0, 0), "after": (10, 11)}],
+                        }
+                    ],
+                },
+                {
+                    "commit": "sha-mid",
+                    "parent": "parent-sha",
+                    "slices": [
+                        {
+                            "file": ("a.py", "a.py"),
+                            "anchors": [{"base": (0, 0), "after": (3, 4)}],
+                        }
+                    ],
+                },
+                {
+                    "commit": "sha-old",
+                    "parent": "parent-sha",
+                    "slices": [
+                        {
+                            "file": ("a.py", "a.py"),
+                            "anchors": [{"base": (0, 0), "after": (2, 3)}],
+                        }
+                    ],
+                },
+            ],
         )
 
     def test_blame_node_ignores_invalid_and_target_only_references(self) -> None:
@@ -1083,7 +1242,24 @@ class TestAttributionGraph(unittest.TestCase):
         node = BlameNode(diff=SourceDelta(repository))
 
         with (
-            patch.object(VersionControl, "blame", autospec=True, return_value=["sha-a"]) as blame,
+            patch.object(
+                VersionControl,
+                "blame",
+                autospec=True,
+                return_value=[("sha-a", (2, 2))],
+            ) as blame,
+            patch.object(
+                VersionControl,
+                "parents",
+                autospec=True,
+                return_value=["parent-sha"],
+            ),
+            patch.object(
+                VersionControl,
+                "blob",
+                autospec=True,
+                return_value=b"present\n",
+            ),
             patch.object(
                 VersionControl,
                 "meta",
@@ -1126,7 +1302,21 @@ class TestAttributionGraph(unittest.TestCase):
             )
 
         self.assertEqual([call.args[1:] for call in blame.call_args_list], [("a.py", "base-sha", [(2, 2)])])
-        self.assertEqual(result["nodes"]["blame"]["candidates"], ["sha-a"])
+        self.assertEqual(
+            result["nodes"]["blame"]["candidates"],
+            [
+                {
+                    "commit": "sha-a",
+                    "parent": "parent-sha",
+                    "slices": [
+                        {
+                            "file": ("a.py", "a.py"),
+                            "anchors": [{"base": (0, 0), "after": (2, 3)}],
+                        }
+                    ],
+                }
+            ],
+        )
 
     def test_blame_node_returns_empty_candidates_without_source_lines(self) -> None:
         repository = object.__new__(VersionControl)
@@ -1167,7 +1357,12 @@ class TestAttributionGraph(unittest.TestCase):
         repository = object.__new__(VersionControl)
         node = BlameNode(diff=SourceDelta(repository))
 
-        with patch.object(VersionControl, "blame", autospec=True, return_value=[]) as blame:
+        with patch.object(
+            VersionControl,
+            "blame",
+            autospec=True,
+            return_value=[(None, None)],
+        ) as blame:
             result = node.run(
                 {
                     "correction": Change(
@@ -1204,6 +1399,326 @@ class TestAttributionGraph(unittest.TestCase):
     def test_blame_node_requires_inputs(self) -> None:
         with self.assertRaises(ValueError):
             BlameNode().run({})
+
+    def test_compare_node_uses_stored_refinement_for_candidate_and_parent(self) -> None:
+        repository = object.__new__(VersionControl)
+        llm = Mock(spec_set=["with_structured_output"])
+        presence = Mock(spec_set=["invoke"])
+        assessment = Mock(spec_set=["invoke"])
+        llm.with_structured_output.side_effect = [presence, assessment]
+        presence.invoke.side_effect = [
+            {"present": True, "reason": "Candidate still matches."},
+            {"present": False, "reason": "Parent does not match."},
+        ]
+        assessment.invoke.side_effect = [
+            {"defect": True, "reason": "Candidate contains the bug."},
+            {"defect": False, "reason": "Parent does not contain the bug."},
+        ]
+        node = CompareNode(diff=SourceDelta(repository), llm=llm)
+
+        with patch.object(
+            SourceDelta,
+            "materialize",
+            autospec=True,
+            return_value=PatchSet(
+                "\n".join(
+                    [
+                        "diff --git a/a.py b/a.py",
+                        "--- a/a.py",
+                        "+++ b/a.py",
+                        "@@ -1,2 +1,2 @@",
+                        " old_context",
+                        "-old",
+                        "+new",
+                    ]
+                )
+            ),
+        ) as materialize:
+            result = node.run(
+                {
+                    "rationale": "Validation fails before normalization.",
+                    "nodes": {
+                        "hint": {
+                            "causes": [{"references": ["0-0-0"], "reason": "Old line."}],
+                        },
+                        "blame": {
+                            "candidates": [
+                                {
+                                    "commit": "candidate-sha",
+                                    "parent": "parent-sha",
+                                    "slices": [
+                                        {
+                                            "file": ("a.py", "a.py"),
+                                            "anchors": [{"base": (2, 3), "after": (2, 3)}],
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
+                    },
+                }
+            )
+
+        self.assertEqual(llm.with_structured_output.call_count, 2)
+        materialize.assert_called_once()
+        self.assertEqual(
+            materialize.call_args.args[1:5],
+            (
+                "parent-sha",
+                "candidate-sha",
+                [
+                    Slice(
+                        file=("a.py", "a.py"),
+                        anchors=[Anchor(base=(2, 3), after=(2, 3))],
+                    )
+                ],
+                "after",
+            ),
+        )
+        self.assertEqual(materialize.call_args.kwargs, {"force": False})
+        self.assertEqual(presence.invoke.call_count, 2)
+        self.assertEqual(assessment.invoke.call_count, 2)
+        self.assertIn("Explanations:", presence.invoke.call_args_list[0].args[0])
+        self.assertIn("File: a.py", presence.invoke.call_args_list[0].args[0])
+        self.assertIn("old", presence.invoke.call_args_list[1].args[0])
+        self.assertIn("new", presence.invoke.call_args_list[0].args[0])
+        self.assertIn("Root cause:", assessment.invoke.call_args_list[0].args[0])
+        self.assertIn("Explanations:", assessment.invoke.call_args_list[0].args[0])
+        self.assertEqual(
+            result["nodes"]["compare"],
+            {
+                "index": 0,
+                "candidate": {
+                    "commit": "candidate-sha",
+                    "presence": {
+                        "passed": True,
+                        "reason": "Candidate still matches.",
+                    },
+                    "assessment": {
+                        "passed": True,
+                        "reason": "Candidate contains the bug.",
+                    },
+                    "defect": True,
+                },
+                "parent": {
+                    "commit": "parent-sha",
+                    "presence": {
+                        "passed": False,
+                        "reason": "Parent does not match.",
+                    },
+                    "assessment": {
+                        "passed": False,
+                        "reason": "Parent does not contain the bug.",
+                    },
+                    "defect": False,
+                },
+            },
+        )
+
+    def test_compare_node_advances_to_next_candidate(self) -> None:
+        repository = object.__new__(VersionControl)
+        llm = Mock(spec_set=["with_structured_output"])
+        presence = Mock(spec_set=["invoke"])
+        assessment = Mock(spec_set=["invoke"])
+        llm.with_structured_output.side_effect = [presence, assessment]
+        presence.invoke.side_effect = [
+            {"present": True, "reason": "x"},
+            {"present": True, "reason": "y"},
+        ]
+        assessment.invoke.side_effect = [
+            {"defect": False, "reason": "x"},
+            {"defect": False, "reason": "y"},
+        ]
+
+        with patch.object(
+            SourceDelta,
+            "materialize",
+            autospec=True,
+            return_value=PatchSet(
+                "\n".join(
+                    [
+                        "diff --git a/b.py b/b.py",
+                        "--- a/b.py",
+                        "+++ b/b.py",
+                        "@@ -2 +2 @@",
+                        "-old",
+                        "+new",
+                    ]
+                )
+            ),
+        ):
+            result = CompareNode(diff=SourceDelta(repository), llm=llm).run(
+                {
+                    "rationale": "Validation fails before normalization.",
+                    "nodes": {
+                        "hint": {"causes": [{"references": ["0-0-0"], "reason": "Old line."}]},
+                        "blame": {
+                            "candidates": [
+                                {
+                                    "commit": "first",
+                                    "parent": "base-1",
+                                    "slices": [{"file": ("a.py", "a.py"), "anchors": [{"base": (1, 2), "after": (1, 2)}]}],
+                                },
+                                {
+                                    "commit": "second",
+                                    "parent": "base-2",
+                                    "slices": [{"file": ("b.py", "b.py"), "anchors": [{"base": (2, 3), "after": (2, 3)}]}],
+                                },
+                            ]
+                        },
+                        "compare": {"index": 0},
+                    },
+                }
+            )
+
+        self.assertEqual(result["nodes"]["compare"]["index"], 1)
+        self.assertEqual(result["nodes"]["compare"]["candidate"]["commit"], "second")
+        self.assertEqual(result["nodes"]["compare"]["parent"]["commit"], "base-2")
+
+    def test_compare_node_requires_inputs(self) -> None:
+        with self.assertRaises(ValueError):
+            CompareNode().run({})
+
+    def test_compare_node_returns_empty_state_for_empty_candidates(self) -> None:
+        repository = object.__new__(VersionControl)
+        llm = Mock(spec_set=["with_structured_output"])
+
+        result = CompareNode(diff=SourceDelta(repository), llm=llm).run(
+            {
+                "rationale": "Validation fails before normalization.",
+                "nodes": {
+                    "hint": {"causes": [{"references": ["0-0-0"], "reason": "Old line."}]},
+                    "blame": {"candidates": []},
+                },
+            }
+        )
+
+        self.assertEqual(
+            result["nodes"]["compare"],
+            {"index": -1, "candidate": {}, "parent": {}},
+        )
+
+    def test_compare_node_returns_empty_state_when_candidate_is_missing(self) -> None:
+        repository = object.__new__(VersionControl)
+        llm = Mock(spec_set=["with_structured_output"])
+
+        result = CompareNode(diff=SourceDelta(repository), llm=llm).run(
+            {
+                "rationale": "Validation fails before normalization.",
+                "nodes": {
+                    "hint": {"causes": [{"references": ["0-0-0"], "reason": "Old line."}]},
+                    "blame": {"candidates": [{"commit": "a", "parent": "b", "slices": []}]},
+                    "compare": {"index": 0},
+                },
+            }
+        )
+
+        self.assertEqual(
+            result["nodes"]["compare"],
+            {"index": 0, "candidate": {}, "parent": {}},
+        )
+
+    def test_compare_node_accepts_one_sided_projected_snippets(self) -> None:
+        repository = object.__new__(VersionControl)
+        llm = Mock(spec_set=["with_structured_output"])
+        presence = Mock(spec_set=["invoke"])
+        assessment = Mock(spec_set=["invoke"])
+        llm.with_structured_output.side_effect = [presence, assessment]
+        presence.invoke.side_effect = [
+            {"present": True, "reason": "candidate"},
+            {"present": False, "reason": "parent"},
+        ]
+        assessment.invoke.side_effect = [
+            {"defect": True, "reason": "candidate"},
+            {"defect": False, "reason": "parent"},
+        ]
+
+        with patch.object(
+            SourceDelta,
+            "materialize",
+            autospec=True,
+            return_value=PatchSet(
+                "\n".join(
+                    [
+                        "diff --git a/a.py b/a.py",
+                        "--- /dev/null",
+                        "+++ b/a.py",
+                        "@@ -0,0 +1 @@",
+                        "+new",
+                    ]
+                )
+            ),
+        ):
+            result = CompareNode(diff=SourceDelta(repository), llm=llm).run(
+                {
+                    "rationale": "Validation fails before normalization.",
+                    "nodes": {
+                        "hint": {"causes": [{"references": ["0-0-0"], "reason": "Old line."}]},
+                        "blame": {
+                            "candidates": [
+                                {
+                                    "commit": "candidate-sha",
+                                    "parent": "parent-sha",
+                                    "slices": [{"file": (None, "a.py"), "anchors": [{"base": (0, 0), "after": (1, 2)}]}],
+                                }
+                            ]
+                        },
+                    },
+                }
+            )
+
+        self.assertEqual(result["nodes"]["compare"]["index"], 0)
+        self.assertEqual(result["nodes"]["compare"]["candidate"]["commit"], "candidate-sha")
+        self.assertEqual(result["nodes"]["compare"]["parent"]["commit"], "parent-sha")
+        self.assertEqual(
+            result["nodes"]["compare"]["candidate"]["presence"],
+            {"passed": True, "reason": "candidate"},
+        )
+        self.assertEqual(
+            result["nodes"]["compare"]["candidate"]["assessment"],
+            {"passed": True, "reason": "candidate"},
+        )
+        self.assertEqual(result["nodes"]["compare"]["candidate"]["defect"], True)
+        self.assertEqual(
+            result["nodes"]["compare"]["parent"]["presence"],
+            {"passed": False, "reason": "Code snippet is empty."},
+        )
+        self.assertEqual(
+            result["nodes"]["compare"]["parent"]["assessment"],
+            {"passed": False, "reason": "Code snippet is empty."},
+        )
+        self.assertEqual(result["nodes"]["compare"]["parent"]["defect"], False)
+        self.assertEqual(presence.invoke.call_count, 1)
+        self.assertEqual(assessment.invoke.call_count, 1)
+
+    def test_select_node_sets_introducer_on_target_dichotomy(self) -> None:
+        result = SelectNode().run(
+            {
+                "nodes": {
+                    "compare": {
+                        "candidate": {"commit": "sha-a", "defect": True},
+                        "parent": {"commit": "sha-b", "defect": False},
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(result, {"introducer": "sha-a"})
+
+    def test_select_node_leaves_state_when_no_match_exists(self) -> None:
+        self.assertEqual(
+            SelectNode().run(
+                {
+                    "nodes": {
+                        "compare": {
+                            "candidate": {"commit": "sha-a", "defect": False},
+                            "parent": {"commit": "sha-b", "defect": False},
+                        }
+                    }
+                }
+            ),
+            {},
+        )
 
     def test_verify_node_checks_base_and_after(self) -> None:
         llm = Mock(spec_set=["with_structured_output"])
@@ -1275,7 +1790,7 @@ class TestAttributionGraph(unittest.TestCase):
             },
         )
 
-    def test_verify_node_rejects_unparseable_refinement(self) -> None:
+    def test_verify_node_rejects_malformed_refinement(self) -> None:
         llm = Mock(spec_set=["with_structured_output"])
         structured = Mock(spec_set=["invoke"])
         llm.with_structured_output.return_value = structured
@@ -1285,8 +1800,11 @@ class TestAttributionGraph(unittest.TestCase):
                 {
                     "rationale": "Validation fails before normalization.",
                     "nodes": {
-                        "hint": {"causes": [], "corrections": []},
-                        "refine": {"refinement": "bad"},
+                        "hint": {
+                            "causes": [{"references": ["0-0-0"], "reason": "Old line."}],
+                            "corrections": [{"references": ["0-0-1"], "reason": "New line."}],
+                        },
+                        "refine": {"refinement": 1},
                     },
                 }
             )
@@ -1294,6 +1812,21 @@ class TestAttributionGraph(unittest.TestCase):
     def test_verify_node_requires_inputs(self) -> None:
         with self.assertRaises(ValueError):
             VerifyNode().run({})
+
+    def test_verify_node_returns_empty_state_for_empty_hint_or_refinement(self) -> None:
+        llm = Mock(spec_set=["with_structured_output"])
+
+        result = VerifyNode(llm=llm).run(
+            {
+                "rationale": "Validation fails before normalization.",
+                "nodes": {
+                    "hint": {"causes": [], "corrections": []},
+                    "refine": {"refinement": ""},
+                },
+            }
+        )
+
+        self.assertEqual(result["nodes"]["verify"], {})
 
     def test_verify_node_rejects_invalid_json(self) -> None:
         llm = Mock(spec_set=["with_structured_output"])
@@ -1307,7 +1840,10 @@ class TestAttributionGraph(unittest.TestCase):
                 {
                     "rationale": "Validation fails before normalization.",
                     "nodes": {
-                        "hint": {"causes": [], "corrections": []},
+                        "hint": {
+                            "causes": [{"references": ["0-0-0"], "reason": "Old line."}],
+                            "corrections": [{"references": ["0-0-1"], "reason": "New line."}],
+                        },
                         "refine": {
                             "refinement": "\n".join(
                                 [
@@ -1567,8 +2103,18 @@ class TestAttributionGraph(unittest.TestCase):
             ]],
         )
         end_payload = json.loads(events[2]["payload"])
+        self.assertEqual(end_payload["llm_output"]["token_usage"]["total_tokens"], 2)
         self.assertIn("llm_output_keys", end_payload)
         self.assertIn("generation_count", end_payload)
+        self.assertEqual(end_payload["generations"][0][0]["text"], "hello")
+        self.assertEqual(
+            end_payload["generations"][0][0]["message"]["content"],
+            "hello",
+        )
+        self.assertEqual(
+            end_payload["generations"][0][0]["generation_info"]["finish_reason"],
+            "stop",
+        )
         self.assertEqual(end_payload["logprobs"]["token_logprobs"], [-0.1])
 
     def test_invoke_with_trace_returns_trace(self) -> None:

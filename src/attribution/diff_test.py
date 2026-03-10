@@ -4,10 +4,11 @@ import unittest
 from pathlib import Path
 from textwrap import dedent
 
-from diff import Context, PatchRenderer, SourceDelta
-from history import VersionControl
-from history_fixture import HistoryFixture
-from unidiff import patch as unidiff_patch
+from benchmark.attribution.diff import Context, PatchRenderer, SourceDelta
+from benchmark.attribution.domain import Anchor, FileOperation, OperationType, Slice
+from benchmark.attribution.history import VersionControl
+from benchmark.attribution.history_fixture import HistoryFixture
+from unidiff import PatchSet
 
 
 class TestPatchRenderer(unittest.TestCase):
@@ -84,7 +85,6 @@ class TestPatchRenderer(unittest.TestCase):
             "\n".join(
                 [
                     "File: a.py",
-                    "Lines: 10-12",
                     "keep_before",
                     "old",
                     "keep_after",
@@ -113,7 +113,6 @@ class TestPatchRenderer(unittest.TestCase):
             "\n".join(
                 [
                     "File: a.py",
-                    "Lines: 10-12",
                     "keep_before",
                     "keep_after",
                     "new",
@@ -137,6 +136,85 @@ class TestPatchRenderer(unittest.TestCase):
 
         self.assertIn("File: old.py", renderer.base())
         self.assertIn("File: new.py", renderer.after())
+
+    def test_slices_groups_references_by_file(self) -> None:
+        renderer = PatchRenderer(
+            "\n".join(
+                [
+                    "diff --git a/a.py b/a.py",
+                    "--- a/a.py",
+                    "+++ b/a.py",
+                    "@@ -1,2 +1,2 @@",
+                    "-old",
+                    "+new",
+                    " keep",
+                ]
+            )
+        )
+
+        self.assertEqual(
+            renderer.slices(["0-0-0", "0-0-1", "0-0-2"]),
+            [
+                Slice(
+                    file=("a.py", "a.py"),
+                    anchors=[
+                        Anchor(base=(1, 2), after=(0, 0)),
+                        Anchor(base=(0, 0), after=(1, 2)),
+                        Anchor(base=(2, 3), after=(2, 3)),
+                    ],
+                )
+            ],
+        )
+
+    def test_slices_support_add_only_reference(self) -> None:
+        renderer = PatchRenderer(
+            "\n".join(
+                [
+                    "diff --git a/file.py b/file.py",
+                    "new file mode 100644",
+                    "--- /dev/null",
+                    "+++ b/file.py",
+                    "@@ -0,0 +1,2 @@",
+                    "+new",
+                    "+tail",
+                ]
+            )
+        )
+
+        self.assertEqual(
+            renderer.slices(["0-0-0"]),
+            [
+                Slice(
+                    file=(None, "file.py"),
+                    anchors=[Anchor(base=(0, 0), after=(1, 2))],
+                )
+            ],
+        )
+
+    def test_slices_support_delete_only_reference(self) -> None:
+        renderer = PatchRenderer(
+            "\n".join(
+                [
+                    "diff --git a/file.py b/file.py",
+                    "deleted file mode 100644",
+                    "--- a/file.py",
+                    "+++ /dev/null",
+                    "@@ -1,2 +0,0 @@",
+                    "-old",
+                    "-tail",
+                ]
+            )
+        )
+
+        self.assertEqual(
+            renderer.slices(["0-0-0"]),
+            [
+                Slice(
+                    file=("file.py", None),
+                    anchors=[Anchor(base=(1, 2), after=(0, 0))],
+                )
+            ],
+        )
 
 
 class TestSourceDelta(unittest.TestCase):
@@ -165,7 +243,21 @@ class TestSourceDelta(unittest.TestCase):
             if in_hunk and line == "":
                 line = " "
             result.append(line + ("\n" if has_newline else ""))
-        return "".join(result)
+        rendered: list[str] = []
+        for index, raw_line in enumerate(result):
+            line = raw_line.rstrip("\n")
+            if (
+                line.startswith("--- ")
+                and index + 1 < len(result)
+                and result[index + 1].rstrip("\n").startswith("+++ ")
+            ):
+                recent = [item.rstrip("\n") for item in rendered[-3:]]
+                if not any(item.startswith("diff --git ") for item in recent):
+                    rendered.append(
+                        f"diff --git {line[4:]} {result[index + 1].rstrip()[4:]}\n"
+                    )
+            rendered.append(raw_line)
+        return "".join(rendered)
 
     def _commit(
         self,
@@ -2695,6 +2787,8 @@ class TestSourceDelta(unittest.TestCase):
             str(patch),
             self._patch(
                 """
+            diff --git a/file.toml b/file.toml
+            index 8bf10fd..5ed1a49 100644
             --- a/file.toml
             +++ b/file.toml
             @@ -1,3 +1,3 @@
@@ -2706,63 +2800,677 @@ class TestSourceDelta(unittest.TestCase):
             ),
         )
 
-    def test_refine_builds_window_for_selected_reference(self) -> None:
-        base_sha, after_sha = self._commit(
-            "foo = 1\nbar = 1\nbaz = 1\ncorge = 1\nqux = 1\n",
-            "foo = 1\nbar = 1\nbaz = 2\ncorge = 1\nqux = 1\n",
-            ".toml",
+    def test_patch_returns_all_files_without_filter(self) -> None:
+        base_tree = self._history_fixture.tree(
+            {
+                "edit.txt": "old\n",
+                "old.txt": "same\n",
+                "gone.txt": "gone\n",
+            }
         )
-        expansion = self._candidate.patch(
-            base=base_sha,
-            after=after_sha,
-            files=self._repository.manifest(base_sha, after_sha),
-            n=0,
+        base_sha = self._history_fixture.commit(base_tree, [], "base")
+        after_tree = self._history_fixture.tree(
+            {
+                "edit.txt": "new\n",
+                "new.txt": "same\n",
+                "add.txt": "add\n",
+            }
         )
+        after_sha = self._history_fixture.commit(after_tree, [base_sha], "after")
 
-        refined = self._candidate.refine(
-            unidiff_patch.PatchSet(str(expansion)),
-            ["0-0-0"],
-            base_sha,
-            after_sha,
-        )
+        patch = self._candidate.patch(base_sha, after_sha, n=0)
 
+        self.assertEqual(len(patch), 4)
         self.assertEqual(
-            str(refined),
-            self._patch(
-                """
-            --- a/file.toml
-            +++ b/file.toml
-            @@ -1,5 +1,5 @@
-             foo = 1
-             bar = 1
-            -baz = 1
-            +baz = 2
-             corge = 1
-             qux = 1
-        """
-            ),
+            sorted(patched.path for patched in patch),
+            ["add.txt", "edit.txt", "gone.txt", "new.txt"],
         )
 
-    def test_refine_rejects_unresolvable_references(self) -> None:
-        base_sha, after_sha = self._commit(
-            "foo = 1\nbar = 1\nbaz = 1\n",
-            "foo = 1\nbar = 2\nbaz = 1\n",
-            ".toml",
+    def test_patch_filters_manifest_entries_for_all_operation_types(self) -> None:
+        base_tree = self._history_fixture.tree(
+            {
+                "edit.txt": "old\n",
+                "old.txt": "same\n",
+                "gone.txt": "gone\n",
+            }
         )
-        expansion = self._candidate.patch(
-            base=base_sha,
-            after=after_sha,
-            files=self._repository.manifest(base_sha, after_sha),
-            n=0,
+        base_sha = self._history_fixture.commit(base_tree, [], "base")
+        after_tree = self._history_fixture.tree(
+            {
+                "edit.txt": "new\n",
+                "new.txt": "same\n",
+                "add.txt": "add\n",
+            }
+        )
+        after_sha = self._history_fixture.commit(after_tree, [base_sha], "after")
+        selected = [
+            FileOperation(base=None, after="add.txt", operation=OperationType.ADD),
+            FileOperation(base="gone.txt", after=None, operation=OperationType.DELETE),
+            FileOperation(
+                base="old.txt",
+                after="new.txt",
+                operation=OperationType.MOVE,
+            ),
+        ]
+        patch = self._candidate.patch(base_sha, after_sha, files=selected, n=0)
+
+        self.assertEqual(len(patch), 3)
+        self.assertEqual(
+            sorted(patched.path for patched in patch),
+            ["add.txt", "gone.txt", "new.txt"],
+        )
+
+    def test_materialize_rejects_empty_slices(self) -> None:
+        base_sha, after_sha = self._commit(
+            "foo = 1\n",
+            "foo = 2\n",
+            ".toml",
         )
 
         with self.assertRaises(ValueError):
-            self._candidate.refine(
-                unidiff_patch.PatchSet(str(expansion)),
-                ["9-9-9"],
+            self._candidate.materialize(base_sha, after_sha, [], "base")
+
+    def test_materialize_rejects_after_only_anchor_for_base_mode(self) -> None:
+        base_sha, after_sha = self._commit(
+            "foo = 1\n",
+            "foo = 2\n",
+            ".toml",
+        )
+
+        with self.assertRaises(ValueError):
+            self._candidate.materialize(
                 base_sha,
                 after_sha,
+                [
+                    Slice(
+                        file=("file.toml", "file.toml"),
+                        anchors=[Anchor(base=(0, 0), after=(1, 2))],
+                    )
+                ],
+                "base",
             )
+
+    def test_materialize_rejects_base_only_anchor_for_after_mode(self) -> None:
+        base_sha, after_sha = self._commit(
+            "foo = 1\n",
+            "foo = 2\n",
+            ".toml",
+        )
+
+        with self.assertRaises(ValueError):
+            self._candidate.materialize(
+                base_sha,
+                after_sha,
+                [
+                    Slice(
+                        file=("file.toml", "file.toml"),
+                        anchors=[Anchor(base=(1, 2), after=(0, 0))],
+                    )
+                ],
+                "after",
+            )
+
+    def test_materialize_supports_context_anchor_on_both_sides(self) -> None:
+        base_sha, after_sha = self._commit(
+            """
+            one = 1
+            two = 1
+            three = 1
+            four = 1
+            """,
+            """
+            one = 1
+            two = 2
+            three = 1
+            four = 1
+            """,
+            ".toml",
+        )
+        slices = [
+            Slice(
+                file=("file.toml", "file.toml"),
+                anchors=[Anchor(base=(3, 4), after=(3, 4))],
+            )
+        ]
+
+        self.assertEqual(
+            str(self._candidate.materialize(base_sha, after_sha, slices, "base")),
+            self._patch(
+                """
+                --- a/file.toml
+                +++ b/file.toml
+                @@ -1,4 +1,4 @@
+                 one = 1
+                -two = 1
+                +two = 2
+                 three = 1
+                 four = 1
+                """
+            ),
+        )
+        self.assertEqual(
+            str(self._candidate.materialize(base_sha, after_sha, slices, "after")),
+            self._patch(
+                """
+                --- a/file.toml
+                +++ b/file.toml
+                @@ -1,4 +1,4 @@
+                 one = 1
+                -two = 1
+                +two = 2
+                 three = 1
+                 four = 1
+                """
+            ),
+        )
+
+    def test_materialize_clamps_base_window_to_file_start(self) -> None:
+        base_sha, after_sha = self._commit(
+            """
+            keep_1 = 1
+            keep_2 = 2
+            old = 1
+            tail = 1
+            """
+            ,
+            """
+            keep_1 = 1
+            keep_2 = 2
+            new = 1
+            tail = 1
+            """,
+            ".toml",
+        )
+
+        patchset = self._candidate.materialize(
+            base_sha,
+            after_sha,
+            [
+                Slice(
+                    file=("file.toml", "file.toml"),
+                    anchors=[Anchor(base=(1, 2), after=(1, 2))],
+                )
+            ],
+            "base",
+        )
+
+        self.assertEqual(
+            str(patchset),
+            self._patch(
+                """
+                --- a/file.toml
+                +++ b/file.toml
+                @@ -1,3 +1,3 @@
+                 keep_1 = 1
+                 keep_2 = 2
+                -old = 1
+                +new = 1
+                """
+            ),
+        )
+
+    def test_materialize_clamps_after_window_to_file_end(self) -> None:
+        base_sha, after_sha = self._commit(
+            """
+            top = 1
+            old = 1
+            keep = 1
+            tail = 1
+            """,
+            """
+            top = 1
+            new = 1
+            keep = 1
+            tail = 1
+            """,
+            ".toml",
+        )
+
+        patchset = self._candidate.materialize(
+            base_sha,
+            after_sha,
+            [
+                Slice(
+                    file=("file.toml", "file.toml"),
+                    anchors=[Anchor(base=(4, 5), after=(4, 5))],
+                )
+            ],
+            "after",
+        )
+
+        self.assertEqual(
+            str(patchset),
+            self._patch(
+                """
+                --- a/file.toml
+                +++ b/file.toml
+                @@ -2,3 +2,3 @@
+                -old = 1
+                +new = 1
+                 keep = 1
+                 tail = 1
+                """
+            ),
+        )
+
+    def test_materialize_projects_paired_hunk_when_mapping_exists(self) -> None:
+        base_sha, after_sha = self._commit(
+            """
+            one = 1
+            old = 1
+            three = 1
+            four = 1
+            """,
+            """
+            one = 1
+            new = 1
+            three = 1
+            four = 1
+            """,
+            ".toml",
+        )
+
+        patchset = self._candidate.materialize(
+            base_sha,
+            after_sha,
+            [
+                Slice(
+                    file=("file.toml", "file.toml"),
+                    anchors=[Anchor(base=(3, 4), after=(3, 4))],
+                )
+            ],
+            "after",
+            force=False,
+        )
+
+        self.assertEqual(
+            str(patchset),
+            self._patch(
+                """
+                --- a/file.toml
+                +++ b/file.toml
+                @@ -1,4 +1,4 @@
+                 one = 1
+                -old = 1
+                +new = 1
+                 three = 1
+                 four = 1
+                """
+            ),
+        )
+
+    def test_materialize_projects_partial_mapping_in_after_mode(self) -> None:
+        base_sha, after_sha = self._commit(
+            """
+            one = 1
+            two = 2
+            three = 3
+            """,
+            """
+            one = 1
+            two = 2
+            insert = 9
+            three = 3
+            """,
+            ".toml",
+        )
+
+        patchset = self._candidate.materialize(
+            base_sha,
+            after_sha,
+            [
+                Slice(
+                    file=("file.toml", "file.toml"),
+                    anchors=[Anchor(base=(0, 0), after=(3, 4))],
+                )
+            ],
+            "after",
+            force=False,
+        )
+
+        self.assertEqual(
+            str(patchset),
+            self._patch(
+                """
+                --- a/file.toml
+                +++ b/file.toml
+                @@ -1,3 +1,4 @@
+                 one = 1
+                 two = 2
+                +insert = 9
+                 three = 3
+                """
+            ),
+        )
+
+    def test_materialize_leaves_opposite_side_empty_when_nothing_maps(self) -> None:
+        base_sha, after_sha = self._commit(
+            None,
+            """
+            one = 1
+            two = 2
+            three = 3
+            four = 4
+            five = 5
+            six = 6
+            """,
+            ".toml",
+        )
+
+        patchset = self._candidate.materialize(
+            base_sha,
+            after_sha,
+            [
+                Slice(
+                    file=(None, "file.toml"),
+                    anchors=[Anchor(base=(0, 0), after=(4, 5))],
+                )
+            ],
+            "after",
+            force=False,
+        )
+
+        self.assertEqual(
+            str(patchset),
+            self._patch(
+                """
+                --- /dev/null
+                +++ b/file.toml
+                @@ -0,0 +2,5 @@
+                +two = 2
+                +three = 3
+                +four = 4
+                +five = 5
+                +six = 6
+                """
+            ),
+        )
+
+    def test_materialize_repairs_boundaries_when_forced(self) -> None:
+        base_sha, after_sha = self._commit(
+            """
+            keep = 1
+            old = 1
+            tail = 1
+            """,
+            """
+            keep = 1
+            new = 1
+            tail = 1
+            """,
+            ".toml",
+        )
+
+        patchset = self._candidate.materialize(
+            base_sha,
+            after_sha,
+            [
+                Slice(
+                    file=("file.toml", "file.toml"),
+                    anchors=[Anchor(base=(2, 3), after=(0, 0))],
+                )
+            ],
+            "base",
+            n=0,
+            force=True,
+        )
+
+        self.assertEqual(
+            str(patchset),
+            self._patch(
+                """
+                --- a/file.toml
+                +++ b/file.toml
+                @@ -1,3 +1,3 @@
+                 keep = 1
+                -old = 1
+                +new = 1
+                 tail = 1
+                """
+            ),
+        )
+
+    def test_materialize_omits_file_when_forced_boundaries_cannot_map(self) -> None:
+        base_sha, after_sha = self._commit(
+            """
+            old_1 = 1
+            old_2 = 2
+            """,
+            """
+            new_1 = 1
+            new_2 = 2
+            """,
+            ".toml",
+        )
+
+        patchset = self._candidate.materialize(
+            base_sha,
+            after_sha,
+            [
+                Slice(
+                    file=("file.toml", "file.toml"),
+                    anchors=[Anchor(base=(1, 2), after=(0, 0))],
+                )
+            ],
+            "base",
+            n=0,
+            force=True,
+        )
+
+        self.assertEqual(str(patchset), self._patch(""))
+
+    def test_materialize_keeps_large_paired_window_for_far_context_anchors(self) -> None:
+        base_sha, after_sha = self._commit(
+            """
+            keep_1 = 1
+            old_alpha = 1
+            keep_3 = 3
+            keep_4 = 4
+            keep_5 = 5
+            keep_6 = 6
+            old_beta = 7
+            keep_8 = 8
+            """,
+            """
+            keep_1 = 1
+            new_alpha = 1
+            keep_3 = 3
+            keep_4 = 4
+            keep_5 = 5
+            keep_6 = 6
+            new_beta = 7
+            keep_8 = 8
+            """,
+            ".toml",
+        )
+
+        patchset = self._candidate.materialize(
+            base_sha,
+            after_sha,
+            [
+                Slice(
+                    file=("file.toml", "file.toml"),
+                    anchors=[
+                        Anchor(base=(1, 2), after=(1, 2)),
+                        Anchor(base=(8, 9), after=(8, 9)),
+                    ],
+                )
+            ],
+            "base",
+            force=True,
+        )
+
+        self.assertEqual(
+            str(patchset),
+            self._patch(
+                """
+                --- a/file.toml
+                +++ b/file.toml
+                @@ -1,8 +1,8 @@
+                 keep_1 = 1
+                -old_alpha = 1
+                +new_alpha = 1
+                 keep_3 = 3
+                 keep_4 = 4
+                 keep_5 = 5
+                 keep_6 = 6
+                -old_beta = 7
+                +new_beta = 7
+                 keep_8 = 8
+                """
+            ),
+        )
+
+    def test_materialize_merges_multiple_anchors_in_one_file(self) -> None:
+        base_sha, after_sha = self._commit(
+            """
+            one = 1
+            two = 2
+            three = 3
+            four = 4
+            five = 5
+            six = 6
+            seven = 7
+            """,
+            """
+            one = 1
+            two = 9
+            three = 3
+            four = 4
+            five = 8
+            six = 6
+            seven = 7
+            """,
+            ".toml",
+        )
+
+        patchset = self._candidate.materialize(
+            base_sha,
+            after_sha,
+            [
+                Slice(
+                    file=("file.toml", "file.toml"),
+                    anchors=[
+                        Anchor(base=(2, 3), after=(2, 3)),
+                        Anchor(base=(6, 7), after=(6, 7)),
+                    ],
+                )
+            ],
+            "base",
+        )
+
+        self.assertEqual(
+            str(patchset),
+            self._patch(
+                """
+                --- a/file.toml
+                +++ b/file.toml
+                @@ -1,7 +1,7 @@
+                 one = 1
+                -two = 2
+                +two = 9
+                 three = 3
+                 four = 4
+                -five = 5
+                +five = 8
+                 six = 6
+                 seven = 7
+                """
+            ),
+        )
+
+    def test_materialize_materializes_multiple_files_independently(self) -> None:
+        base_tree = self._history_fixture.tree(
+            {
+                "a.toml": "one = 1\ntwo = 2\nthree = 3\n",
+                "b.toml": "left = 1\nright = 2\nend = 3\n",
+            }
+        )
+        base_sha = self._history_fixture.commit(base_tree, [], "base")
+        after_tree = self._history_fixture.tree(
+            {
+                "a.toml": "one = 1\ntwo = 9\nthree = 3\n",
+                "b.toml": "left = 1\nright = 8\nend = 3\n",
+            }
+        )
+        after_sha = self._history_fixture.commit(after_tree, [base_sha], "after")
+
+        patchset = self._candidate.materialize(
+            base_sha,
+            after_sha,
+            [
+                Slice(
+                    file=("a.toml", "a.toml"),
+                    anchors=[Anchor(base=(1, 2), after=(1, 2))],
+                ),
+                Slice(
+                    file=("b.toml", "b.toml"),
+                    anchors=[Anchor(base=(3, 4), after=(3, 4))],
+                ),
+            ],
+            "base",
+        )
+
+        self.assertEqual(
+            str(patchset),
+            self._patch(
+                """
+                --- a/a.toml
+                +++ b/a.toml
+                @@ -1,3 +1,3 @@
+                 one = 1
+                -two = 2
+                +two = 9
+                 three = 3
+                --- a/b.toml
+                +++ b/b.toml
+                @@ -1,3 +1,3 @@
+                 left = 1
+                -right = 2
+                +right = 8
+                 end = 3
+                """
+            ),
+        )
+
+    def test_materialize_roundtrips_multiple_add_only_files(self) -> None:
+        base_tree = self._history_fixture.tree({})
+        base_sha = self._history_fixture.commit(base_tree, [], "base")
+        after_tree = self._history_fixture.tree(
+            {
+                "a.ts": "alpha\n",
+                "b.ts": "beta\n",
+            }
+        )
+        after_sha = self._history_fixture.commit(after_tree, [base_sha], "after")
+
+        patchset = self._candidate.materialize(
+            base_sha,
+            after_sha,
+            [
+                Slice(
+                    file=(None, "a.ts"),
+                    anchors=[Anchor(base=(0, 0), after=(1, 2))],
+                ),
+                Slice(
+                    file=(None, "b.ts"),
+                    anchors=[Anchor(base=(0, 0), after=(1, 2))],
+                ),
+            ],
+            "after",
+        )
+
+        rendered = str(patchset)
+
+        self.assertIn("diff --git /dev/null b/a.ts", rendered)
+        self.assertIn("diff --git /dev/null b/b.ts", rendered)
+        self.assertEqual(
+            PatchRenderer(rendered).slices(["0-0-0", "1-0-0"]),
+            [
+                Slice(file=(None, "a.ts"), anchors=[Anchor(base=(0, 0), after=(1, 2))]),
+                Slice(file=(None, "b.ts"), anchors=[Anchor(base=(0, 0), after=(1, 2))]),
+            ],
+        )
 
     def test_random_composition_matches_pygit_unidiff(self) -> None:
         rng = random.Random()
@@ -2771,7 +3479,7 @@ class TestSourceDelta(unittest.TestCase):
         def render(lines: list[str]) -> str:
             return "".join(f"{line}\n" for line in lines)
 
-        def normalize(parsed: unidiff_patch.PatchSet) -> str:
+        def normalize(parsed: PatchSet) -> str:
             parsed[0].patch_info = None
             for hunk in parsed[0]:
                 hunk.section_header = ""
@@ -2872,8 +3580,8 @@ class TestSourceDelta(unittest.TestCase):
             )
 
             self.assertEqual(
-                normalize(unidiff_patch.PatchSet(actual)),
-                normalize(unidiff_patch.PatchSet(patch.text)),
+                normalize(PatchSet(actual)),
+                normalize(PatchSet(patch.text)),
             )
 
 
