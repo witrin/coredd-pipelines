@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from textwrap import dedent
 
-from benchmark.attribution.diff import Context, PatchView, SourceDelta
+from benchmark.attribution.diff import Context, PatchContext, PatchView, SourceDelta
 from benchmark.attribution.domain import Anchor, FileOperation, OperationType, Slice
 from benchmark.attribution.history import VersionControl
 from benchmark.attribution.history_fixture import HistoryFixture
@@ -3537,11 +3537,11 @@ class TestSourceDelta(unittest.TestCase):
             patch = list(self._repository.diff(base, head))[0]
 
             actual = str(
-                self._candidate.project(
+                PatchContext.project(
                     operation,
                     self._candidate.read(base, operation.base),
                     self._candidate.read(head, operation.after),
-                    self._candidate.merge(
+                    PatchContext.merge(
                         [
                             Context(
                                 base=(
@@ -3573,7 +3573,7 @@ class TestSourceDelta(unittest.TestCase):
                                 changes=[change],
                             )
                             for hunk in patch.hunks
-                            for change in self._candidate.extract(hunk)
+                            for change in PatchContext.extract(hunk)
                         ]
                     ),
                 )

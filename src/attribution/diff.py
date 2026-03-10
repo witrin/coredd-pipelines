@@ -335,6 +335,188 @@ class PatchView:
         return path
 
 
+class PatchContext:
+    @staticmethod
+    def project(
+        file: FileOperation,
+        base: bytes | None,
+        after: bytes | None,
+        hunks: List[Context],
+    ) -> PatchedFile:
+        source_ref = f"a/{file.base}" if file.base else "/dev/null"
+        target_ref = f"b/{file.after}" if file.after else "/dev/null"
+        result = PatchedFile(
+            patch_info=PatchInfo([f"diff --git {source_ref} {target_ref}\n"]),
+            source=source_ref,
+            target=target_ref,
+        )
+
+        source = (
+            base.decode("utf-8", "ignore").splitlines(keepends=True)
+            if base is not None
+            else []
+        )
+
+        target = (
+            after.decode("utf-8", "ignore").splitlines(keepends=True)
+            if after is not None
+            else []
+        )
+
+        for h in hunks:
+            # In unified diff, a hunk that affects zero lines is rendered
+            # as an insertion after line N. Our internal model stores
+            # boundaries before line k, so when a range contains no lines
+            # we subtract one from the start when writing the header.
+            # See also https://www.gnu.org/software/diffutils/manual/html_node/Detailed-Unified.html
+            hunk = patch.Hunk(
+                src_start=(
+                    max(0, h.base[0] - 1) if (h.base[1] - h.base[0]) == 0 else h.base[0]
+                ),
+                src_len=(h.base[1] - h.base[0]),
+                tgt_start=(
+                    max(0, h.after[0] - 1)
+                    if (h.after[1] - h.after[0]) == 0
+                    else h.after[0]
+                ),
+                tgt_len=(h.after[1] - h.after[0]),
+                section_header="",
+            )
+
+            cursor = (h.base[0], h.after[0])  # (base_cursor, after_cursor)
+
+            for change in h.changes:
+                for line in source[
+                    cursor[0]
+                    - 1 : cursor[0]
+                    - 1
+                    + min(change.base[0] - cursor[0], change.after[0] - cursor[1])
+                ]:
+                    hunk.append(patch.Line(line, " "))
+
+                for line in source[change.base[0] - 1 : change.base[1] - 1]:
+                    hunk.append(patch.Line(line, "-"))
+
+                for line in target[change.after[0] - 1 : change.after[1] - 1]:
+                    hunk.append(patch.Line(line, "+"))
+
+                cursor = (change.base[1], change.after[1])
+
+            for line in source[
+                cursor[0]
+                - 1 : cursor[0]
+                - 1
+                + min(h.base[1] - cursor[0], h.after[1] - cursor[1])
+            ]:
+                hunk.append(patch.Line(line, " "))
+
+            result.append(hunk)
+
+        return result
+
+    @staticmethod
+    def merge(hunks: List[Context]) -> List[Context]:
+        if not hunks:
+            return []
+
+        hunks = sorted(hunks, key=lambda h: (h.base[0], h.after[0]))
+
+        result: List[Context] = [hunks[0]]
+
+        for candidate in hunks[1:]:
+            active = result[-1]
+
+            if (
+                active.base[1] > candidate.base[0]
+                or active.after[1] > candidate.after[0]
+            ):
+                result[-1] = Context(
+                    base=(
+                        min(active.base[0], candidate.base[0]),
+                        max(active.base[1], candidate.base[1]),
+                    ),
+                    after=(
+                        min(active.after[0], candidate.after[0]),
+                        max(active.after[1], candidate.after[1]),
+                    ),
+                    changes=active.changes + candidate.changes,
+                )
+            else:
+                result.append(candidate)
+
+        return result
+
+    @staticmethod
+    @overload
+    def extract(hunk: pygit2.Patch) -> List[Context]: ...
+
+    @staticmethod
+    @overload
+    def extract(hunk: pygit2.Hunk) -> List[Anchor]: ...
+
+    @staticmethod
+    def extract(hunk: pygit2.Patch | pygit2.Hunk) -> List[Context] | List[Anchor]:
+        if isinstance(hunk, pygit2.Patch):
+            result: List[Context] = []
+
+            for item in hunk.hunks:
+                base = item.old_start + (1 if item.old_lines == 0 else 0)
+                after = item.new_start + (1 if item.new_lines == 0 else 0)
+                result.append(
+                    Context(
+                        base=(base, base + item.old_lines),
+                        after=(after, after + item.new_lines),
+                        changes=PatchContext.extract(item),
+                    )
+                )
+
+            return result
+
+        # In unified diff, a hunk that affects zero lines is rendered
+        # as an insertion after line N. Our internal model stores
+        # boundaries before line k, so when a range contains no lines
+        # we subtract one from the start when writing the header.
+        # See also https://www.gnu.org/software/diffutils/manual/html_node/Detailed-Unified.html
+        base = hunk.old_start + (1 if hunk.old_lines == 0 else 0)
+        after = hunk.new_start + (1 if hunk.new_lines == 0 else 0)
+
+        out: List[Anchor] = []
+
+        open = False
+        start = base
+        end = base
+        lower = after
+        upper = after
+
+        for line in hunk.lines:
+            origin = line.origin
+
+            if origin == " ":
+                if open:
+                    out.append(Anchor(base=(start, end), after=(lower, upper)))
+                    open = False
+                base += 1
+                after += 1
+                continue
+
+            if not open:
+                open = True
+                start = end = base
+                lower = upper = after
+
+            if origin == "-":
+                end = base + 1
+                base += 1
+            elif origin == "+":
+                upper = after + 1
+                after += 1
+
+        if open:
+            out.append(Anchor(base=(start, end), after=(lower, upper)))
+
+        return out
+
+
 class SourceDelta:
     # TODO: Add the paper's explicit line-based expansion for supported-language
     # changes outside enclosing scopes. The current implementation always expands
@@ -456,7 +638,7 @@ class SourceDelta:
 
                 changes: List[Anchor] = []
                 for hunk in delta.hunks:
-                    changes.extend(self.extract(hunk))
+                    changes.extend(PatchContext.extract(hunk))
                 changes = [
                     change
                     for change in changes
@@ -495,17 +677,17 @@ class SourceDelta:
                         )
                     )
 
-                hunks = [hunk for hunk in self.merge(hunks)]
+                hunks = [hunk for hunk in PatchContext.merge(hunks)]
             else:
                 delta = self._locate(
                     self.repository.diff(base, after, context=n), file
                 )
                 if delta is None:
                     continue
-                hunks.extend(self.extract(delta))
+                hunks.extend(PatchContext.extract(delta))
 
             if hunks:
-                result.append(self.project(file, source, target, hunks))
+                result.append(PatchContext.project(file, source, target, hunks))
 
         return result
 
@@ -606,7 +788,7 @@ class SourceDelta:
                 if delta is None:
                     continue
                 primary_range = base_range if anchor == "base" else after_range
-                for current in self.extract(delta):
+                for current in PatchContext.extract(delta):
                     for change in current.changes:
                         if not self._overlaps(
                             change.base if anchor == "base" else change.after,
@@ -624,7 +806,7 @@ class SourceDelta:
 
                 scopes = [
                     current
-                    for current in self.extract(delta)
+                    for current in PatchContext.extract(delta)
                     if self._overlaps(current.base, base_range)
                     or self._overlaps(current.after, after_range)
                 ]
@@ -650,7 +832,7 @@ class SourceDelta:
                 )
 
             result.append(
-                self.project(
+                PatchContext.project(
                     operation,
                     source,
                     target,
@@ -941,183 +1123,3 @@ class SourceDelta:
             after=(min(low[1], anchors[1][0]), max(high[1] + 1, anchors[1][1])),
             changes=[change],
         )
-
-    @staticmethod
-    def project(
-        file: FileOperation,
-        base: bytes | None,
-        after: bytes | None,
-        hunks: List[Context],
-    ) -> PatchedFile:
-        source_ref = f"a/{file.base}" if file.base else "/dev/null"
-        target_ref = f"b/{file.after}" if file.after else "/dev/null"
-        result = PatchedFile(
-            patch_info=PatchInfo([f"diff --git {source_ref} {target_ref}\n"]),
-            source=source_ref,
-            target=target_ref,
-        )
-
-        source = (
-            base.decode("utf-8", "ignore").splitlines(keepends=True)
-            if base is not None
-            else []
-        )
-
-        target = (
-            after.decode("utf-8", "ignore").splitlines(keepends=True)
-            if after is not None
-            else []
-        )
-
-        for h in hunks:
-            # In unified diff, a hunk that affects zero lines is rendered
-            # as an insertion after line N. Our internal model stores
-            # boundaries before line k, so when a range contains no lines
-            # we subtract one from the start when writing the header.
-            # See also https://www.gnu.org/software/diffutils/manual/html_node/Detailed-Unified.html
-            hunk = patch.Hunk(
-                src_start=(
-                    max(0, h.base[0] - 1) if (h.base[1] - h.base[0]) == 0 else h.base[0]
-                ),
-                src_len=(h.base[1] - h.base[0]),
-                tgt_start=(
-                    max(0, h.after[0] - 1)
-                    if (h.after[1] - h.after[0]) == 0
-                    else h.after[0]
-                ),
-                tgt_len=(h.after[1] - h.after[0]),
-                section_header="",
-            )
-
-            cursor = (h.base[0], h.after[0])  # (base_cursor, after_cursor)
-
-            for change in h.changes:
-                for line in source[
-                    cursor[0]
-                    - 1 : cursor[0]
-                    - 1
-                    + min(change.base[0] - cursor[0], change.after[0] - cursor[1])
-                ]:
-                    hunk.append(patch.Line(line, " "))
-
-                for line in source[change.base[0] - 1 : change.base[1] - 1]:
-                    hunk.append(patch.Line(line, "-"))
-
-                for line in target[change.after[0] - 1 : change.after[1] - 1]:
-                    hunk.append(patch.Line(line, "+"))
-
-                cursor = (change.base[1], change.after[1])
-
-            for line in source[
-                cursor[0]
-                - 1 : cursor[0]
-                - 1
-                + min(h.base[1] - cursor[0], h.after[1] - cursor[1])
-            ]:
-                hunk.append(patch.Line(line, " "))
-
-            result.append(hunk)
-
-        return result
-
-    @staticmethod
-    def merge(hunks: List[Context]) -> List[Context]:
-        if not hunks:
-            return []
-
-        hunks = sorted(hunks, key=lambda h: (h.base[0], h.after[0]))
-
-        result: List[Context] = [hunks[0]]
-
-        for candidate in hunks[1:]:
-            active = result[-1]
-
-            if (
-                active.base[1] > candidate.base[0]
-                or active.after[1] > candidate.after[0]
-            ):
-                result[-1] = Context(
-                    base=(
-                        min(active.base[0], candidate.base[0]),
-                        max(active.base[1], candidate.base[1]),
-                    ),
-                    after=(
-                        min(active.after[0], candidate.after[0]),
-                        max(active.after[1], candidate.after[1]),
-                    ),
-                    changes=active.changes + candidate.changes,
-                )
-            else:
-                result.append(candidate)
-
-        return result
-
-    @staticmethod
-    @overload
-    def extract(hunk: pygit2.Patch) -> List[Context]: ...
-
-    @staticmethod
-    @overload
-    def extract(hunk: pygit2.Hunk) -> List[Anchor]: ...
-
-    @staticmethod
-    def extract(hunk: pygit2.Patch | pygit2.Hunk) -> List[Context] | List[Anchor]:
-        if isinstance(hunk, pygit2.Patch):
-            result: List[Context] = []
-
-            for item in hunk.hunks:
-                base = item.old_start + (1 if item.old_lines == 0 else 0)
-                after = item.new_start + (1 if item.new_lines == 0 else 0)
-                result.append(
-                    Context(
-                        base=(base, base + item.old_lines),
-                        after=(after, after + item.new_lines),
-                        changes=SourceDelta.extract(item),
-                    )
-                )
-
-            return result
-
-        # In unified diff, a hunk that affects zero lines is rendered
-        # as an insertion after line N. Our internal model stores
-        # boundaries before line k, so when a range contains no lines
-        # we subtract one from the start when writing the header.
-        # See also https://www.gnu.org/software/diffutils/manual/html_node/Detailed-Unified.html
-        base = hunk.old_start + (1 if hunk.old_lines == 0 else 0)
-        after = hunk.new_start + (1 if hunk.new_lines == 0 else 0)
-
-        out: List[Anchor] = []
-
-        open = False
-        start = base
-        end = base
-        lower = after
-        upper = after
-
-        for line in hunk.lines:
-            origin = line.origin
-
-            if origin == " ":
-                if open:
-                    out.append(Anchor(base=(start, end), after=(lower, upper)))
-                    open = False
-                base += 1
-                after += 1
-                continue
-
-            if not open:
-                open = True
-                start = end = base
-                lower = upper = after
-
-            if origin == "-":
-                end = base + 1
-                base += 1
-            elif origin == "+":
-                upper = after + 1
-                after += 1
-
-        if open:
-            out.append(Anchor(base=(start, end), after=(lower, upper)))
-
-        return out
