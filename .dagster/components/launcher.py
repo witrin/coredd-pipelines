@@ -113,11 +113,18 @@ class CloudRunJobRunLauncher(RunLauncher):
         instance = self._require_instance()
         run_id = dagster_run.run_id
         job_name = self._job_name_for_run(context)
+        tier = self._tier(context)
         payload = {
             "overrides": {
                 "containerOverrides": [
                     {
                         "args": [run_id],
+                        "resources": {
+                            "limits": {
+                                "cpu": tier["cpu"],
+                                "memory": tier["memory"],
+                            }
+                        },
                     }
                 ]
             }
@@ -128,7 +135,10 @@ class CloudRunJobRunLauncher(RunLauncher):
             f"locations/{self._config.region}/jobs/{job_name}:run"
         )
 
-        logger.info("Launching Cloud Run Job %s for run %s", job_name, run_id)
+        logger.info(
+            "Launching Cloud Run Job %s for run %s (tier=%s, cpu=%s, memory=%s)",
+            job_name, run_id, tier["name"], tier["cpu"], tier["memory"],
+        )
 
         try:
             response = self._authorized_session.post(
@@ -257,6 +267,22 @@ class CloudRunJobRunLauncher(RunLauncher):
                 )
 
         return normalized
+
+    def _tier(self, context: LaunchRunContext) -> Mapping[str, str]:
+        tiers = {
+            "small": {"name": "small", "cpu": "1", "memory": "4Gi"},
+            "medium": {"name": "medium", "cpu": "2", "memory": "8Gi"},
+            "large": {"name": "large", "cpu": "4", "memory": "16Gi"},
+        }
+        tags = context.dagster_run.tags or {}
+        name = tags.get("cloud/tier", "small").strip().lower()
+        if name not in tiers:
+            logger.warning(
+                "Unknown cloud/tier tag %r for run %s, falling back to small",
+                name, context.dagster_run.run_id,
+            )
+            name = "small"
+        return tiers[name]
 
     def _max_slug_length(self, prefix: str) -> int:
         max_length = 63 - len(prefix) - 1

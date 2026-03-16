@@ -334,7 +334,8 @@ ensure_cloud_run_job() {
     --parallelism=1 \
     --max-retries=0 \
     --task-timeout=3600s \
-    --memory=4Gi \
+    --cpu=4 \
+    --memory=16Gi \
     --set-cloudsql-instances="${database_host}" \
     --set-env-vars="DAGSTER_HOME=/etc/dagster" \
     --set-env-vars="DATABASE_HOST=/cloudsql/${database_host}" \

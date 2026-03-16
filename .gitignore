@@ -4,6 +4,7 @@
 .eggs/
 .idea/
 .vscode/
+.tmp/
 __pycache__/
 pytest_cache/
 compose.override.yml
