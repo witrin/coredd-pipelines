@@ -3,6 +3,7 @@
 .env
 .eggs/
 .idea/
+.tmp/
 .vscode/
 __pycache__/
 pytest_cache/

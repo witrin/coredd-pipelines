@@ -45,7 +45,8 @@ class KnowledgeEntity:
     urn: str
     kind: str
     name: str
-    edge: str
+    operation: OperationType
+    source: str
 
 
 @dataclass(frozen=True)
@@ -732,8 +733,8 @@ class KnowledgeEntityGumtree:
         seen: set[tuple[str, str, str, str]] = set()
 
         for file in files:
-            for value in self.build_file(file):
-                key = (value.sha, value.path, value.urn, value.edge)
+            for value in self._build(file):
+                key = (value.sha, value.path, value.urn, value.operation)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -742,7 +743,7 @@ class KnowledgeEntityGumtree:
         result.sort(key=lambda value: (value.sha, value.kind, value.path, value.urn))
         return result
 
-    def build_file(self, file: KnowledgeFile) -> list[KnowledgeEntity]:
+    def _build(self, file: KnowledgeFile) -> list[KnowledgeEntity]:
         if file.parent is None or file.language is None:
             return []
 
@@ -797,7 +798,8 @@ class KnowledgeEntityGumtree:
             urn=urn,
             kind=kind,
             name=name,
-            edge=edge,
+            operation=OperationType[edge],
+            source="gumtree",
         )
 
     def _urn(self, urn: str, path: str) -> tuple[str, str]:
@@ -823,10 +825,18 @@ class KnowledgeEntityGit:
 
     def build(self, files: list[KnowledgeFile]) -> list[KnowledgeEntity]:
         result: list[KnowledgeEntity] = []
-        seen: set[tuple[str, str, str, str]] = set()
+        seen: set[tuple[str, str, str, OperationType]] = set()
 
         for file in files:
-            if file.parent is None or file.language is None:
+            if file.language is None:
+                continue
+
+            if file.parent is None or file.operation == OperationType.ADD:
+                self._collect(self._program(file, OperationType.ADD), seen, result)
+                continue
+
+            if file.operation == OperationType.DELETE:
+                self._collect(self._program(file, OperationType.DELETE), seen, result)
                 continue
 
             patch = self._patch(file)
@@ -836,15 +846,37 @@ class KnowledgeEntityGit:
             for hunk in patch.hunks:
                 value = self._entity(file, hunk.header)
                 if value is None:
-                    continue
-                key = (value.sha, value.path, value.urn, value.edge)
-                if key in seen:
-                    continue
-                seen.add(key)
-                result.append(value)
+                    value = self._program(file, OperationType.EDIT)
+                self._collect(value, seen, result)
 
         result.sort(key=lambda value: (value.sha, value.kind, value.path, value.urn))
         return result
+
+    def _collect(
+        self,
+        value: KnowledgeEntity,
+        seen: set[tuple[str, str, str, OperationType]],
+        result: list[KnowledgeEntity],
+    ) -> None:
+        key = (value.sha, value.path, value.urn, value.operation)
+        if key in seen:
+            return
+        seen.add(key)
+        result.append(value)
+
+    def _program(self, file: KnowledgeFile, operation: OperationType) -> KnowledgeEntity:
+        name = file.path.rsplit("/", 1)[-1]
+        if "." in name:
+            name = name.rsplit(".", 1)[0]
+        return KnowledgeEntity(
+            sha=file.sha,
+            path=file.path,
+            urn="entity:program",
+            kind="program",
+            name=name,
+            operation=operation,
+            source="git",
+        )
 
     def _patch(self, file: KnowledgeFile) -> pygit2.Patch | None:
         diff = self._repository.diff(cast(str, file.parent), file.sha)
@@ -871,7 +903,8 @@ class KnowledgeEntityGit:
             urn=f"entity:{kind}={name}",
             kind=kind,
             name=name,
-            edge="EDIT",
+            operation=OperationType.EDIT,
+            source="git",
         )
 
     def _header(
@@ -976,6 +1009,7 @@ class KnowledgeGraphMaterializer:
                     "path": entity.path,
                     "urn": entity.urn,
                     "name": entity.name,
+                    "source": entity.source,
                 },
             )
 
@@ -984,7 +1018,7 @@ class KnowledgeGraphMaterializer:
 
         for entity in state.entities:
             target = f"entity:{entity.path}:{entity.urn.removeprefix('entity:')}"
-            store.link(entity.edge, f"commit:{entity.sha}", target)
+            store.link(entity.operation.name, f"commit:{entity.sha}", target)
             store.link("IN", target, f"file:{entity.path}")
 
         for commit in state.commits:
@@ -1095,7 +1129,7 @@ class KnowledgeAuditBuilder:
 
             count += 1
             try:
-                entities += len(self._entities.build_file(file))
+                entities += len(self._entities.build([file]))
             except Exception as error:
                 failures.append(
                     self._failure(

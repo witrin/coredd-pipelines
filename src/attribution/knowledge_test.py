@@ -49,6 +49,7 @@ class TestKnowledgeGraphBuilder(unittest.TestCase):
                     "path": "a.py",
                     "urn": "entity:function=foo",
                     "name": "foo",
+                    "source": "gumtree",
                 },
             )
 
@@ -125,7 +126,8 @@ class TestKnowledgeGraphBuilder(unittest.TestCase):
                         urn="entity:function=foo",
                         kind="function",
                         name="foo",
-                        edge="EDIT",
+                        operation=OperationType.EDIT,
+                        source="git",
                     )
                 ],
             ) as fallback:
@@ -176,7 +178,8 @@ class TestKnowledgeGraphBuilder(unittest.TestCase):
                         urn="entity:function=foo",
                         kind="function",
                         name="foo",
-                        edge="EDIT",
+                        operation=OperationType.EDIT,
+                        source="git",
                     ),
                     KnowledgeEntity(
                         sha=after,
@@ -184,7 +187,8 @@ class TestKnowledgeGraphBuilder(unittest.TestCase):
                         urn="entity:function=bar",
                         kind="function",
                         name="bar",
-                        edge="EDIT",
+                        operation=OperationType.EDIT,
+                        source="git",
                     ),
                 ],
             ) as fallback:
@@ -435,7 +439,8 @@ class TestKnowledgeEntityGit(unittest.TestCase):
                     urn="entity:function=foo",
                     kind="function",
                     name="foo",
-                    edge="EDIT",
+                    operation=OperationType.EDIT,
+                    source="git",
                 )
             ],
         )
@@ -456,7 +461,8 @@ class TestKnowledgeEntityGit(unittest.TestCase):
                     urn="entity:class=Foo",
                     kind="class",
                     name="Foo",
-                    edge="EDIT",
+                    operation=OperationType.EDIT,
+                    source="git",
                 )
             ],
         )
@@ -483,7 +489,8 @@ class TestKnowledgeEntityGit(unittest.TestCase):
                     urn="entity:function=foo",
                     kind="function",
                     name="foo",
-                    edge="EDIT",
+                    operation=OperationType.EDIT,
+                    source="git",
                 )
             ],
         )
@@ -493,7 +500,127 @@ class TestKnowledgeEntityGit(unittest.TestCase):
             self._repository([self._patch("a.py", "a.py", ["@@ -1,2 +1,2 @@\n"])])
         ).build([self._file(path="a.py", language="python")])
 
-        self.assertEqual(entity, [])
+        self.assertEqual(
+            entity,
+            [
+                KnowledgeEntity(
+                    sha="after",
+                    path="a.py",
+                    urn="entity:program",
+                    kind="program",
+                    name="a",
+                    operation=OperationType.EDIT,
+                    source="git",
+                )
+            ],
+        )
+
+    def test_build_add_file(self) -> None:
+        file = KnowledgeFile(
+            sha="after",
+            parent=None,
+            base="a.py",
+            after="a.py",
+            path="a.py",
+            language="python",
+            operation=OperationType.ADD,
+        )
+        entity = KnowledgeEntityGit(
+            self._repository([])
+        ).build([file])
+
+        self.assertEqual(
+            entity,
+            [
+                KnowledgeEntity(
+                    sha="after",
+                    path="a.py",
+                    urn="entity:program",
+                    kind="program",
+                    name="a",
+                    operation=OperationType.ADD,
+                    source="git",
+                )
+            ],
+        )
+
+    def test_build_add_file_diff(self) -> None:
+        file = KnowledgeFile(
+            sha="after",
+            parent="base",
+            base=None,
+            after="a.py",
+            path="a.py",
+            language="python",
+            operation=OperationType.ADD,
+        )
+        entity = KnowledgeEntityGit(
+            self._repository([])
+        ).build([file])
+
+        self.assertEqual(
+            entity,
+            [
+                KnowledgeEntity(
+                    sha="after",
+                    path="a.py",
+                    urn="entity:program",
+                    kind="program",
+                    name="a",
+                    operation=OperationType.ADD,
+                    source="git",
+                )
+            ],
+        )
+
+    def test_build_delete_file(self) -> None:
+        file = KnowledgeFile(
+            sha="after",
+            parent="base",
+            base="a.py",
+            after=None,
+            path="a.py",
+            language="python",
+            operation=OperationType.DELETE,
+        )
+        entity = KnowledgeEntityGit(
+            self._repository([])
+        ).build([file])
+
+        self.assertEqual(
+            entity,
+            [
+                KnowledgeEntity(
+                    sha="after",
+                    path="a.py",
+                    urn="entity:program",
+                    kind="program",
+                    name="a",
+                    operation=OperationType.DELETE,
+                    source="git",
+                )
+            ],
+        )
+
+    def test_build_empty_header_deduplicate(self) -> None:
+        entity = KnowledgeEntityGit(
+            self._repository(
+                [
+                    self._patch(
+                        "a.py",
+                        "a.py",
+                        [
+                            "@@ -1,2 +1,2 @@\n",
+                            "@@ -3,4 +3,4 @@\n",
+                        ],
+                    )
+                ]
+            )
+        ).build([self._file(path="a.py", language="python")])
+
+        self.assertEqual(len(entity), 1)
+        self.assertEqual(entity[0].urn, "entity:program")
+        self.assertEqual(entity[0].operation, OperationType.EDIT)
 
     def test_build_deduplicate(self) -> None:
         entity = KnowledgeEntityGit(
