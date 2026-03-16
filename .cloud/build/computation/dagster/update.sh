@@ -284,69 +284,82 @@ slugify_branch() {
 
 cloud_run_job_name() {
   local branch=$1
-  local slug base max_length
+  local tier=${2:-}
+  local slug base maximum suffix
   slug=$(slugify_branch "$branch") || return 1
   base="pipelines"
-  max_length=$((63 - ${#base} - 1))
-  if (( max_length < 1 )); then
-    echo "Skip job $branch (job name too long)" >&2
+  suffix=""
+  if [[ -n "$tier" ]]; then
+    suffix="-${tier}"
+  fi
+  maximum=$((63 - ${#base} - ${#suffix} - 1))
+  if (( maximum < 1 )); then
+    echo "Skip job $branch $tier (job name too long)" >&2
     return 1
   fi
-  slug=${slug:0:max_length}
+  slug=${slug:0:maximum}
   slug="${slug%-}"
   if [[ -z "$slug" ]]; then
-    echo "Skip job $branch (slug empty)" >&2
+    echo "Skip job $branch $tier (slug empty)" >&2
     return 1
   fi
 
-  printf '%s-%s\n' "$base" "$slug"
+  printf '%s-%s%s\n' "$base" "$slug" "$suffix"
 }
 
 ensure_cloud_run_job() {
   local branch=$1
-  local job image
+  local tier job image cpu memory
 
-  job=$(cloud_run_job_name "$branch") || {
-    echo "Skip job $branch (invalid name)"
-    return 0
-  }
+  for tier in small medium large; do
+    case $tier in
+      small)  cpu=1 memory=4Gi ;;
+      medium) cpu=2 memory=8Gi ;;
+      large)  cpu=4 memory=16Gi ;;
+    esac
 
-  image=$(gcloud run jobs describe "$job" \
-    --project="$project" \
-    --region="$region" \
-    --format='value(template.template.containers[0].image)' 2>/dev/null || true)
+    job=$(cloud_run_job_name "$branch" "$tier") || {
+      echo "Skip job $branch $tier (invalid name)"
+      continue
+    }
 
-  active_jobs["$job"]=1
-  
-  if [[ "$image" == "${job_registry}:$branch" ]]; then
-    echo "Job ok $branch ($job)"
-    return 0
-  fi
-  
-  echo "Deploy job $branch ($job)"
-  
-  gcloud run jobs deploy "$job" \
-    --project="$project" \
-    --region="$region" \
-    --image="${job_registry}:$branch" \
-    --service-account="$account" \
-    --tasks=1 \
-    --parallelism=1 \
-    --max-retries=0 \
-    --task-timeout=3600s \
-    --cpu=4 \
-    --memory=16Gi \
-    --set-cloudsql-instances="${database_host}" \
-    --set-env-vars="DAGSTER_HOME=/etc/dagster" \
-    --set-env-vars="DATABASE_HOST=/cloudsql/${database_host}" \
-    --set-env-vars="DATABASE_USER=${database_user}" \
-    --set-env-vars="DATABASE_NAME=${database_name}" \
-    --set-secrets="DATABASE_PASSWORD=${database_password}" \
-    ${secrets:+--set-secrets="$(echo "$secrets" | paste -sd,)"} \
-    --set-env-vars="CLOUD_BUCKET=${bucket}" \
-    --set-env-vars="CLOUD_PROJECT=${project}" \
-    --set-env-vars="DAGSTER_LOCATION=$branch" \
-    --quiet
+    image=$(gcloud run jobs describe "$job" \
+      --project="$project" \
+      --region="$region" \
+      --format='value(template.template.containers[0].image)' 2>/dev/null || true)
+
+    active_jobs["$job"]=1
+
+    if [[ "$image" == "${job_registry}:$branch" ]]; then
+      echo "Job ok $branch $tier ($job)"
+      continue
+    fi
+
+    echo "Deploy job $branch $tier ($job)"
+
+    gcloud run jobs deploy "$job" \
+      --project="$project" \
+      --region="$region" \
+      --image="${job_registry}:$branch" \
+      --service-account="$account" \
+      --tasks=1 \
+      --parallelism=1 \
+      --max-retries=0 \
+      --task-timeout=3600s \
+      --cpu="$cpu" \
+      --memory="$memory" \
+      --set-cloudsql-instances="${database_host}" \
+      --set-env-vars="DAGSTER_HOME=/etc/dagster" \
+      --set-env-vars="DATABASE_HOST=/cloudsql/${database_host}" \
+      --set-env-vars="DATABASE_USER=${database_user}" \
+      --set-env-vars="DATABASE_NAME=${database_name}" \
+      --set-secrets="DATABASE_PASSWORD=${database_password}" \
+      ${secrets:+--set-secrets="$(echo "$secrets" | paste -sd,)"} \
+      --set-env-vars="CLOUD_BUCKET=${bucket}" \
+      --set-env-vars="CLOUD_PROJECT=${project}" \
+      --set-env-vars="DAGSTER_LOCATION=$branch" \
+      --quiet
+  done
 }
 
 cleanup_cloud_run_jobs() {
