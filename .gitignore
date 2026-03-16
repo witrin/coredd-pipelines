@@ -3,6 +3,7 @@
 .env
 .eggs/
 .idea/
+.tmp/
 .vscode/
 .tmp/
 __pycache__/

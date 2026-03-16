@@ -119,6 +119,7 @@ def scope_repository_cohort_sensor(
         return None
 
     import polars as pl
+
     df = pl.from_arrow(table)
 
     names = sorted(df["name"].to_list())
@@ -180,7 +181,9 @@ def scope_repository_set_sensor(
     for row in df.iter_rows(named=True):
         space = Shard.to_space(names, row["name"])
 
-        creation = datetime.fromisoformat(str(row["creation"]).replace("Z", "+00:00")).date()
+        creation = datetime.fromisoformat(
+            str(row["creation"]).replace("Z", "+00:00")
+        ).date()
         today = date.today()
         current = date(today.year, today.month, 1)
 
@@ -227,6 +230,47 @@ def scope_repository_set_sensor(
 
     context.log.info(
         "Updated source partitions with +%d / -%d",
+        len(to_add),
+        len(to_remove),
+    )
+
+    return None
+
+
+@asset_sensor(
+    asset_key="ingest_validation_set",
+)
+def ingest_validation_sources_partition_sensor(
+    context: dg.SensorEvaluationContext,
+    asset_event: dg.EventLogEntry,
+):
+    """Populate partitions for validation source ingestion."""
+    import polars as pl
+
+    storage = AssetCloudStorage()
+    table = storage.load(context, event=asset_event)
+
+    if table is None or table.num_rows == 0:
+        context.log.info("No data found for ingest_validation_set.")
+        return None
+
+    instance = context.instance
+    df = pl.from_arrow(table)
+    names = sorted(df["repository"].unique().to_list())
+    keys = {Shard.to_space(names, name) for name in names}
+
+    existing = set(instance.get_dynamic_partitions("ingest_validation_sources"))
+    to_add = keys - existing
+    to_remove = existing - keys
+
+    if to_add:
+        instance.add_dynamic_partitions("ingest_validation_sources", list(to_add))
+    if to_remove:
+        for key in to_remove:
+            instance.delete_dynamic_partition("ingest_validation_sources", key)
+
+    context.log.info(
+        "Updated validation source partitions with +%d / -%d",
         len(to_add),
         len(to_remove),
     )

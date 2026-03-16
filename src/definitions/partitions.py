@@ -224,3 +224,7 @@ scope_repository_cohort_partition = dg.DynamicPartitionsDefinition(
 ingest_raw_partition = dg.DynamicPartitionsDefinition(name="ingest_raw")
 
 ingest_source_partition = dg.DynamicPartitionsDefinition(name="ingest_source")
+
+ingest_validation_sources_partition = dg.DynamicPartitionsDefinition(
+    name="ingest_validation_sources"
+)

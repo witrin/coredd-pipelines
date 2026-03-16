@@ -1,4 +1,7 @@
 import json
+import base64
+import tarfile
+import tempfile
 from typing import Dict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -6,15 +9,19 @@ from pathlib import Path
 from components.decorator import asset
 from components.infrastructure import GithubResource
 from benchmark.definitions import partitions
+from benchmark.attribution.history import VersionControl
+from benchmark.attribution.knowledge import KnowledgeGraphBuilder
 from benchmark.scope.cohort import ChangeCollector, IssueCollector
 from benchmark.scope.ingestion import ChangeExtractor, IssueExtractor, SourceExtractor
-from components.io import BlobStream
+from components.io import AssetCloudStorage, BlobStream
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import dagster as dg
-from google.cloud import bigquery
+from google.cloud import bigquery, storage
 from github.GithubException import UnknownObjectException
+import ormsgpack
+import pygit2
 
 
 class BigQueryQueryConfig(dg.Config):
@@ -393,7 +400,7 @@ def ingest_repository_cohort(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "2.0.0"},
     group_name="scope",
 )
 def scope_repository_set(
@@ -408,17 +415,18 @@ def scope_repository_set(
     # just a test for now
     result = (
         df.select(["name", "creation"])
-        .filter(pl.col("name") == "microsoft/agent-framework")
+        .filter(pl.col("name") == "aws/aws-advanced-nodejs-wrapper")
         .unique()
         .sort("name")
     )
 
     context.log.info("Repository set contains %d repositories.", result.height)
+
     return result.to_arrow()
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "2.1.0"},
     partitions_def=partitions.ingest_raw_partition,
     group_name="ingest",
     kinds={"github"},
@@ -456,8 +464,8 @@ def ingest_changes_raw(
         end,
     )
 
-    collector = ChangeExtractor(github.client(), repository, log=context.log.warning)
-    table = collector.collect(start, end)
+    extractor = ChangeExtractor(github.client(), repository, log=context.log.warning)
+    table = extractor.extract(start, end)
 
     context.log.info(
         "Extracted %d raw records for %s.",
@@ -469,7 +477,7 @@ def ingest_changes_raw(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "2.0.0"},
     partitions_def=partitions.ingest_raw_partition,
     group_name="ingest",
     kinds={"github"},
@@ -520,7 +528,7 @@ def ingest_issues_raw(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "2.0.0"},
     partitions_def=partitions.ingest_source_partition,
     group_name="ingest",
     kinds={"github"},
@@ -543,3 +551,189 @@ def ingest_sources_raw(
 
     extractor = SourceExtractor(github.client(), repository, log=context.log.info)
     return extractor.extract()
+
+
+@asset(
+    metadata={"version": "1.1.0"},
+    group_name="ingest",
+    kinds={"github"},
+    pool="github",
+)
+def ingest_validation_set(
+    context: dg.AssetExecutionContext,
+    github: GithubResource,
+) -> pa.Table:
+    """Ingest the Rosa validation dataset."""
+    client = github.client()
+    repository = client.get_repo("grosa1/icse2021-szz-replication-package")
+    branch = repository.default_branch
+    source = repository.get_contents(
+        "detailed-database/language-filtered.json", ref=branch
+    )
+    rows: list[dict[str, object]] = []
+
+    for item in json.loads(
+        base64.b64decode(repository.get_git_blob(source.sha).content)
+    ):
+        correction = ((item.get("fix") or {}).get("commit") or {}).get("hash")
+        name = item.get("repository")
+
+        if not isinstance(name, str) or not isinstance(correction, str):
+            continue
+
+        languages = sorted(
+            {
+                language
+                for file in (item.get("fix") or {}).get("files") or []
+                for language in [file.get("lang")]
+                if isinstance(language, str) and language != ""
+            }
+        )
+        if not set(languages).intersection({"js", "py"}):
+            continue
+
+        defects = [
+            defect
+            for defect in [
+                ((bug.get("commit") or {}).get("hash"))
+                for bug in item.get("bugs") or []
+            ]
+            if isinstance(defect, str)
+        ]
+
+        rows.append(
+            {
+                "repository": name,
+                "languages": languages,
+                "correction": correction,
+                "defects": defects,
+            }
+        )
+
+    rows.sort(key=lambda row: (str(row["repository"]), str(row["correction"])))
+    table = pa.Table.from_pylist(rows)
+
+    context.log.info("Ingested %d validation rows.", table.num_rows)
+
+    return table
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    partitions_def=partitions.ingest_validation_sources_partition,
+    group_name="ingest",
+    kinds={"github"},
+    pool="github",
+)
+def ingest_validation_sources(
+    context: dg.AssetExecutionContext,
+    ingest_validation_set: pa.Table,
+    github: GithubResource,
+) -> BlobStream:
+    """Ingest validation repository source tarball."""
+    import polars as pl
+
+    partition = context.partition_key
+    df = pl.from_arrow(ingest_validation_set)
+    names = sorted(df["repository"].unique().to_list())
+    repository = partitions.Shard.from_space(partition, names)
+
+    context.log.info("Collecting validation source tarball for %s", repository)
+
+    extractor = SourceExtractor(github.client(), repository, log=context.log.info)
+    return extractor.extract()
+
+
+@asset(
+    metadata={"version": "1.1.0"},
+    partitions_def=partitions.ingest_validation_sources_partition,
+    group_name="ingest",
+    deps=["ingest-validation-sources"],
+    pool="default",
+)
+def ingest_validation_context(
+    context: dg.AssetExecutionContext,
+    ingest_validation_set: pa.Table,
+) -> pa.Table:
+    """Persist graph and tree context for validation cases in one repository partition."""
+    import polars as pl
+
+    rows = pl.from_arrow(ingest_validation_set)
+    names = sorted(rows["repository"].unique().to_list())
+    repository = partitions.Shard.from_space(context.partition_key, names)
+    cases = list(rows.filter(pl.col("repository") == repository).iter_rows(named=True))
+    schema = pa.schema(
+        [
+            *ingest_validation_set.schema,
+            pa.field("partition", pa.string()),
+            pa.field("archive", pa.string()),
+            pa.field("store", pa.binary()),
+            pa.field("trees", pa.binary()),
+        ]
+    )
+
+    if not cases:
+        return pa.Table.from_pylist([], schema=schema)
+
+    partition = (
+        context.partition_key.replace("|", ";").replace("/", "-").replace("_", "-")
+    )
+    prefix = (
+        "assets/ingest-validation-sources/"
+        "version=1.0.0/"
+        f"location={context.asset_key.path[0]}/"
+        f"partition={partition}/"
+    )
+    client = storage.Client()
+    bucket = AssetCloudStorage().bucket
+    blobs = [
+        blob
+        for blob in client.list_blobs(bucket, prefix=prefix)
+        if blob.name.endswith(".tar.gz")
+    ]
+
+    if not blobs:
+        raise FileNotFoundError(f"No tar.gz found under gs://{bucket}/{prefix}")
+
+    if len(blobs) != 1:
+        raise ValueError(
+            f"Expected exactly one tar.gz under gs://{bucket}/{prefix}, got {len(blobs)}"
+        )
+
+    with tempfile.TemporaryDirectory() as name:
+        work = Path(name)
+        archive = f"gs://{bucket}/{blobs[0].name}"
+        blobs[0].download_to_filename(str(work / "repository.tar.gz"))
+
+        with tarfile.open(work / "repository.tar.gz", "r:gz") as tar:
+            tar.extractall(work, filter="data")
+
+        control = VersionControl(pygit2.Repository(str(work / "repository.git")))
+        result: list[dict[str, object]] = []
+
+        for row in cases:
+            correction = str(row["correction"])
+            parents = control.parents(correction)
+            store = KnowledgeGraphBuilder(repository=control).build(
+                parents[0], correction
+            )
+            result.append(
+                {
+                    **{name: row[name] for name in ingest_validation_set.schema.names},
+                    "partition": context.partition_key,
+                    "archive": archive,
+                    "store": json.dumps(
+                        store.dump(),
+                        default=lambda value: (
+                            value.isoformat()
+                            if isinstance(value, datetime)
+                            else (_ for _ in ()).throw(
+                                TypeError(f"Unsupported JSON value {type(value)!r}")
+                            )
+                        ),
+                    ).encode("utf-8"),
+                    "trees": ormsgpack.packb(control.dump(store.chains())),
+                }
+            )
+
+    return pa.Table.from_pylist(result, schema=schema)

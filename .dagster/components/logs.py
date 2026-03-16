@@ -1,10 +1,3 @@
-"""Logging bootstrap used across pipelines containers.
-
-The module exposes a single class, ``LoggingBootstrap``, which centralises the
-logic for installing a stdout handler with either JSON or text formatting.
-Importing this file creates one instance and configures logging immediately.
-"""
-
 from __future__ import annotations
 
 import json
