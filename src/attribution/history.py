@@ -6,6 +6,7 @@ import tarfile
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Callable, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -17,9 +18,14 @@ from benchmark.attribution.domain import Change, Commit, FileOperation, Operatio
 class VersionControl:
     """Git operations backed by a pygit2 repository."""
 
-    def __init__(self, repository: pygit2.Repository) -> None:
+    def __init__(
+        self,
+        repository: pygit2.Repository,
+        filter: Callable[[str, str], str] | None = None,
+    ) -> None:
         self._repository = repository
         self._cache: dict[str, set[str]] = {}
+        self._filter = filter
 
     @staticmethod
     def create(
@@ -31,6 +37,7 @@ class VersionControl:
         partition: str,
         *,
         workdir: str | Path | None = None,
+        filter: Callable[[str, str], str] | None = None,
     ) -> VersionControl:
         """Download a bare repository from GCS and return a VersionControl instance."""
         work = Path(workdir or tempfile.mkdtemp())
@@ -59,7 +66,7 @@ class VersionControl:
         archive.unlink()
 
         git_dir = VersionControl._find_git_dir(work)
-        return VersionControl(pygit2.Repository(str(git_dir)))
+        return VersionControl(pygit2.Repository(str(git_dir)), filter=filter)
 
     @staticmethod
     def _find_git_dir(repo_dir: Path) -> Path:
@@ -80,6 +87,22 @@ class VersionControl:
 
         c = obj.peel(pygit2.Commit)
         return [str(pid) for pid in c.parent_ids]
+
+    def dump(self, chains: list[list[str]]) -> list[list[dict[str, object]]]:
+        result: list[list[dict[str, object]]] = []
+
+        for chain in chains:
+            current: list[dict[str, object]] = []
+            for sha in chain:
+                current.append(
+                    {
+                        "sha": sha,
+                        "files": self._files(sha),
+                    }
+                )
+            result.append(current)
+
+        return result
 
     def _first_parent_set(self, start: str) -> set[str]:
         if start in self._cache:
@@ -224,9 +247,12 @@ class VersionControl:
         if obj is None:
             raise ValueError(f"Commit {commit} not found in repository")
         c = obj.peel(pygit2.Commit)
+        message = c.message.strip()
+        if self._filter is not None:
+            message = self._filter("message", message)
         return Commit(
             sha=commit,
-            message=c.message.strip(),
+            message=message,
             time=datetime.fromtimestamp(c.commit_time, tz=timezone.utc),
             author=c.author.name,
         )
@@ -281,6 +307,36 @@ class VersionControl:
             elif entry.type_str == "blob":
                 blob = self._repository.get(entry.id)
                 path.write_bytes(blob.data)
+
+    def _files(self, commit: str) -> list[dict[str, object]]:
+        obj = self._repository.get(commit)
+        if obj is None:
+            raise ValueError(f"Commit {commit} not found")
+
+        values: list[dict[str, object]] = []
+        self._walk(obj.peel(pygit2.Commit).tree, "", values)
+        values.sort(key=lambda value: str(value["path"]))
+        return values
+
+    def _walk(
+        self,
+        tree: pygit2.Tree,
+        prefix: str,
+        values: list[dict[str, object]],
+    ) -> None:
+        for entry in tree:
+            path = f"{prefix}/{entry.name}" if prefix else entry.name
+            obj = self._repository.get(entry.id)
+            if isinstance(obj, pygit2.Tree):
+                self._walk(obj, path, values)
+                continue
+            if isinstance(obj, pygit2.Blob):
+                values.append(
+                    {
+                        "path": path,
+                        "content": obj.data,
+                    }
+                )
 
     def diff(
         self,
@@ -341,15 +397,223 @@ class VersionControl:
 
         return blob.data
 
+
+class VersionControlSnapshot:
+    """Snapshot-backed git operations replayed into a temporary pygit2 repository."""
+
+    def __init__(
+        self,
+        repository: pygit2.Repository,
+        work: tempfile.TemporaryDirectory[str],
+        forward: dict[str, str],
+        reverse: dict[str, str],
+    ) -> None:
+        self._repository = repository
+        self._work = work
+        self._forward = forward
+        self._reverse = reverse
+        self._runtime = VersionControl(repository)
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._work.cleanup()
+        self._closed = True
+
+    def __enter__(self) -> VersionControlSnapshot:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    @classmethod
+    def load(cls, data: list[list[dict[str, object]]]) -> VersionControlSnapshot:
+        work = tempfile.TemporaryDirectory()
+        repository = pygit2.init_repository(work.name, bare=True)
+        forward: dict[str, str] = {}
+        reverse: dict[str, str] = {}
+        snapshot = cls(repository, work, forward, reverse)
+
+        seen: dict[str, tuple[tuple[str, bytes], ...]] = {}
+        counter = 0
+
+        for chain in data:
+            parent: str | None = None
+
+            for item in chain:
+                original = str(item["sha"])
+                files = [
+                    {
+                        "path": str(file["path"]),
+                        "content": bytes(file["content"]),
+                    }
+                    for file in list(item["files"])
+                ]
+                current = tuple(
+                    sorted(
+                        (str(file["path"]), bytes(file["content"]))
+                        for file in files
+                    )
+                )
+
+                if original in forward:
+                    if seen[original] != current:
+                        raise ValueError(
+                            f"Snapshot commit {original} is defined with different content."
+                        )
+                    snapshot._validate(original, parent)
+                    parent = original
+                    continue
+
+                tree = snapshot._tree(files)
+                counter += 1
+                imported = str(
+                    repository.create_commit(
+                        None,
+                        pygit2.Signature(
+                            "Snapshot",
+                            "snapshot@test.local",
+                            counter,
+                        ),
+                        pygit2.Signature(
+                            "Snapshot",
+                            "snapshot@test.local",
+                            counter,
+                        ),
+                        original,
+                        tree,
+                        []
+                        if parent is None
+                        else [pygit2.Oid(hex=forward[parent])],
+                    )
+                )
+                forward[original] = imported
+                reverse[imported] = original
+                seen[original] = current
+                parent = original
+
+        return snapshot
+
+    def parents(self, commit: str) -> list[str]:
+        return [
+            self._reverse[parent]
+            for parent in self._runtime.parents(self._map(commit))
+        ]
+
+    def blame(
+        self, path: str, commit: str, lines: list[tuple[int, int]]
+    ) -> list[tuple[str | None, tuple[int, int] | None]]:
+        result = self._runtime.blame(path, self._map(commit), lines)
+        return [
+            (
+                None if sha is None else self._reverse[sha],
+                interval,
+            )
+            for sha, interval in result
+        ]
+
+    def materialize(
+        self, base: str, after: str, directory: str | Path
+    ) -> tuple[Path, Path, list[FileOperation]]:
+        return self._runtime.materialize(
+            self._map(base),
+            self._map(after),
+            directory,
+        )
+
+    def manifest(self, base: str, after: str) -> list[FileOperation]:
+        return self._runtime.manifest(self._map(base), self._map(after))
+
+    def meta(self, commit: str) -> Commit:
+        value = self._runtime.meta(self._map(commit))
+        return Commit(
+            sha=commit,
+            message=value.message,
+            time=value.time,
+            author=value.author,
+        )
+
+    def log(self, base: str, after: str, merge: bool = False) -> list[str]:
+        return [
+            self._reverse[sha]
+            for sha in self._runtime.log(
+                self._map(base),
+                self._map(after),
+                merge=merge,
+            )
+        ]
+
+    def diff(
+        self,
+        base: str,
+        after: str,
+        *,
+        context: int = 0,
+    ) -> pygit2.Diff:
+        return self._runtime.diff(self._map(base), self._map(after), context=context)
+
+    def blob(self, commit: str, path: str) -> bytes:
+        return self._runtime.blob(self._map(commit), path)
+
+    def _map(self, commit: str) -> str:
+        try:
+            return self._forward[commit]
+        except KeyError as error:
+            raise ValueError(f"Commit {commit} not found in snapshot") from error
+
+    def _validate(self, commit: str, parent: str | None) -> None:
+        current = self.parents(commit)
+        expected = [] if parent is None else [parent]
+        if current != expected:
+            raise ValueError(
+                f"Snapshot commit {commit} is linked to inconsistent parents."
+            )
+
+    def _tree(self, files: list[dict[str, object]]) -> pygit2.Oid:
+        root: dict[str, Any] = {}
+
+        for item in files:
+            parts = str(item["path"]).split("/")
+            current = root
+            for part in parts[:-1]:
+                current = cast(dict[str, Any], current.setdefault(part, {}))
+            current[parts[-1]] = bytes(item["content"])
+
+        return self._write(root)
+
+    def _write(self, node: dict[str, Any]) -> pygit2.Oid:
+        builder = self._repository.TreeBuilder()
+
+        for name in sorted(node):
+            value = node[name]
+            if isinstance(value, dict):
+                builder.insert(name, self._write(value), pygit2.GIT_FILEMODE_TREE)
+                continue
+            builder.insert(
+                name,
+                self._repository.create_blob(value),
+                pygit2.GIT_FILEMODE_BLOB,
+            )
+
+        return builder.write()
+
+
 class PlatformCache:
     """Parquet-backed cache containing PR metadata.
 
     Schema: name (string), type (string), number (int32), payload (large_string)
     """
 
-    def __init__(self, table: pa.Table, repository: VersionControl) -> None:
+    def __init__(
+        self,
+        table: pa.Table,
+        repository: VersionControl,
+        filter: Callable[[str, str], str] | None = None,
+    ) -> None:
         self._table = table
         self._repository = repository
+        self._filter = filter
         self._cache: dict[str, Change] = self._build_cache()
 
     def _build_cache(self) -> dict[str, Change]:
@@ -386,7 +650,12 @@ class PlatformCache:
             #         f"Squash and rebase are not yet supported."
             #     )
 
-            change = self._change_from_payload(number, payload, parents[0])
+            change = self._change_from_payload(
+                number,
+                payload,
+                parents[0],
+                filter=self._filter,
+            )
             cache[commit] = change
 
         return cache
@@ -400,7 +669,7 @@ class PlatformCache:
         version: str,
         partition: str,
         repository: VersionControl,
-        filter: function = None
+        filter: Callable[[str, str], str] | None = None,
     ) -> PlatformCache:
         """Download a Parquet asset from GCS and return a PlatformCache instance."""
         gcs_bucket = client.bucket(bucket)
@@ -420,11 +689,8 @@ class PlatformCache:
 
         data = blob.download_as_bytes()
         table = pq.read_table(pa.BufferReader(data))
-        
-        if filter:
-            table = filter(table)
-        
-        return PlatformCache(table, repository)
+
+        return PlatformCache(table, repository, filter=filter)
 
     def load(self, number: int) -> Change:
         """Load a Change by PR number."""
@@ -467,7 +733,13 @@ class PlatformCache:
             raise KeyError(f"Commit {commit} not found in any cached pull request")
 
     @staticmethod
-    def _change_from_payload(number: int, payload: dict, base: str) -> Change:
+    def _change_from_payload(
+        number: int,
+        payload: dict,
+        base: str,
+        *,
+        filter: Callable[[str, str], str] | None = None,
+    ) -> Change:
         merge_sha = payload.get("merge_commit_sha")
         if not merge_sha:
             raise ValueError(
@@ -477,6 +749,8 @@ class PlatformCache:
         title = payload.get("title") or ""
         body = payload.get("body") or ""
         description = f"{title}\n\n{body}".strip()
+        if filter is not None:
+            description = filter("description", description)
 
         return Change(
             number=number,

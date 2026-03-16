@@ -4,20 +4,17 @@ import unittest
 from pathlib import Path
 from textwrap import dedent
 
-from benchmark.attribution.diff import (
+from benchmark.attribution.diff.reference import PatchContext, PatchFactory, PatchView
+from benchmark.attribution.domain import (
+    Anchor,
     Context,
-    PatchContext,
-    PatchFactory,
-    PatchScope,
-    PatchView,
-    ScopePath,
-    Statement,
+    FileOperation,
+    OperationType,
+    Slice,
 )
-from benchmark.attribution.domain import Anchor, FileOperation, OperationType, Slice
 from benchmark.attribution.history import VersionControl
 from benchmark.attribution.history_fixture import HistoryFixture
 from unidiff import PatchSet
-
 
 class TestPatchView(unittest.TestCase):
     def test_render_aligns_references_with_separator(self) -> None:
@@ -225,946 +222,18 @@ class TestPatchView(unittest.TestCase):
         )
 
 
-class TestScopePath(unittest.TestCase):
-    def setUp(self) -> None:
-        self._candidate = PatchScope()
-
-    def _bind(
-        self,
-        base: str | None,
-        after: str | None,
-        *,
-        suffix: str = ".ts",
-        language: str | None = None,
-    ) -> ScopePath:
-        path = f"file{suffix}"
-        file = FileOperation(
-            path if base is not None else None,
-            path if after is not None else None,
-            (
-                OperationType.ADD
-                if base is None
-                else OperationType.DELETE if after is None else OperationType.EDIT
-            ),
-        )
-        return self._candidate.bind(
-            file,
-            dedent(base).lstrip("\n").encode() if base is not None else None,
-            dedent(after).lstrip("\n").encode() if after is not None else None,
-            language=language,
-        )
-
-    def test_bind_derives_language_from_file_operation(self) -> None:
-        scope = self._bind(
-            """
-            export class Foo {
-              bar() {
-                return 1;
-              }
-            }
-            """,
-            """
-            export class Foo {
-              bar() {
-                return 2;
-              }
-            }
-            """,
-        )
-
-        self.assertIsInstance(scope, ScopePath)
-        self.assertEqual(scope.language, "typescript")
-
-    def test_bind_respects_explicit_language_override(self) -> None:
-        scope = self._bind(
-            """
-            export class Foo {
-              bar() {
-                return 1;
-              }
-            }
-            """,
-            """
-            export class Foo {
-              bar() {
-                return 2;
-              }
-            }
-            """,
-            suffix=".txt",
-            language="typescript",
-        )
-
-        self.assertEqual(scope.language, "typescript")
-
-    def test_bind_rejects_unsupported_language(self) -> None:
-        with self.assertRaises(ValueError):
-            self._bind("ok\n", "ok\n", suffix=".txt")
-
-    def test_bind_raises_on_parse_error(self) -> None:
-        with self.assertRaises(RuntimeError):
-            self._bind(
-                """
-                export class Foo {
-                  bar( {
-                """,
-                """
-                export class Foo {
-                  bar() {
-                    return 1;
-                  }
-                }
-                """,
-            )
-
-    def test_resolve_returns_import_scope_anchor(self) -> None:
-        scope = self._bind(
-            """
-            import { TimeoutError } from "@opentelemetry/sdk-metrics";
-            export class Foo {
-              bar() {
-                return 1;
-              }
-            }
-            """,
-            """
-            import { AwsWrapperError } from "../../../utils/errors";
-            export class Foo {
-              bar() {
-                return 1;
-              }
-            }
-            """,
-        )
-
-        anchor = scope.resolve(Anchor(base=(1, 2), after=(1, 2)))
-
-        self.assertIsInstance(anchor[0], Statement)
-        self.assertIsInstance(anchor[1], Statement)
-        self.assertEqual(
-            anchor,
-            (
-                Statement(
-                    scope="scope:program",
-                    excerpt='import { TimeoutError } from "@opentelemetry/sdk-metrics";',
-                ),
-                Statement(
-                    scope="scope:program",
-                    excerpt='import { AwsWrapperError } from "../../../utils/errors";',
-                ),
-            ),
-        )
-
-    def test_resolve_returns_throw_scope_anchor(self) -> None:
-        scope = self._bind(
-            """
-            export class SuspendExecuteRouting {
-              async apply() {
-                if (ready) {
-                  throw new TimeoutError("boom");
-                }
-              }
-            }
-            """,
-            """
-            export class SuspendExecuteRouting {
-              async apply() {
-                if (ready) {
-                  throw new AwsWrapperError("boom");
-                }
-              }
-            }
-            """,
-        )
-
-        anchor = scope.resolve(Anchor(base=(4, 5), after=(4, 5)))
-
-        self.assertEqual(
-            anchor,
-            (
-                Statement(
-                    scope="scope:class=SuspendExecuteRouting:method=apply",
-                    excerpt='throw new TimeoutError("boom");',
-                ),
-                Statement(
-                    scope="scope:class=SuspendExecuteRouting:method=apply",
-                    excerpt='throw new AwsWrapperError("boom");',
-                ),
-            ),
-        )
-
-    def test_resolve_returns_after_only_scope_anchor_for_add_only_anchor(self) -> None:
-        scope = self._bind(
-            None,
-            """
-            import { AwsWrapperError } from "../../../utils/errors";
-            """,
-        )
-
-        self.assertEqual(
-            scope.resolve(Anchor(base=(0, 0), after=(1, 2))),
-            (
-                None,
-                Statement(
-                    scope="scope:program",
-                    excerpt='import { AwsWrapperError } from "../../../utils/errors";',
-                ),
-            ),
-        )
-
-    def test_resolve_returns_base_only_scope_anchor_for_delete_only_anchor(self) -> None:
-        scope = self._bind(
-            """
-            import { TimeoutError } from "@opentelemetry/sdk-metrics";
-            """,
-            None,
-        )
-
-        self.assertEqual(
-            scope.resolve(Anchor(base=(1, 2), after=(0, 0))),
-            (
-                Statement(
-                    scope="scope:program",
-                    excerpt='import { TimeoutError } from "@opentelemetry/sdk-metrics";',
-                ),
-                None,
-            ),
-        )
-
-    def test_resolve_returns_top_level_function_scope_anchor(self) -> None:
-        scope = self._bind(
-            """
-            function top() {
-              return 1;
-            }
-            """,
-            """
-            function top() {
-              return 2;
-            }
-            """,
-        )
-
-        self.assertEqual(
-            scope.resolve(Anchor(base=(1, 2), after=(1, 2))),
-            (
-                Statement(
-                    scope="scope:function=top",
-                    excerpt="function top() {",
-                ),
-                Statement(
-                    scope="scope:function=top",
-                    excerpt="function top() {",
-                ),
-            ),
-        )
-        self.assertEqual(
-            scope.resolve(Anchor(base=(2, 3), after=(2, 3))),
-            (
-                Statement(
-                    scope="scope:function=top",
-                    excerpt="return 1;",
-                ),
-                Statement(
-                    scope="scope:function=top",
-                    excerpt="return 2;",
-                ),
-            ),
-        )
-
-    def test_resolve_returns_nested_function_scope_anchor(self) -> None:
-        scope = self._bind(
-            """
-            function outer() {
-              function inner() {
-                return 1;
-              }
-              return inner();
-            }
-            """,
-            """
-            function outer() {
-              function inner() {
-                return 2;
-              }
-              return inner();
-            }
-            """,
-        )
-
-        self.assertEqual(
-            scope.resolve(Anchor(base=(2, 3), after=(2, 3))),
-            (
-                Statement(
-                    scope="scope:function=outer:function=inner",
-                    excerpt="function inner() {",
-                ),
-                Statement(
-                    scope="scope:function=outer:function=inner",
-                    excerpt="function inner() {",
-                ),
-            ),
-        )
-        self.assertEqual(
-            scope.resolve(Anchor(base=(3, 4), after=(3, 4))),
-            (
-                Statement(
-                    scope="scope:function=outer:function=inner",
-                    excerpt="return 1;",
-                ),
-                Statement(
-                    scope="scope:function=outer:function=inner",
-                    excerpt="return 2;",
-                ),
-            ),
-        )
-
-    def test_resolve_returns_top_level_arrow_function_scope_anchor(self) -> None:
-        scope = self._bind(
-            """
-            const top = () => {
-              return 1;
-            };
-            """,
-            """
-            const top = () => {
-              return 2;
-            };
-            """,
-        )
-
-        self.assertEqual(
-            scope.resolve(Anchor(base=(1, 2), after=(1, 2))),
-            (
-                Statement(
-                    scope="scope:function=top",
-                    excerpt="const top = () => {",
-                ),
-                Statement(
-                    scope="scope:function=top",
-                    excerpt="const top = () => {",
-                ),
-            ),
-        )
-        self.assertEqual(
-            scope.resolve(Anchor(base=(2, 3), after=(2, 3))),
-            (
-                Statement(
-                    scope="scope:function=top",
-                    excerpt="return 1;",
-                ),
-                Statement(
-                    scope="scope:function=top",
-                    excerpt="return 2;",
-                ),
-            ),
-        )
-
-    def test_resolve_returns_nested_arrow_function_scope_anchor(self) -> None:
-        scope = self._bind(
-            """
-            const outer = () => {
-              const inner = () => {
-                return 1;
-              };
-              return inner();
-            };
-            """,
-            """
-            const outer = () => {
-              const inner = () => {
-                return 2;
-              };
-              return inner();
-            };
-            """,
-        )
-
-        self.assertEqual(
-            scope.resolve(Anchor(base=(2, 3), after=(2, 3))),
-            (
-                Statement(
-                    scope="scope:function=outer:function=inner",
-                    excerpt="const inner = () => {",
-                ),
-                Statement(
-                    scope="scope:function=outer:function=inner",
-                    excerpt="const inner = () => {",
-                ),
-            ),
-        )
-        self.assertEqual(
-            scope.resolve(Anchor(base=(3, 4), after=(3, 4))),
-            (
-                Statement(
-                    scope="scope:function=outer:function=inner",
-                    excerpt="return 1;",
-                ),
-                Statement(
-                    scope="scope:function=outer:function=inner",
-                    excerpt="return 2;",
-                ),
-            ),
-        )
-
-    def test_resolve_returns_top_level_multiline_assignment_scope_anchor(self) -> None:
-        scope = self._bind(
-            """
-            value =
-              foo(
-                one,
-                two,
-              );
-            """,
-            """
-            value =
-              bar(
-                one,
-                two,
-              );
-            """,
-        )
-
-        self.assertEqual(
-            scope.resolve(Anchor(base=(1, 2), after=(1, 2))),
-            (
-                Statement(
-                    scope="scope:program",
-                    excerpt=dedent(
-                        """
-                        value =
-                          foo(
-                            one,
-                            two,
-                          );
-                        """
-                    ).strip(),
-                ),
-                Statement(
-                    scope="scope:program",
-                    excerpt=dedent(
-                        """
-                        value =
-                          bar(
-                            one,
-                            two,
-                          );
-                        """
-                    ).strip(),
-                ),
-            ),
-        )
-
-    def test_resolve_returns_top_level_multiline_augmented_assignment_scope_anchor(
-        self,
-    ) -> None:
-        scope = self._bind(
-            """
-            value +=
-              foo(
-                one,
-                two,
-              );
-            """,
-            """
-            value +=
-              bar(
-                one,
-                two,
-              );
-            """,
-        )
-
-        self.assertEqual(
-            scope.resolve(Anchor(base=(1, 2), after=(1, 2))),
-            (
-                Statement(
-                    scope="scope:program",
-                    excerpt=dedent(
-                        """
-                        value +=
-                          foo(
-                            one,
-                            two,
-                          );
-                        """
-                    ).strip(),
-                ),
-                Statement(
-                    scope="scope:program",
-                    excerpt=dedent(
-                        """
-                        value +=
-                          bar(
-                            one,
-                            two,
-                          );
-                        """
-                    ).strip(),
-                ),
-            ),
-        )
-
-    def test_resolve_returns_nested_multiline_assignment_scope_anchor(self) -> None:
-        scope = self._bind(
-            """
-            function top() {
-              value =
-                foo(
-                  one,
-                  two,
-                );
-            }
-            """,
-            """
-            function top() {
-              value =
-                bar(
-                  one,
-                  two,
-                );
-            }
-            """,
-        )
-
-        self.assertEqual(
-            scope.resolve(Anchor(base=(2, 3), after=(2, 3))),
-            (
-                Statement(
-                    scope="scope:function=top",
-                    excerpt=dedent(
-                        """
-                        value =
-                            foo(
-                              one,
-                              two,
-                            );
-                        """
-                    ).strip(),
-                ),
-                Statement(
-                    scope="scope:function=top",
-                    excerpt=dedent(
-                        """
-                        value =
-                            bar(
-                              one,
-                              two,
-                            );
-                        """
-                    ).strip(),
-                ),
-            ),
-        )
-
-    def test_resolve_returns_nested_multiline_augmented_assignment_scope_anchor(
-        self,
-    ) -> None:
-        scope = self._bind(
-            """
-            function top() {
-              value +=
-                foo(
-                  one,
-                  two,
-                );
-            }
-            """,
-            """
-            function top() {
-              value +=
-                bar(
-                  one,
-                  two,
-                );
-            }
-            """,
-        )
-
-        self.assertEqual(
-            scope.resolve(Anchor(base=(2, 3), after=(2, 3))),
-            (
-                Statement(
-                    scope="scope:function=top",
-                    excerpt=dedent(
-                        """
-                        value +=
-                            foo(
-                              one,
-                              two,
-                            );
-                        """
-                    ).strip(),
-                ),
-                Statement(
-                    scope="scope:function=top",
-                    excerpt=dedent(
-                        """
-                        value +=
-                            bar(
-                              one,
-                              two,
-                            );
-                        """
-                    ).strip(),
-                ),
-            ),
-        )
-
-    def test_resolve_returns_python_top_level_multiline_assignment_scope_anchor(
-        self,
-    ) -> None:
-        scope = self._bind(
-            """
-            value = (
-                foo(
-                    one,
-                    two,
-                )
-            )
-            """,
-            """
-            value = (
-                bar(
-                    one,
-                    two,
-                )
-            )
-            """,
-            suffix=".py",
-        )
-
-        self.assertEqual(
-            scope.resolve(Anchor(base=(1, 2), after=(1, 2))),
-            (
-                Statement(
-                    scope="scope:program",
-                    excerpt=dedent(
-                        """
-                        value = (
-                            foo(
-                                one,
-                                two,
-                            )
-                        )
-                        """
-                    ).strip(),
-                ),
-                Statement(
-                    scope="scope:program",
-                    excerpt=dedent(
-                        """
-                        value = (
-                            bar(
-                                one,
-                                two,
-                            )
-                        )
-                        """
-                    ).strip(),
-                ),
-            ),
-        )
-
-    def test_resolve_returns_python_top_level_multiline_augmented_assignment_scope_anchor(
-        self,
-    ) -> None:
-        scope = self._bind(
-            """
-            value += (
-                foo(
-                    one,
-                    two,
-                )
-            )
-            """,
-            """
-            value += (
-                bar(
-                    one,
-                    two,
-                )
-            )
-            """,
-            suffix=".py",
-        )
-
-        self.assertEqual(
-            scope.resolve(Anchor(base=(1, 2), after=(1, 2))),
-            (
-                Statement(
-                    scope="scope:program",
-                    excerpt=dedent(
-                        """
-                        value += (
-                            foo(
-                                one,
-                                two,
-                            )
-                        )
-                        """
-                    ).strip(),
-                ),
-                Statement(
-                    scope="scope:program",
-                    excerpt=dedent(
-                        """
-                        value += (
-                            bar(
-                                one,
-                                two,
-                            )
-                        )
-                        """
-                    ).strip(),
-                ),
-            ),
-        )
-
-    def test_resolve_returns_python_nested_multiline_assignment_scope_anchor(
-        self,
-    ) -> None:
-        scope = self._bind(
-            """
-            def top():
-                value = (
-                    foo(
-                        one,
-                        two,
-                    )
-                )
-            """,
-            """
-            def top():
-                value = (
-                    bar(
-                        one,
-                        two,
-                    )
-                )
-            """,
-            suffix=".py",
-        )
-
-        self.assertEqual(
-            scope.resolve(Anchor(base=(2, 3), after=(2, 3))),
-            (
-                Statement(
-                    scope="scope:function=top",
-                    excerpt=dedent(
-                        """
-                        value = (
-                                foo(
-                                    one,
-                                    two,
-                                )
-                            )
-                        """
-                    ).strip(),
-                ),
-                Statement(
-                    scope="scope:function=top",
-                    excerpt=dedent(
-                        """
-                        value = (
-                                bar(
-                                    one,
-                                    two,
-                                )
-                            )
-                        """
-                    ).strip(),
-                ),
-            ),
-        )
-
-    def test_resolve_returns_python_nested_multiline_augmented_assignment_scope_anchor(
-        self,
-    ) -> None:
-        scope = self._bind(
-            """
-            def top():
-                value += (
-                    foo(
-                        one,
-                        two,
-                    )
-                )
-            """,
-            """
-            def top():
-                value += (
-                    bar(
-                        one,
-                        two,
-                    )
-                )
-            """,
-            suffix=".py",
-        )
-
-        self.assertEqual(
-            scope.resolve(Anchor(base=(2, 3), after=(2, 3))),
-            (
-                Statement(
-                    scope="scope:function=top",
-                    excerpt=dedent(
-                        """
-                        value += (
-                                foo(
-                                    one,
-                                    two,
-                                )
-                            )
-                        """
-                    ).strip(),
-                ),
-                Statement(
-                    scope="scope:function=top",
-                    excerpt=dedent(
-                        """
-                        value += (
-                                bar(
-                                    one,
-                                    two,
-                                )
-                            )
-                        """
-                    ).strip(),
-                ),
-            ),
-        )
-
-    def test_resolve_returns_python_method_multiline_assignment_scope_anchor(
-        self,
-    ) -> None:
-        scope = self._bind(
-            """
-            class Foo:
-                def bar(self):
-                    value = (
-                        foo(
-                            one,
-                            two,
-                        )
-                    )
-            """,
-            """
-            class Foo:
-                def bar(self):
-                    value = (
-                        bar(
-                            one,
-                            two,
-                        )
-                    )
-            """,
-            suffix=".py",
-        )
-
-        self.assertEqual(
-            scope.resolve(Anchor(base=(3, 4), after=(3, 4))),
-            (
-                Statement(
-                    scope="scope:class=Foo:method=bar",
-                    excerpt=dedent(
-                        """
-                        value = (
-                                    foo(
-                                        one,
-                                        two,
-                                    )
-                                )
-                        """
-                    ).strip(),
-                ),
-                Statement(
-                    scope="scope:class=Foo:method=bar",
-                    excerpt=dedent(
-                        """
-                        value = (
-                                    bar(
-                                        one,
-                                        two,
-                                    )
-                                )
-                        """
-                    ).strip(),
-                ),
-            ),
-        )
-
-    def test_resolve_returns_python_method_multiline_augmented_assignment_scope_anchor(
-        self,
-    ) -> None:
-        scope = self._bind(
-            """
-            class Foo:
-                def bar(self):
-                    value += (
-                        foo(
-                            one,
-                            two,
-                        )
-                    )
-            """,
-            """
-            class Foo:
-                def bar(self):
-                    value += (
-                        bar(
-                            one,
-                            two,
-                        )
-                    )
-            """,
-            suffix=".py",
-        )
-
-        self.assertEqual(
-            scope.resolve(Anchor(base=(3, 4), after=(3, 4))),
-            (
-                Statement(
-                    scope="scope:class=Foo:method=bar",
-                    excerpt=dedent(
-                        """
-                        value += (
-                                    foo(
-                                        one,
-                                        two,
-                                    )
-                                )
-                        """
-                    ).strip(),
-                ),
-                Statement(
-                    scope="scope:class=Foo:method=bar",
-                    excerpt=dedent(
-                        """
-                        value += (
-                                    bar(
-                                        one,
-                                        two,
-                                    )
-                                )
-                        """
-                    ).strip(),
-                ),
-            ),
-        )
-
 
 class TestPatchFactory(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.TemporaryDirectory()
         self._root = Path(self._tmpdir.name)
-        self._history_fixture = HistoryFixture()
-        self._history_fixture.__enter__()
-        self._repository = VersionControl(self._history_fixture.repository)
+        self._fixture = HistoryFixture()
+        self._fixture.__enter__()
+        self._repository = VersionControl(self._fixture.repository)
         self._candidate = PatchFactory(self._repository)
 
     def tearDown(self) -> None:
-        self._history_fixture.__exit__(None, None, None)
+        self._fixture.__exit__(None, None, None)
         self._tmpdir.cleanup()
 
     def _patch(self, content: str) -> str:
@@ -1210,10 +279,10 @@ class TestPatchFactory(unittest.TestCase):
         if after is not None:
             after_files[path] = dedent(after).lstrip("\n")
 
-        base_tree = self._history_fixture.tree(before_files)
-        base = self._history_fixture.commit(base_tree, [], "base")
-        after_tree = self._history_fixture.tree(after_files)
-        head = self._history_fixture.commit(after_tree, [base], "after")
+        tree = self._fixture.tree(before_files)
+        base = self._fixture.commit(tree, [], "base")
+        tree = self._fixture.tree(after_files)
+        head = self._fixture.commit(tree, [base], "after")
         return base, head
 
     # == A. Baseline scoped EDIT (n=1) ================================
@@ -3738,22 +2807,22 @@ class TestPatchFactory(unittest.TestCase):
         )
 
     def test_patch_returns_all_files_without_filter(self) -> None:
-        base_tree = self._history_fixture.tree(
+        tree = self._fixture.tree(
             {
                 "edit.txt": "old\n",
                 "old.txt": "same\n",
                 "gone.txt": "gone\n",
             }
         )
-        base_sha = self._history_fixture.commit(base_tree, [], "base")
-        after_tree = self._history_fixture.tree(
+        base_sha = self._fixture.commit(tree, [], "base")
+        tree = self._fixture.tree(
             {
                 "edit.txt": "new\n",
                 "new.txt": "same\n",
                 "add.txt": "add\n",
             }
         )
-        after_sha = self._history_fixture.commit(after_tree, [base_sha], "after")
+        after_sha = self._fixture.commit(tree, [base_sha], "after")
 
         patch = self._candidate.create(base_sha, after_sha, n=0)
 
@@ -3764,22 +2833,22 @@ class TestPatchFactory(unittest.TestCase):
         )
 
     def test_patch_filters_manifest_entries_for_all_operation_types(self) -> None:
-        base_tree = self._history_fixture.tree(
+        tree = self._fixture.tree(
             {
                 "edit.txt": "old\n",
                 "old.txt": "same\n",
                 "gone.txt": "gone\n",
             }
         )
-        base_sha = self._history_fixture.commit(base_tree, [], "base")
-        after_tree = self._history_fixture.tree(
+        base_sha = self._fixture.commit(tree, [], "base")
+        tree = self._fixture.tree(
             {
                 "edit.txt": "new\n",
                 "new.txt": "same\n",
                 "add.txt": "add\n",
             }
         )
-        after_sha = self._history_fixture.commit(after_tree, [base_sha], "after")
+        after_sha = self._fixture.commit(tree, [base_sha], "after")
         selected = [
             FileOperation(base=None, after="add.txt", operation=OperationType.ADD),
             FileOperation(base="gone.txt", after=None, operation=OperationType.DELETE),
@@ -4317,20 +3386,20 @@ class TestPatchFactory(unittest.TestCase):
         )
 
     def test_materialize_materializes_multiple_files_independently(self) -> None:
-        base_tree = self._history_fixture.tree(
+        tree = self._fixture.tree(
             {
                 "a.toml": "one = 1\ntwo = 2\nthree = 3\n",
                 "b.toml": "left = 1\nright = 2\nend = 3\n",
             }
         )
-        base_sha = self._history_fixture.commit(base_tree, [], "base")
-        after_tree = self._history_fixture.tree(
+        base_sha = self._fixture.commit(tree, [], "base")
+        tree = self._fixture.tree(
             {
                 "a.toml": "one = 1\ntwo = 9\nthree = 3\n",
                 "b.toml": "left = 1\nright = 8\nend = 3\n",
             }
         )
-        after_sha = self._history_fixture.commit(after_tree, [base_sha], "after")
+        after_sha = self._fixture.commit(tree, [base_sha], "after")
 
         patchset = self._candidate.refine(
             base_sha,
@@ -4371,15 +3440,15 @@ class TestPatchFactory(unittest.TestCase):
         )
 
     def test_materialize_roundtrips_multiple_add_only_files(self) -> None:
-        base_tree = self._history_fixture.tree({})
-        base_sha = self._history_fixture.commit(base_tree, [], "base")
-        after_tree = self._history_fixture.tree(
+        tree = self._fixture.tree({})
+        base_sha = self._fixture.commit(tree, [], "base")
+        tree = self._fixture.tree(
             {
                 "a.ts": "alpha\n",
                 "b.ts": "beta\n",
             }
         )
-        after_sha = self._history_fixture.commit(after_tree, [base_sha], "after")
+        after_sha = self._fixture.commit(tree, [base_sha], "after")
 
         patchset = self._candidate.refine(
             base_sha,
@@ -4457,14 +3526,14 @@ class TestPatchFactory(unittest.TestCase):
             before = render(lines)
             after = render(mutated)
 
-            base = self._history_fixture.commit(
-                self._history_fixture.tree({path: before}),
+            base = self._fixture.commit(
+                self._fixture.tree({path: before}),
                 [],
                 f"base-{iteration}",
                 ref=None,
             )
-            head = self._history_fixture.commit(
-                self._history_fixture.tree({path: after}),
+            head = self._fixture.commit(
+                self._fixture.tree({path: after}),
                 [base],
                 f"after-{iteration}",
                 ref=None,

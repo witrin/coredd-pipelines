@@ -214,6 +214,8 @@ mdurl==0.1.2
     # via markdown-it-py
 multidict==6.7.1
     # via yarl
+networkx==3.6.1
+    # via benchmark (pyproject.toml)
 numpy==2.4.2
     # via
     #   db-dtypes

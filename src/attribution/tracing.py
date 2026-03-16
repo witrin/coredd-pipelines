@@ -201,6 +201,82 @@ class TracingCallbackHandler(BaseCallbackHandler):
             },
         )
 
+    def on_tool_start(
+        self,
+        serialized: dict[str, object] | None,
+        input_str: str,
+        *,
+        run_id: object,
+        parent_run_id: object | None = None,
+        inputs: dict[str, object] | None = None,
+        **kwargs: object,
+    ) -> None:
+        started_at = datetime.now(timezone.utc)
+        span = str(run_id)
+        node = self._run_name(serialized, kwargs)
+        self._started[span] = started_at
+        self._nodes[span] = node
+        self._trace.append(
+            timestamp=started_at,
+            node=node,
+            span=span,
+            parent=self._parent(parent_run_id),
+            event="tool_start",
+            payload={
+                "serialized": serialized,
+                "input": input_str,
+                "inputs": inputs,
+            },
+        )
+
+    def on_tool_end(
+        self,
+        output: object,
+        *,
+        run_id: object,
+        parent_run_id: object | None = None,
+        **kwargs: object,
+    ) -> None:
+        span = str(run_id)
+        started_at = self._started.pop(span, datetime.now(timezone.utc))
+        node = self._nodes.pop(span, self._node_for_parent(parent_run_id))
+        self._trace.append(
+            timestamp=datetime.now(timezone.utc),
+            node=node,
+            span=span,
+            parent=self._parent(parent_run_id),
+            event="tool_end",
+            payload={
+                "duration": self._duration(started_at),
+                "output": self._output(output),
+                "output_type": type(output).__name__,
+            },
+        )
+
+    def on_tool_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: object,
+        parent_run_id: object | None = None,
+        **kwargs: object,
+    ) -> None:
+        span = str(run_id)
+        started_at = self._started.pop(span, datetime.now(timezone.utc))
+        node = self._nodes.pop(span, self._node_for_parent(parent_run_id))
+        self._trace.append(
+            timestamp=datetime.now(timezone.utc),
+            node=node,
+            span=span,
+            parent=self._parent(parent_run_id),
+            event="tool_error",
+            payload={
+                "duration": self._duration(started_at),
+                "error_type": type(error).__name__,
+                "error": str(error),
+            },
+        )
+
     def on_chat_model_start(
         self,
         serialized: dict[str, object] | None,
@@ -366,10 +442,16 @@ class TracingCallbackHandler(BaseCallbackHandler):
     def _message(cls, message: object) -> dict[str, object]:
         return {
             "type": getattr(message, "type", type(message).__name__),
-            "content": getattr(message, "content", None),
+            "content": cls._content(getattr(message, "content", None)),
+            "id": getattr(message, "id", None),
             "name": getattr(message, "name", None),
             "additional_kwargs": getattr(message, "additional_kwargs", None),
             "response_metadata": getattr(message, "response_metadata", None),
+            "tool_calls": getattr(message, "tool_calls", None),
+            "invalid_tool_calls": getattr(message, "invalid_tool_calls", None),
+            "tool_call_id": getattr(message, "tool_call_id", None),
+            "usage_metadata": getattr(message, "usage_metadata", None),
+            "artifact": getattr(message, "artifact", None),
         }
 
     @classmethod
@@ -398,6 +480,21 @@ class TracingCallbackHandler(BaseCallbackHandler):
                     return metadata["logprobs"]
 
         return None
+
+    @classmethod
+    def _output(cls, output: object) -> object:
+        if hasattr(output, "content") or hasattr(output, "tool_call_id"):
+            return cls._message(output)
+        return output
+
+    @classmethod
+    def _content(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
 
 
 class AttributionRunnable:

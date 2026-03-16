@@ -89,6 +89,7 @@ def asset(*asset_args, **asset_kwargs):
 
         signature = inspect.signature(fn)
         inputs = dict(asset_kwargs.get("ins", {}))
+        deps = list(asset_kwargs.get("deps", []))
 
         # Add location prefix to existing ins entries without explicit key
         for name, asset_in in list(inputs.items()):
@@ -123,6 +124,32 @@ def asset(*asset_args, **asset_kwargs):
             inputs[name] = dg.AssetIn(key=[location, name.replace("_", "-")])
 
         asset_kwargs["ins"] = inputs
+
+        for index, dep in enumerate(deps):
+            if isinstance(dep, str):
+                deps[index] = dg.AssetDep([location, dep.replace("_", "-")])
+                continue
+
+            if isinstance(dep, dg.AssetKey):
+                if len(dep.path) == 1:
+                    deps[index] = dg.AssetDep([location, dep.path[0]])
+                continue
+
+            if isinstance(dep, dg.AssetDep):
+                if len(dep.asset_key.path) == 1:
+                    deps[index] = dg.AssetDep(
+                        [location, dep.asset_key.path[0]],
+                        partition_mapping=dep.partition_mapping,
+                        metadata=dep.metadata,
+                    )
+                continue
+
+            if isinstance(dep, list | tuple):
+                if len(dep) == 1:
+                    deps[index] = dg.AssetDep([location, str(dep[0])])
+                continue
+
+        asset_kwargs["deps"] = deps
 
         @dg.asset(*asset_args, key=full, **asset_kwargs)
         @wraps(fn)
