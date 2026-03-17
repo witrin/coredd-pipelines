@@ -1,6 +1,8 @@
-"""REST API extractors for raw GitHub data ingestion."""
-
-from __future__ import annotations
+import os
+import tarfile
+import tempfile
+import pygit2
+from io import BytesIO
 
 import json
 from datetime import date
@@ -12,6 +14,21 @@ from benchmark.scope.utils import RangeSplitter
 
 # Import BlobStream from io module
 from components.io import BlobStream
+
+
+class FileResponseAdapter:
+    def __init__(self, file):
+        self._file = file
+
+    def iter_content(self, chunk_size=8192):
+        while True:
+            chunk = self._file.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
+
+    def close(self):
+        self._file.close()
 
 
 class ChangeExtractor:
@@ -363,26 +380,6 @@ class SourceExtractor:
         self._log = log or (lambda msg: None)
 
     def extract(self) -> BlobStream:
-        import os
-        import tarfile
-        import tempfile
-        import pygit2
-        from io import BytesIO
-
-        class _FileResponseAdapter:
-            def __init__(self, f):
-                self._f = f
-
-            def iter_content(self, chunk_size=8192):
-                while True:
-                    chunk = self._f.read(chunk_size)
-                    if not chunk:
-                        break
-                    yield chunk
-
-            def close(self):
-                self._f.close()
-
         reference = self.ref
         if reference == "HEAD":
             reference = self.client.get_repo(self.repository).default_branch
@@ -434,6 +431,6 @@ class SourceExtractor:
         return BlobStream(
             content_type="application/gzip",
             filename=f"{commit.id}.tar.gz",
-            response=_FileResponseAdapter(data),
+            response=FileResponseAdapter(data),
             size=size,
         )

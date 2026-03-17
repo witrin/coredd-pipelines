@@ -1,19 +1,8 @@
-"""
-Dagster IOManager that stores Parquet files on GCS using branch + version semantics.
-
-The IOManager resolves the run's ``location`` and ``version`` tags and writes assets at:
-``gs://<bucket>/<asset>/version=<version>/location=<location>/partition=<partition>/data.parquet``.
-
-When loading inputs it first looks at the requested branch and falls back to ``main`` if
-no object exists. This lets experiments reuse the last successful output until an asset
-has been recomputed for their branch.
-"""
-
-from __future__ import annotations
+# from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Iterator, Optional, Union, overload
+from typing import Any, Iterator, Optional, overload
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -39,13 +28,6 @@ class BlobStream:
 
     def __len__(self) -> int:
         return self.size
-
-
-Context = Union[
-    dg.InputContext,
-    dg.OutputContext,
-    dg.SensorEvaluationContext,
-]
 
 
 class CloudCache:
@@ -100,7 +82,7 @@ class AssetCloudStorage:
     ) -> str:
         return self._blob_name(asset_key, version, location, partition)
 
-    def _asset_key(
+    def _key(
         self,
         context: (
             dg.AssetExecutionContext
@@ -147,8 +129,8 @@ class AssetCloudStorage:
 
         if partition is None:
             return "default"
-    
-        return partition.replace("|",";").replace("/","-").replace("_","-")
+
+        return partition.replace("|", ";").replace("/", "-").replace("_", "-")
 
     def _version_from_context(
         self,
@@ -222,23 +204,85 @@ class AssetCloudStorage:
 
         return "none"
 
-    def _blob_name(
+    def prefix(
         self,
-        asset_key: dg.AssetKey,
+        key: dg.AssetKey,
         version: str,
         location: str | None,
         partition: str,
     ) -> str:
-        path = list(asset_key.path)
-        key = path[-1]
+        path = list(key.path)
         loc = location or path[0] or Location.load().current
 
         return (
-            f"assets/{key}/"
+            f"assets/{path[-1]}/"
             f"version={version}/"
             f"location={loc}/"
             f"partition={partition}/"
-            "data.parquet"
+        )
+
+    def _blob_name(
+        self,
+        key: dg.AssetKey,
+        version: str,
+        location: str | None,
+        partition: str,
+    ) -> str:
+        return self.prefix(key, version, location, partition) + "data.parquet"
+
+    def resolve(
+        self,
+        context: dg.InputContext | dg.OutputContext,
+        location: str | None = None,
+        partition: str | None = None,
+    ) -> str:
+        asset_key = self._key(context, None, location)
+        version = self._version(context, None, asset_key)
+
+        if partition is not None:
+            norm = partition.replace("|", ";").replace("/", "-").replace("_", "-")
+        else:
+            norm = self._partition(context, None)
+
+        return self.prefix(asset_key, version, location, norm)
+
+    def index(self, prefix: str) -> list[str]:
+        blobs = self._bucket.list_blobs(prefix=prefix)
+        return [b.name for b in blobs if not b.name.endswith("data.parquet")]
+
+    def download(self, name: str):
+        blob = self._bucket.blob(name)
+        if not blob.exists():
+            return None
+        return blob.open("rb")
+
+    def upload(self, context: dg.OutputContext, stream: BlobStream) -> None:
+        asset_key = self._key(context, None, None)
+        partition = self._partition(context, None)
+        version = self._version_from_context(context)
+
+        blob_name = self.prefix(asset_key, version, None, partition) + stream.filename
+
+        blob = self._bucket.blob(blob_name)
+
+        with blob.open("wb", content_type=stream.content_type) as f:
+            for chunk in stream.chunks():
+                f.write(chunk)
+
+        context.add_output_metadata(
+            {
+                "console": dg.MetadataValue.url(
+                    (
+                        f"https://console.cloud.google.com/storage/browser/_details/"
+                        f"{self._bucket.name}/{blob_name}"
+                    )
+                ),
+                "storage": dg.MetadataValue.text(
+                    f"gs://{self._bucket.name}/{blob_name}"
+                ),
+                "content_type": dg.MetadataValue.text(stream.content_type),
+                "size_bytes": dg.MetadataValue.int(len(stream)),
+            }
         )
 
     def _load_parquet(self, name: str) -> Optional[pa.Table]:
@@ -293,17 +337,17 @@ class AssetCloudStorage:
         if context is None:
             raise ValueError("Either context or blob must be provided")
 
-        asset_key = self._asset_key(context=context, event=event, location=location)
+        key = self._key(context=context, event=event, location=location)
 
         if partition is not None:
             partition = partition.replace("|", ";").replace("/", "-").replace("_", "-")
         else:
             partition = self._partition(context=context, event=event)
 
-        version = self._version(context=context, event=event, asset_key=asset_key)
+        version = self._version(context=context, event=event, asset_key=key)
 
         blob_path = self._blob_name(
-            asset_key=asset_key,
+            key=key,
             version=version,
             location=location,
             partition=partition,
@@ -328,7 +372,10 @@ class AssetCloudStorage:
     def store(
         self,
         context: (
-            dg.AssetExecutionContext | dg.OutputContext | dg.SensorEvaluationContext | None
+            dg.AssetExecutionContext
+            | dg.OutputContext
+            | dg.SensorEvaluationContext
+            | None
         ) = None,
         table: pa.Table | None = None,
         event: Optional[dg.EventLogEntry] = None,
@@ -341,14 +388,16 @@ class AssetCloudStorage:
             return
 
         if context is None or table is None:
-            raise ValueError("Either (context, table) or (blob, table) must be provided")
+            raise ValueError(
+                "Either (context, table) or (blob, table) must be provided"
+            )
 
-        asset_key = self._asset_key(context=context, event=event, location=location)
+        key = self._key(context=context, event=event, location=location)
         partition = self._partition(context=context, event=event)
-        version = self._version(context=context, event=event, asset_key=asset_key)
+        version = self._version(context=context, event=event, asset_key=key)
 
         blob = self._blob_name(
-            asset_key=asset_key,
+            key=key,
             version=version,
             location=location,
             partition=partition,
@@ -364,9 +413,7 @@ class AssetCloudStorage:
                         f"{self._bucket.name}/{blob}"
                     )
                 ),
-                "storage": dg.MetadataValue.text(
-                    f"gs://{self._bucket.name}/{blob}"
-                ),
+                "storage": dg.MetadataValue.text(f"gs://{self._bucket.name}/{blob}"),
             }
         )
 
@@ -408,49 +455,12 @@ class CloudStorageManager(dg.IOManager):
         )
 
     def _store_stream(self, context: dg.OutputContext, stream: BlobStream) -> None:
-        """Stream blob content directly to GCS without buffering."""
-        asset_key = self._storage._asset_key(context, None, None)
-        partition = self._storage._partition(context, None)
-        version = self._storage._version_from_context(context)
-
-        path = list(asset_key.path)
-        key = path[-1]
-        loc = self._location.current or path[0] or Location.load().current
-
-        blob_name = (
-            f"assets/{key}/"
-            f"version={version}/"
-            f"location={loc}/"
-            f"partition={partition}/"
-            f"{stream.filename}"
-        )
-
-        blob = self._storage._bucket.blob(blob_name)
-
-        with blob.open("wb", content_type=stream.content_type) as f:
-            for chunk in stream.chunks():
-                f.write(chunk)
-
-        context.add_output_metadata(
-            {
-                "console": dg.MetadataValue.url(
-                    (
-                        f"https://console.cloud.google.com/storage/browser/_details/"
-                        f"{self._storage._bucket.name}/{blob_name}"
-                    )
-                ),
-                "storage": dg.MetadataValue.text(
-                    f"gs://{self._storage._bucket.name}/{blob_name}"
-                ),
-                "content_type": dg.MetadataValue.text(stream.content_type),
-                "size_bytes": dg.MetadataValue.int(len(stream)),
-            }
-        )
+        self._storage.upload(context, stream)
 
     def handle_output(self, context: dg.OutputContext, obj) -> None:
         if obj is None:
             return
-    
+
         if isinstance(obj, BlobStream):
             self._store_stream(context, obj)
             context.log.info(
@@ -468,10 +478,9 @@ class CloudStorageManager(dg.IOManager):
             table.num_rows,
         )
 
-    def _load_partition(
+    def _load_table_partition(
         self, context: dg.InputContext, partition: str | None = None
     ) -> pa.Table | None:
-        """Load a single partition, with fallback to default location."""
         table = self._storage.load(
             context=context,
             location=self._location.current,
@@ -487,25 +496,74 @@ class CloudStorageManager(dg.IOManager):
 
         return table
 
+    def _resolve_blob(
+        self, context: dg.InputContext, location: str, partition: str | None
+    ):
+        prefix = self._storage.resolve(context, location=location, partition=partition)
+        names = self._storage.index(prefix)
+
+        if names:
+            return self._storage.download(names[0])
+
+        return None
+
+    def _load_blob_partition(
+        self, context: dg.InputContext, partition: str | None = None
+    ):
+        result = self._resolve_blob(context, self._location.current, partition)
+
+        if result is None and self._location.current != self._location.default:
+            result = self._resolve_blob(context, self._location.default, partition)
+
+        return result
+
+    def _load_partition(self, context: dg.InputContext, partition: str | None = None):
+        result = self._load_table_partition(context, partition=partition)
+        if result is not None:
+            return result
+
+        return self._load_blob_partition(context, partition=partition)
+
+    def _log_loaded(self, context: dg.InputContext, obj, partition: str | None = None):
+        if isinstance(obj, pa.Table):
+            if partition is not None:
+                context.log.info(
+                    "Loaded partition %s of %s (%d rows).",
+                    partition,
+                    context.asset_key,
+                    obj.num_rows,
+                )
+            else:
+                context.log.info(
+                    "Loaded asset %s (%d rows).",
+                    context.asset_key,
+                    obj.num_rows,
+                )
+        else:
+            if partition is not None:
+                context.log.info(
+                    "Loaded blob partition %s of %s.",
+                    partition,
+                    context.asset_key,
+                )
+            else:
+                context.log.info(
+                    "Loaded blob %s.",
+                    context.asset_key,
+                )
+
     def load_input(self, context: dg.InputContext):
-        # Check if we have multiple partitions (AllPartitionMapping case)
         if context.has_asset_partitions:
             partition_keys = list(context.asset_partition_keys)
 
             if len(partition_keys) > 1:
-                # Multiple partitions - return dict
                 result = {}
                 missing = []
                 for key in partition_keys:
-                    table = self._load_partition(context, partition=key)
-                    if table is not None:
-                        result[key] = table
-                        context.log.info(
-                            "Loaded partition %s of %s (%d rows).",
-                            key,
-                            context.asset_key,
-                            table.num_rows,
-                        )
+                    obj = self._load_partition(context, partition=key)
+                    if obj is not None:
+                        result[key] = obj
+                        self._log_loaded(context, obj, partition=key)
                     else:
                         missing.append(key)
 
@@ -516,18 +574,13 @@ class CloudStorageManager(dg.IOManager):
 
                 return result
 
-        # Single partition or no partitions
-        table = self._load_partition(context)
+        obj = self._load_partition(context)
 
-        if table is None:
+        if obj is None:
             raise FileNotFoundError(
                 f"No object found for {context.asset_key} "
                 f"in branches {self._location.current} or {self._location.default}"
             )
 
-        context.log.info(
-            "Loaded asset %s (%d rows).",
-            context.asset_key,
-            table.num_rows,
-        )
-        return table
+        self._log_loaded(context, obj)
+        return obj

@@ -75,6 +75,7 @@ def asset(*asset_args, **asset_kwargs):
 
     def outer(fn):
         local = asset_kwargs.pop("key", None)
+        output_required = asset_kwargs.get("output_required", True)
         location = Location.load().current
 
         # See https://github.com/dagster-io/dagster/issues/18534
@@ -151,34 +152,48 @@ def asset(*asset_args, **asset_kwargs):
 
         asset_kwargs["deps"] = deps
 
-        @dg.asset(*asset_args, key=full, **asset_kwargs)
-        @wraps(fn)
-        def wrapped(
-            context: dg.AssetExecutionContext, configuration=None, *args, **kwargs
-        ):
-            if (
-                configuration is not None
-                and getattr(configuration, "compute", "default") == "force"
+        if output_required:
+
+            @dg.asset(*asset_args, key=full, **asset_kwargs)
+            @wraps(fn)
+            def wrapped(
+                context: dg.AssetExecutionContext, configuration=None, *args, **kwargs
             ):
-                context.log.info("Forced compute for %s", context.asset_key)
-                return fn(context, configuration, *args, **kwargs)
+                if (
+                    configuration is not None
+                    and getattr(configuration, "compute", "default") == "force"
+                ):
+                    context.log.info("Forced compute for %s", context.asset_key)
+                    return fn(context, configuration, *args, **kwargs)
 
-            cache = AssetCache(context)
-            cached = cache.load()
+                cache = AssetCache(context)
+                cached = cache.load()
 
-            if cached is not None:
-                return cached
+                if cached is not None:
+                    return cached
 
-            if configuration is None:
-                table = fn(context, *args, **kwargs)
-            else:
-                table = fn(context, configuration, *args, **kwargs)
+                if configuration is None:
+                    table = fn(context, *args, **kwargs)
+                else:
+                    table = fn(context, configuration, *args, **kwargs)
 
-            context.log.info(
-                "Cache miss for asset %s",
-                context.asset_key,
-            )
-            return table
+                context.log.info(
+                    "Cache miss for asset %s",
+                    context.asset_key,
+                )
+                return table
+
+        else:
+
+            @dg.asset(*asset_args, key=full, **asset_kwargs)
+            @wraps(fn)
+            def wrapped(
+                context: dg.AssetExecutionContext, configuration=None, *args, **kwargs
+            ):
+                if configuration is None:
+                    yield from fn(context, *args, **kwargs)
+                else:
+                    yield from fn(context, configuration, *args, **kwargs)
 
         return wrapped
 
