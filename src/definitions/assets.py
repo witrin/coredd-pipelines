@@ -13,12 +13,12 @@ from benchmark.attribution.history import VersionControl
 from benchmark.attribution.knowledge import KnowledgeGraphBuilder
 from benchmark.scope.cohort import ChangeCollector, IssueCollector
 from benchmark.scope.ingestion import ChangeExtractor, IssueExtractor, SourceExtractor
-from components.io import AssetCloudStorage, BlobStream
+from components.io import BlobStream
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import dagster as dg
-from google.cloud import bigquery, storage
+from google.cloud import bigquery
 from github.GithubException import UnknownObjectException
 import ormsgpack
 import pygit2
@@ -624,14 +624,16 @@ def ingest_validation_set(
     group_name="ingest",
     kinds={"github"},
     pool="github",
+    output_required=False,
 )
 def ingest_validation_sources(
     context: dg.AssetExecutionContext,
     ingest_validation_set: pa.Table,
     github: GithubResource,
-) -> BlobStream:
+):
     """Ingest validation repository source tarball."""
     import polars as pl
+    from github import UnknownObjectException
 
     partition = context.partition_key
     df = pl.from_arrow(ingest_validation_set)
@@ -641,19 +643,26 @@ def ingest_validation_sources(
     context.log.info("Collecting validation source tarball for %s", repository)
 
     extractor = SourceExtractor(github.client(), repository, log=context.log.info)
-    return extractor.extract()
+
+    try:
+        blob = extractor.extract()
+    except UnknownObjectException:
+        context.log.warning("Repository %s not found, skipping.", repository)
+        return
+
+    yield dg.Output(blob)
 
 
 @asset(
-    metadata={"version": "1.1.0"},
+    metadata={"version": "1.2.0"},
     partitions_def=partitions.ingest_validation_sources_partition,
     group_name="ingest",
-    deps=["ingest-validation-sources"],
     pool="default",
 )
 def ingest_validation_context(
     context: dg.AssetExecutionContext,
     ingest_validation_set: pa.Table,
+    ingest_validation_sources,
 ) -> pa.Table:
     """Persist graph and tree context for validation cases in one repository partition."""
     import polars as pl
@@ -675,37 +684,15 @@ def ingest_validation_context(
     if not cases:
         return pa.Table.from_pylist([], schema=schema)
 
-    partition = (
-        context.partition_key.replace("|", ";").replace("/", "-").replace("_", "-")
-    )
-    prefix = (
-        "assets/ingest-validation-sources/"
-        "version=1.0.0/"
-        f"location={context.asset_key.path[0]}/"
-        f"partition={partition}/"
-    )
-    client = storage.Client()
-    bucket = AssetCloudStorage().bucket
-    blobs = [
-        blob
-        for blob in client.list_blobs(bucket, prefix=prefix)
-        if blob.name.endswith(".tar.gz")
-    ]
-
-    if not blobs:
-        raise FileNotFoundError(f"No tar.gz found under gs://{bucket}/{prefix}")
-
-    if len(blobs) != 1:
-        raise ValueError(
-            f"Expected exactly one tar.gz under gs://{bucket}/{prefix}, got {len(blobs)}"
-        )
-
     with tempfile.TemporaryDirectory() as name:
         work = Path(name)
-        archive = f"gs://{bucket}/{blobs[0].name}"
-        blobs[0].download_to_filename(str(work / "repository.tar.gz"))
+        archive = work / "repository.tar.gz"
 
-        with tarfile.open(work / "repository.tar.gz", "r:gz") as tar:
+        with open(archive, "wb") as f:
+            for chunk in iter(lambda: ingest_validation_sources.read(8 * 1024 * 1024), b""):
+                f.write(chunk)
+
+        with tarfile.open(archive, "r:gz") as tar:
             tar.extractall(work, filter="data")
 
         control = VersionControl(pygit2.Repository(str(work / "repository.git")))
@@ -721,7 +708,7 @@ def ingest_validation_context(
                 {
                     **{name: row[name] for name in ingest_validation_set.schema.names},
                     "partition": context.partition_key,
-                    "archive": archive,
+                    "archive": str(archive),
                     "store": json.dumps(
                         store.dump(),
                         default=lambda value: (
