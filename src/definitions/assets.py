@@ -12,6 +12,7 @@ from benchmark.definitions import partitions
 from benchmark.attribution.history import VersionControl
 from benchmark.attribution.knowledge import KnowledgeGraphBuilder
 from benchmark.scope.cohort import ChangeCollector, IssueCollector
+from benchmark.attribution.ingestion import ValidationExtractor
 from benchmark.scope.ingestion import ChangeExtractor, IssueExtractor, SourceExtractor
 from components.io import BlobStream
 
@@ -619,7 +620,7 @@ def ingest_validation_set(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "1.0.1"},
     partitions_def=partitions.ingest_validation_sources_partition,
     group_name="ingest",
     kinds={"github"},
@@ -642,7 +643,7 @@ def ingest_validation_sources(
 
     context.log.info("Collecting validation source tarball for %s", repository)
 
-    extractor = SourceExtractor(github.client(), repository, log=context.log.info)
+    extractor = ValidationExtractor(github.client(), repository, log=context.log.info)
 
     try:
         blob = extractor.extract()
@@ -689,7 +690,9 @@ def ingest_validation_context(
         archive = work / "repository.tar.gz"
 
         with open(archive, "wb") as f:
-            for chunk in iter(lambda: ingest_validation_sources.read(8 * 1024 * 1024), b""):
+            for chunk in iter(
+                lambda: ingest_validation_sources.read(8 * 1024 * 1024), b""
+            ):
                 f.write(chunk)
 
         with tarfile.open(archive, "r:gz") as tar:
