@@ -1,6 +1,7 @@
-from typing import Dict, Optional
+from typing import Optional
+import tempfile
 
-import pyarrow as pa
+import pyarrow.parquet as pq
 import dagster as dg
 
 from components.meta import AssetResolver
@@ -31,46 +32,60 @@ def snapshot_op(context: dg.OpExecutionContext, config: SnapshotConfig) -> dg.Ou
     )
 
     partitions = resolver.partitions_def()
-    tables: Dict[str, pa.Table] = {}
 
     if partitions is None:
-        table = storage.load(blob=storage.blob(resolver.key, version, location.current, "default"))
-        if table is None and location.current != location.default:
-            table = storage.load(blob=storage.blob(resolver.key, version, location.default, "default"))
-        if table:
-            tables["default"] = table
+        partition_keys = ["default"]
+    elif isinstance(partitions, dg.DynamicPartitionsDefinition):
+        partition_keys = list(context.instance.get_dynamic_partitions(partitions.name))
     else:
-        if isinstance(partitions, dg.DynamicPartitionsDefinition):
-            keys = list(context.instance.get_dynamic_partitions(partitions.name))
-        else:
-            keys = list(partitions.get_partition_keys())
+        partition_keys = list(partitions.get_partition_keys())
 
-        for key in keys:
-            normalized = key.replace("|", ";").replace("/", "-").replace("_", "-")
-            table = storage.load(blob=storage.blob(resolver.key, version, location.current, normalized))
-            if table is None and location.current != location.default:
-                table = storage.load(blob=storage.blob(resolver.key, version, location.default, normalized))
-            if table is not None:
-                tables[key] = table
+    total_rows = 0
+    partition_count = 0
+
+    with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
+        writer: Optional[pq.ParquetWriter] = None
+        try:
+            for key in partition_keys:
+                if partitions is None:
+                    normalized = "default"
+                else:
+                    normalized = key.replace("|", ";").replace("/", "-").replace("_", "-")
+
+                table = storage.load(blob=storage.blob(resolver.key, version, location.current, normalized))
+                if table is None and location.current != location.default:
+                    table = storage.load(blob=storage.blob(resolver.key, version, location.default, normalized))
+                if table is None:
+                    continue
+
                 context.log.info("Loaded partition %s with %d rows", key, table.num_rows)
+                total_rows += table.num_rows
+                partition_count += 1
 
-    if not tables:
-        raise dg.Failure(description="No partition data found")
+                if writer is None:
+                    writer = pq.ParquetWriter(tmp.name, table.schema)
+                writer.write_table(table)
+                del table
 
-    context.log.info("Compacting %d partitions", len(tables))
+            if writer is None:
+                raise dg.Failure(description="No partition data found")
+        finally:
+            if writer is not None:
+                writer.close()
 
-    # TODO: Implement compaction logic
-    snapshot = pa.concat_tables(list(tables.values()))
+        context.log.info("Compacted %d partitions (%d rows)", partition_count, total_rows)
 
-    blob = storage.blob(resolver.key, version, location.current, config.partition)
-    storage.store(blob=blob, table=snapshot)
+        snapshot = pq.read_table(tmp.name)
+        blob_path = storage.blob(resolver.key, version, location.current, config.partition)
+        storage.store(blob=blob_path, table=snapshot)
+        del snapshot
 
     return dg.Output(
         value=None,
         metadata={
-            "storage": dg.MetadataValue.text(f"gs://{storage.bucket}/{blob}"),
-            "rows": dg.MetadataValue.int(snapshot.num_rows),
-            "partitions": dg.MetadataValue.int(len(tables)),
+            "storage": dg.MetadataValue.text(f"gs://{storage.bucket}/{blob_path}"),
+            "rows": dg.MetadataValue.int(total_rows),
+            "partitions": dg.MetadataValue.int(partition_count),
         },
     )
 
