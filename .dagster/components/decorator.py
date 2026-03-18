@@ -7,16 +7,16 @@ import dagster as dg
 import pyarrow as pa
 
 from components.location import Location
-from components.io import AssetCloudStorage
+from components.io import TableAssetStorage
 
 
 class AssetCache:
-    """Branch-aware cache for asset tables backed by AssetCloudStorage."""
+    """Branch-aware cache for asset tables backed by TableAssetStorage."""
 
     def __init__(self, context: dg.AssetExecutionContext):
         self._context = context
         self._location = Location.load()
-        self._storage = AssetCloudStorage()
+        self._storage = TableAssetStorage()
 
     def _try_load(self, location: str) -> Optional[pa.Table]:
         self._context.log.info(

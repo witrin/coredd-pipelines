@@ -6,7 +6,7 @@ import dagster as dg
 
 from components.meta import AssetResolver
 from components.location import Location
-from components.io import AssetCloudStorage
+from components.io import TableAssetStorage
 
 
 class SnapshotConfig(dg.Config):
@@ -20,7 +20,7 @@ def snapshot_op(context: dg.OpExecutionContext, config: SnapshotConfig) -> dg.Ou
     resolver = AssetResolver(context, config.asset)
     resolver.validate(config.partition)
 
-    storage = AssetCloudStorage()
+    storage = TableAssetStorage()
     location = Location.load()
     version = resolver.version(config.version)
 
@@ -40,30 +40,41 @@ def snapshot_op(context: dg.OpExecutionContext, config: SnapshotConfig) -> dg.Ou
     else:
         partition_keys = list(partitions.get_partition_keys())
 
-    total_rows = 0
-    partition_count = 0
+    rows = 0
+    total = 0
 
-    with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
+    with tempfile.NamedTemporaryFile(suffix=".parquet") as temporary:
         writer: Optional[pq.ParquetWriter] = None
         try:
             for key in partition_keys:
                 if partitions is None:
                     normalized = "default"
                 else:
-                    normalized = key.replace("|", ";").replace("/", "-").replace("_", "-")
+                    normalized = (
+                        key.replace("|", ";").replace("/", "-").replace("_", "-")
+                    )
 
-                table = storage.load(blob=storage.blob(resolver.key, version, location.current, normalized))
+                table = storage.load(
+                    blob=storage.blob(
+                        resolver.key, version, location.current, normalized
+                    )
+                )
                 if table is None and location.current != location.default:
-                    table = storage.load(blob=storage.blob(resolver.key, version, location.default, normalized))
+                    table = storage.load(
+                        blob=storage.blob(
+                            resolver.key, version, location.default, normalized
+                        )
+                    )
                 if table is None:
                     continue
 
-                context.log.info("Loaded partition %s with %d rows", key, table.num_rows)
-                total_rows += table.num_rows
-                partition_count += 1
+                context.log.info(
+                    "Loaded partition %s with %d rows", key, table.num_rows
+                )
+                total += 1
 
                 if writer is None:
-                    writer = pq.ParquetWriter(tmp.name, table.schema)
+                    writer = pq.ParquetWriter(temporary.name, table.schema)
                 writer.write_table(table)
                 del table
 
@@ -73,19 +84,19 @@ def snapshot_op(context: dg.OpExecutionContext, config: SnapshotConfig) -> dg.Ou
             if writer is not None:
                 writer.close()
 
-        context.log.info("Compacted %d partitions (%d rows)", partition_count, total_rows)
+        context.log.info("Compacted %d partitions", total)
 
-        snapshot = pq.read_table(tmp.name)
-        blob_path = storage.blob(resolver.key, version, location.current, config.partition)
-        storage.store(blob=blob_path, table=snapshot)
-        del snapshot
+        blob_path = storage.blob(
+            resolver.key, version, location.current, config.partition
+        )
+        storage.store(blob=blob_path, file=temporary.name)
 
     return dg.Output(
         value=None,
         metadata={
             "storage": dg.MetadataValue.text(f"gs://{storage.bucket}/{blob_path}"),
-            "rows": dg.MetadataValue.int(total_rows),
-            "partitions": dg.MetadataValue.int(partition_count),
+            "rows": dg.MetadataValue.int(rows),
+            "partitions": dg.MetadataValue.int(total),
         },
     )
 

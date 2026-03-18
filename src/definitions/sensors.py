@@ -3,7 +3,7 @@ import hashlib
 from datetime import date, datetime
 
 from components.decorator import asset_sensor
-from components.io import AssetCloudStorage
+from components.io import TableAssetStorage
 from benchmark.definitions.partitions import Shard
 
 import dagster as dg
@@ -20,7 +20,7 @@ def scope_repository_partition_sensor(
 
     instance: dg.DagsterInstance = context.instance
 
-    storage = AssetCloudStorage()
+    storage = TableAssetStorage()
     table = storage.load(context, event=asset_event)
 
     if table is None or table.num_rows == 0:
@@ -63,7 +63,7 @@ def scope_repository_batch_sensor(
     """Synchronize repository batch partitions."""
     instance = context.instance
 
-    storage = AssetCloudStorage()
+    storage = TableAssetStorage()
     table = storage.load(context, event=asset_event)
 
     if table is None or table.num_rows == 0:
@@ -112,7 +112,7 @@ def scope_repository_cohort_sensor(
 ):
     """Synchronize cohort partitions with time-based sharding."""
     instance = context.instance
-    storage = AssetCloudStorage()
+    storage = TableAssetStorage()
 
     table = storage.load(context, event=asset_event)
     if table is None or table.num_rows == 0:
@@ -165,7 +165,7 @@ def scope_repository_set_sensor(
     import polars as pl
     from dateutil.relativedelta import relativedelta
 
-    storage = AssetCloudStorage()
+    storage = TableAssetStorage()
     table = storage.load(context, event=asset_event)
 
     if table is None or table.num_rows == 0:
@@ -247,7 +247,7 @@ def ingest_validation_sources_partition_sensor(
     """Populate partitions for validation source ingestion."""
     import polars as pl
 
-    storage = AssetCloudStorage()
+    storage = TableAssetStorage()
     table = storage.load(context, event=asset_event)
 
     if table is None or table.num_rows == 0:

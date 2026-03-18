@@ -58,7 +58,7 @@ class CloudCache:
 
 
 class AssetCloudStorage:
-    """Provides load and store access for asset tables on cloud storage."""
+    """Base class providing shared cloud storage primitives for asset I/O."""
 
     def __init__(
         self,
@@ -230,7 +230,7 @@ class AssetCloudStorage:
     ) -> str:
         return self.prefix(key, version, location, partition) + "data.parquet"
 
-    def resolve(
+    def _resolve_prefix(
         self,
         context: dg.InputContext | dg.OutputContext,
         location: str | None = None,
@@ -246,44 +246,9 @@ class AssetCloudStorage:
 
         return self.prefix(asset_key, version, location, norm)
 
-    def index(self, prefix: str) -> list[str]:
-        blobs = self._bucket.list_blobs(prefix=prefix)
-        return [b.name for b in blobs if not b.name.endswith("data.parquet")]
 
-    def download(self, name: str):
-        blob = self._bucket.blob(name)
-        if not blob.exists():
-            return None
-        return blob.open("rb")
-
-    def upload(self, context: dg.OutputContext, stream: BlobStream) -> None:
-        asset_key = self._key(context, None, None)
-        partition = self._partition(context, None)
-        version = self._version_from_context(context)
-
-        blob_name = self.prefix(asset_key, version, None, partition) + stream.filename
-
-        blob = self._bucket.blob(blob_name)
-
-        with blob.open("wb", content_type=stream.content_type) as f:
-            for chunk in stream.chunks():
-                f.write(chunk)
-
-        context.add_output_metadata(
-            {
-                "console": dg.MetadataValue.url(
-                    (
-                        f"https://console.cloud.google.com/storage/browser/_details/"
-                        f"{self._bucket.name}/{blob_name}"
-                    )
-                ),
-                "storage": dg.MetadataValue.text(
-                    f"gs://{self._bucket.name}/{blob_name}"
-                ),
-                "content_type": dg.MetadataValue.text(stream.content_type),
-                "size_bytes": dg.MetadataValue.int(len(stream)),
-            }
-        )
+class TableAssetStorage(AssetCloudStorage):
+    """Loads and stores asset tables (Parquet) on cloud storage."""
 
     def _load_parquet(self, name: str) -> Optional[pa.Table]:
         blob = self._bucket.blob(name)
@@ -298,6 +263,10 @@ class AssetCloudStorage:
         sink = pa.BufferOutputStream()
         pq.write_table(table, sink)
         blob.upload_from_string(sink.getvalue().to_pybytes())
+
+    def _upload_file(self, name: str, file: str) -> None:
+        blob = self._bucket.blob(name)
+        blob.upload_from_filename(file)
 
     @overload
     def load(
@@ -369,6 +338,9 @@ class AssetCloudStorage:
     @overload
     def store(self, *, blob: str, table: pa.Table) -> None: ...
 
+    @overload
+    def store(self, *, blob: str, file: str) -> None: ...
+
     def store(
         self,
         context: (
@@ -381,8 +353,13 @@ class AssetCloudStorage:
         event: Optional[dg.EventLogEntry] = None,
         location: str | None = None,
         blob: str | None = None,
+        file: str | None = None,
     ) -> None:
         """Stores the table for the given context, optionally scoped by a materialization event."""
+        if blob is not None and file is not None:
+            self._upload_file(blob, file)
+            return
+
         if blob is not None and table is not None:
             self._store_parquet(blob, table)
             return
@@ -418,18 +395,85 @@ class AssetCloudStorage:
         )
 
 
-class CloudStorageManager(dg.IOManager):
-    """Persists and retrieves asset tables via AssetCloudStorage with branch fallback."""
+class BlobAssetStorage(AssetCloudStorage):
+    """Loads and stores arbitrary blobs on cloud storage."""
 
-    def __init__(self, location: Location, storage: AssetCloudStorage) -> None:
+    def _index(self, prefix: str) -> list[str]:
+        blobs = self._bucket.list_blobs(prefix=prefix)
+        return [b.name for b in blobs if not b.name.endswith("data.parquet")]
+
+    def _load_blob(self, name: str):
+        blob = self._bucket.blob(name)
+        if not blob.exists():
+            return None
+        return blob.open("rb")
+
+    def _store_blob(self, context: dg.OutputContext, stream: BlobStream) -> None:
+        asset_key = self._key(context, None, None)
+        partition = self._partition(context, None)
+        version = self._version_from_context(context)
+
+        blob_name = self.prefix(asset_key, version, None, partition) + stream.filename
+
+        blob = self._bucket.blob(blob_name)
+
+        with blob.open("wb", content_type=stream.content_type) as f:
+            for chunk in stream.chunks():
+                f.write(chunk)
+
+        context.add_output_metadata(
+            {
+                "console": dg.MetadataValue.url(
+                    (
+                        f"https://console.cloud.google.com/storage/browser/_details/"
+                        f"{self._bucket.name}/{blob_name}"
+                    )
+                ),
+                "storage": dg.MetadataValue.text(
+                    f"gs://{self._bucket.name}/{blob_name}"
+                ),
+                "content_type": dg.MetadataValue.text(stream.content_type),
+                "size_bytes": dg.MetadataValue.int(len(stream)),
+            }
+        )
+
+    def load(
+        self,
+        context: dg.InputContext,
+        location: str | None = None,
+        partition: str | None = None,
+    ):
+        prefix = self._resolve_prefix(context, location=location, partition=partition)
+        names = self._index(prefix)
+
+        if names:
+            return self._load_blob(names[0])
+
+        return None
+
+    def store(self, context: dg.OutputContext, stream: BlobStream) -> None:
+        self._store_blob(context, stream)
+
+
+class CloudStorageManager(dg.IOManager):
+    """Persists and retrieves asset tables via TableAssetStorage/BlobAssetStorage with branch fallback."""
+
+    def __init__(
+        self,
+        location: Location,
+        tables: TableAssetStorage,
+        blobs: BlobAssetStorage,
+    ) -> None:
         self._location = location
-        self._storage = storage
+        self._tables = tables
+        self._blobs = blobs
 
     @staticmethod
     def from_environment() -> "CloudStorageManager":
         return CloudStorageManager(
             location=Location.load(),
-            storage=AssetCloudStorage(),
+            tables=TableAssetStorage(),
+            blobs=BlobAssetStorage(),
         )
 
     def _ensure_table(self, obj) -> pa.Table:
@@ -454,15 +498,12 @@ class CloudStorageManager(dg.IOManager):
             "RecordBatch, or pandas.DataFrame."
         )
 
-    def _store_stream(self, context: dg.OutputContext, stream: BlobStream) -> None:
-        self._storage.upload(context, stream)
-
     def handle_output(self, context: dg.OutputContext, obj) -> None:
         if obj is None:
             return
 
         if isinstance(obj, BlobStream):
-            self._store_stream(context, obj)
+            self._blobs.store(context, obj)
             context.log.info(
                 "Stored blob %s (%d bytes).",
                 context.asset_key,
@@ -471,7 +512,7 @@ class CloudStorageManager(dg.IOManager):
             return
 
         table = self._ensure_table(obj)
-        self._storage.store(context=context, table=table)
+        self._tables.store(context=context, table=table)
         context.log.info(
             "Stored asset %s (%d rows).",
             context.asset_key,
@@ -481,14 +522,14 @@ class CloudStorageManager(dg.IOManager):
     def _load_table_partition(
         self, context: dg.InputContext, partition: str | None = None
     ) -> pa.Table | None:
-        table = self._storage.load(
+        table = self._tables.load(
             context=context,
             location=self._location.current,
             partition=partition,
         )
 
         if table is None and self._location.current != self._location.default:
-            table = self._storage.load(
+            table = self._tables.load(
                 context=context,
                 location=self._location.default,
                 partition=partition,
@@ -496,24 +537,17 @@ class CloudStorageManager(dg.IOManager):
 
         return table
 
-    def _resolve_blob(
-        self, context: dg.InputContext, location: str, partition: str | None
-    ):
-        prefix = self._storage.resolve(context, location=location, partition=partition)
-        names = self._storage.index(prefix)
-
-        if names:
-            return self._storage.download(names[0])
-
-        return None
-
     def _load_blob_partition(
         self, context: dg.InputContext, partition: str | None = None
     ):
-        result = self._resolve_blob(context, self._location.current, partition)
+        result = self._blobs.load(
+            context, location=self._location.current, partition=partition
+        )
 
         if result is None and self._location.current != self._location.default:
-            result = self._resolve_blob(context, self._location.default, partition)
+            result = self._blobs.load(
+                context, location=self._location.default, partition=partition
+            )
 
         return result
 
