@@ -138,8 +138,16 @@ class CloudStorage:
         blob = self._bucket.blob(name)
         if not blob.exists():
             return None
-        data = blob.download_as_bytes()
-        return pq.read_table(pa.BufferReader(data))
+        blob.reload()
+        path, meta = self._cache_path(blob)
+        if self._is_cache_valid(blob, path, meta):
+            return pq.ParquetFile(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.parent / f".{path.name}.tmp"
+        blob.download_to_filename(str(temp))
+        temp.replace(path)
+        self._write_cache_meta(blob, path, meta)
+        return pq.ParquetFile(path)
 
     def _list_tables(
         self,
@@ -149,10 +157,7 @@ class CloudStorage:
         partition: str,
     ) -> Iterable[pa.Table]:
         prefix = (
-            f"assets/{key}/"
-            f"version={version}/"
-            f"location={location}/"
-            "partition="
+            f"assets/{key}/" f"version={version}/" f"location={location}/" "partition="
         )
 
         for blob in self._bucket.list_blobs(prefix=prefix):
@@ -167,9 +172,17 @@ class CloudStorage:
             if not fnmatch.fnmatch(parts["partition"], partition):
                 continue
 
-            data = blob.download_as_bytes()
-
-            yield pq.read_table(pa.BufferReader(data))
+            blob.reload()
+            path, meta_path = self._cache_path(blob)
+            if self._is_cache_valid(blob, path, meta_path):
+                yield pq.read_table(path)
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.parent / f".{path.name}.tmp"
+            blob.download_to_filename(str(temp))
+            temp.replace(path)
+            self._write_cache_meta(blob, path, meta_path)
+            yield pq.read_table(path)
 
     def _list_blobs(
         self,
@@ -179,10 +192,7 @@ class CloudStorage:
         partition: str,
     ) -> list[tuple[str, str]]:
         prefix = (
-            f"assets/{key}/"
-            f"version={version}/"
-            f"location={location}/"
-            "partition="
+            f"assets/{key}/" f"version={version}/" f"location={location}/" "partition="
         )
         groups: set[str] = set()
 

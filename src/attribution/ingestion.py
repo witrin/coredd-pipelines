@@ -37,7 +37,7 @@ class ValidationExtractor:
         self._log = log or (lambda msg: None)
 
     def extract(self) -> BlobStream:
-        default_branch = self.client.get_repo(self.repository).default_branch
+        default = self.client.get_repo(self.repository).default_branch
         token = self.client._Github__requester._Requester__auth.token
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -50,31 +50,30 @@ class ValidationExtractor:
                 )
             )
 
-            self._log(f"Cloning {self.repository} (bare, branch={default_branch})")
+            self._log(f"Cloning {self.repository} (bare, branch={default})")
 
             pygit2.clone_repository(
                 f"https://github.com/{self.repository}.git",
                 directory,
                 bare=True,
-                checkout_branch=default_branch,
+                checkout_branch=default,
                 callbacks=callbacks,
             )
 
             repository = pygit2.Repository(directory)
-            commit = repository.revparse_single(default_branch)
+            commit = repository.revparse_single(default)
 
             archive = os.path.join(temporary, f"{commit.id}.tar.gz")
 
             with tarfile.open(archive, "w:gz") as tar:
                 tar.add(directory, arcname=os.path.basename(directory))
 
-            with open(archive, "rb") as f:
-                data = BytesIO(f.read())
-            size = data.getbuffer().nbytes
+            file = open(archive, "rb")
+            size = os.path.getsize(archive)
 
         return BlobStream(
             content_type="application/gzip",
             filename=f"{commit.id}.tar.gz",
-            response=FileResponseAdapter(data),
+            response=FileResponseAdapter(file),
             size=size,
         )

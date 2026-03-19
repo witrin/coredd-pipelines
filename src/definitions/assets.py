@@ -655,7 +655,7 @@ def ingest_validation_sources(
 
 
 @asset(
-    metadata={"version": "1.2.0"},
+    metadata={"version": "2.0.0"},
     partitions_def=partitions.ingest_validation_sources_partition,
     group_name="ingest",
     pool="default",
@@ -664,42 +664,59 @@ def ingest_validation_context(
     context: dg.AssetExecutionContext,
     ingest_validation_set: pa.Table,
     ingest_validation_sources,
-) -> pa.Table:
-    """Persist graph and tree context for validation cases in one repository partition."""
+) -> BlobStream:
+    import os
+    from io import BytesIO
     import polars as pl
+    from fastavro.write import Writer
+
+    from benchmark.attribution.ingestion import FileResponseAdapter
 
     rows = pl.from_arrow(ingest_validation_set)
     names = sorted(rows["repository"].unique().to_list())
     repository = partitions.Shard.from_space(context.partition_key, names)
-    cases = list(rows.filter(pl.col("repository") == repository).iter_rows(named=True))
-    schema = pa.schema(
-        [
-            *ingest_validation_set.schema,
-            pa.field("partition", pa.string()),
-            pa.field("archive", pa.string()),
-            pa.field("store", pa.binary()),
-            pa.field("trees", pa.binary()),
-        ]
-    )
+    cases = rows.filter(pl.col("repository") == repository).iter_rows(named=True)
 
-    if not cases:
-        return pa.Table.from_pylist([], schema=schema)
+    if not rows.height:
+        return BlobStream(
+            content_type="application/avro",
+            filename="data.avro",
+            response=FileResponseAdapter(BytesIO(b"")),
+            size=0,
+        )
 
-    with tempfile.TemporaryDirectory() as name:
-        work = Path(name)
-        archive = work / "repository.tar.gz"
+    name = tempfile.mkdtemp()
+    work = Path(name)
+    archive = work / "repository.tar.gz"
 
-        with open(archive, "wb") as f:
-            for chunk in iter(
-                lambda: ingest_validation_sources.read(8 * 1024 * 1024), b""
-            ):
-                f.write(chunk)
+    with open(archive, "wb") as file:
+        for chunk in iter(lambda: ingest_validation_sources.read(8 * 1024 * 1024), b""):
+            file.write(chunk)
 
-        with tarfile.open(archive, "r:gz") as tar:
-            tar.extractall(work, filter="data")
+    with tarfile.open(archive, "r:gz") as tar:
+        tar.extractall(work, filter="data")
 
-        control = VersionControl(pygit2.Repository(str(work / "repository.git")))
-        result: list[dict[str, object]] = []
+    control = VersionControl(pygit2.Repository(str(work / "repository.git")))
+    output = work / "data.avro"
+
+    with open(output, "wb") as file:
+        writer = Writer(
+            file,
+            {
+                "type": "record",
+                "name": "Row",
+                "fields": [
+                    {"name": "repository", "type": "string"},
+                    {"name": "languages", "type": {"type": "array", "items": "string"}},
+                    {"name": "correction", "type": "string"},
+                    {"name": "defects", "type": {"type": "array", "items": "string"}},
+                    {"name": "partition", "type": "string"},
+                    {"name": "archive", "type": "string"},
+                    {"name": "store", "type": "bytes"},
+                    {"name": "trees", "type": "bytes"},
+                ],
+            },
+        )
 
         for row in cases:
             correction = str(row["correction"])
@@ -707,9 +724,13 @@ def ingest_validation_context(
             store = KnowledgeGraphBuilder(repository=control).build(
                 parents[0], correction
             )
-            result.append(
+
+            writer.write(
                 {
-                    **{name: row[name] for name in ingest_validation_set.schema.names},
+                    "repository": str(row["repository"]),
+                    "languages": list(row["languages"] or []),
+                    "correction": correction,
+                    "defects": list(row["defects"] or []),
                     "partition": context.partition_key,
                     "archive": str(archive),
                     "store": json.dumps(
@@ -726,4 +747,11 @@ def ingest_validation_context(
                 }
             )
 
-    return pa.Table.from_pylist(result, schema=schema)
+    file = open(output, "rb")
+
+    return BlobStream(
+        content_type="application/avro",
+        filename="data.avro",
+        response=FileResponseAdapter(file),
+        size=os.path.getsize(output),
+    )

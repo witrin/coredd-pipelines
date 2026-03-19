@@ -424,13 +424,12 @@ class SourceExtractor:
 
             size = os.path.getsize(archive)
 
-            with open(archive, "rb") as f:
-                data = BytesIO(f.read())
-            size = data.getbuffer().nbytes
+            file = open(archive, "rb")
+            size = os.path.getsize(archive)
 
         return BlobStream(
             content_type="application/gzip",
             filename=f"{commit.id}.tar.gz",
-            response=FileResponseAdapter(data),
+            response=FileResponseAdapter(file),
             size=size,
         )
