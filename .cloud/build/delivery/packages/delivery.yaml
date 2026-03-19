@@ -36,6 +36,5 @@ steps:
         python -m pip install --upgrade pip
         python -m pip install twine keyring keyrings.google-artifactregistry-auth
         python -m twine upload \
-          --skip-existing \
           --repository-url "https://${_REGION}-python.pkg.dev/${_PROJECT}/${_REPOSITORY}" \
           .jupyter/dist/*
