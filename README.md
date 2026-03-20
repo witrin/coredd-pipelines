@@ -44,6 +44,27 @@ Inspect persistent logs and artifacts under `.dagster/local/*` on the host.
 
 Stop the stack with `docker compose down` or by pressing Ctrl+C in the compose session.
 
+## Testing
+
+Unit tests run in GitHub Actions for pull requests targeting `main` and for pushes to `main`.
+
+The workflow builds the existing `pipelines` image, installs the `development` extras inside the test container, and executes the existing unit tests without requiring `.env`, cloud credentials, or auxiliary services.
+
+Use the same container path locally when you need to reproduce the CI run.
+
+```bash
+docker build --target pipelines -t benchmark-unit-tests .
+
+docker run --rm \
+  --user 0:0 \
+  -e SKIP_DEFAULT_LOGGING_SETUP=1 \
+  -v "$(pwd)/src:/usr/local/src/benchmark" \
+  -v "$(pwd)/pyproject.toml:/usr/local/src/pyproject.toml:ro" \
+  -w /usr/local/src \
+  benchmark-unit-tests \
+  bash -lc 'uv pip install --system ".[development]" && python -m pytest -q benchmark'
+```
+
 ## Production Workflow
 
 Create or update `.env.production` with the cloud Dagster GRPC endpoint and Postgres credentials described above.

@@ -58,7 +58,7 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                     "path": "a.py",
                     "urn": "entity:function=foo",
                     "name": "foo",
-                    "edge": "EDIT",
+                    "source": "gumtree",
                 },
             )
 
@@ -160,21 +160,21 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                     "path": "a.py",
                     "urn": "entity:class=Outer",
                     "name": "Outer",
-                    "edge": "EDIT",
+                    "source": "gumtree",
                 },
                 "entity:a.py:class=Outer:class=Inner:method=bar": {
                     "kind": "method",
                     "path": "a.py",
                     "urn": "entity:class=Outer:class=Inner:method=bar",
                     "name": "bar",
-                    "edge": "EDIT",
+                    "source": "gumtree",
                 },
                 "entity:a.py:class=Outer:method=foo:function=baz": {
                     "kind": "function",
                     "path": "a.py",
                     "urn": "entity:class=Outer:method=foo:function=baz",
                     "name": "baz",
-                    "edge": "EDIT",
+                    "source": "gumtree",
                 },
             }
 

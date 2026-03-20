@@ -1,0 +1,42 @@
+name: dagster
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dagster-units-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: units
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up image
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        run: docker buildx build --load --target pipelines --tag benchmark-unit-tests .
+
+      - name: Run tests
+        run: |
+          docker run --rm \
+            --user 0:0 \
+            -e SKIP_DEFAULT_LOGGING_SETUP=1 \
+            -v "${{ github.workspace }}/src:/usr/local/src/benchmark" \
+            -v "${{ github.workspace }}/pyproject.toml:/usr/local/src/pyproject.toml:ro" \
+            -w /usr/local/src \
+            benchmark-unit-tests \
+            bash -lc 'uv pip install --system ".[development]" && python -m pytest -q benchmark'
