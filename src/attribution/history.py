@@ -442,17 +442,11 @@ class VersionControlSnapshot:
             parent: str | None = None
 
             for item in chain:
-                original = str(item["sha"])
-                files = [
-                    {
-                        "path": str(file["path"]),
-                        "content": bytes(file["content"]),
-                    }
-                    for file in list(item["files"])
-                ]
+                original = item["sha"]
+                files = item["files"]
                 current = tuple(
                     sorted(
-                        (str(file["path"]), bytes(file["content"]))
+                        (str(file["path"]), file["content"])
                         for file in files
                     )
                 )
