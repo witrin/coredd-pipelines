@@ -96,6 +96,20 @@ class VersionControl:
         blobs.mkdir(parents=True, exist_ok=True)
 
         shas = self._commits(chains)
+        parents: dict[str, list[str]] = {sha: [] for sha in shas}
+
+        for path in chains:
+            for index, sha in enumerate(path):
+                lineage = [] if index == 0 else [path[index - 1]]
+
+                if sha not in parents:
+                    raise ValueError(f"Commit {sha} not found")
+
+                if parents[sha] and parents[sha] != lineage:
+                    raise ValueError(f"Commit {sha} has inconsistent parents")
+
+                parents[sha] = lineage
+
         commits: dict[str, dict[str, object]] = {}
 
         for sha in shas:
@@ -118,15 +132,12 @@ class VersionControl:
                     tz=timezone.utc,
                 ).isoformat(),
                 "author": commit.author.name,
-                "parents": [
-                    str(parent) for parent in commit.parent_ids if str(parent) in shas
-                ],
+                "parents": parents[sha],
             }
 
         with open(target / "meta.json", "w", encoding="utf-8") as file:
             json.dump(
                 {
-                    "paths": chains,
                     "commits": commits,
                 },
                 file,
@@ -532,9 +543,8 @@ class VersionControlSnapshot:
     def load(cls, source: str | Path) -> VersionControlSnapshot:
         source = Path(source)
         meta = cls._load_meta(source)
-        paths = cls._paths(meta)
         commits = cls._commits(meta)
-        cls._validate(source, paths, commits)
+        cls._validate(source, commits)
 
         work = tempfile.TemporaryDirectory()
         repository = pygit2.init_repository(work.name, bare=True)
@@ -544,7 +554,7 @@ class VersionControlSnapshot:
 
         trees: dict[str, pygit2.Oid] = {}
         blobs: dict[str, pygit2.Oid] = {}
-        pending = snapshot._order(paths)
+        pending = list(commits)
 
         while pending:
             current: list[str] = []
@@ -552,9 +562,9 @@ class VersionControlSnapshot:
 
             for sha in pending:
                 item = commits[sha]
-                parents = cast(list[str], item["parents"])
+                lineage = cast(list[str], item["parents"])
 
-                if any(parent not in forward for parent in parents):
+                if any(parent not in forward for parent in lineage):
                     current.append(sha)
                     continue
 
@@ -574,7 +584,7 @@ class VersionControlSnapshot:
                         signature,
                         str(item["message"]),
                         tree,
-                        [pygit2.Oid(hex=forward[parent]) for parent in parents],
+                        [pygit2.Oid(hex=forward[parent]) for parent in lineage],
                     )
                 )
                 forward[sha] = imported
@@ -600,22 +610,6 @@ class VersionControlSnapshot:
         return cast(dict[str, object], data)
 
     @classmethod
-    def _paths(cls, meta: dict[str, object]) -> list[list[str]]:
-        paths = meta.get("paths")
-
-        if not isinstance(paths, list):
-            raise ValueError("Snapshot meta.json is missing paths.")
-
-        result: list[list[str]] = []
-
-        for item in paths:
-            if not isinstance(item, list):
-                raise ValueError("Snapshot paths must contain lists of commits.")
-            result.append([str(value) for value in item])
-
-        return result
-
-    @classmethod
     def _commits(cls, meta: dict[str, object]) -> dict[str, dict[str, object]]:
         commits = meta.get("commits")
 
@@ -635,14 +629,8 @@ class VersionControlSnapshot:
     def _validate(
         cls,
         source: Path,
-        paths: list[list[str]],
         commits: dict[str, dict[str, object]],
     ) -> None:
-        for chain in paths:
-            for sha in chain:
-                if sha not in commits:
-                    raise ValueError(f"Snapshot commit {sha} is missing from commits.")
-
         seen: set[str] = set()
 
         for sha, item in commits.items():
@@ -654,6 +642,15 @@ class VersionControlSnapshot:
 
             if not isinstance(parents, list):
                 raise ValueError(f"Snapshot commit {sha} is missing parents.")
+
+            for parent in parents:
+                if not isinstance(parent, str):
+                    raise ValueError(f"Snapshot commit {sha} has invalid parents.")
+
+                if parent not in commits:
+                    raise ValueError(
+                        f"Snapshot commit {sha} references missing parent {parent}."
+                    )
 
             tree_path = source / "trees" / f"{tree}.json"
 
@@ -747,19 +744,6 @@ class VersionControlSnapshot:
             return self._forward[commit]
         except KeyError as error:
             raise ValueError(f"Commit {commit} not found in snapshot") from error
-
-    def _order(self, paths: list[list[str]]) -> list[str]:
-        result: list[str] = []
-        seen: set[str] = set()
-
-        for chain in paths:
-            for sha in chain:
-                if sha in seen:
-                    continue
-                seen.add(sha)
-                result.append(sha)
-
-        return result
 
     def _tree(
         self,

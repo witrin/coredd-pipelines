@@ -396,13 +396,9 @@ class TestVersionControlSnapshot(unittest.TestCase):
         with open(f"{target}/meta.json", "r", encoding="utf-8") as file:
             meta = json.load(file)
 
-        self.assertEqual(
-            meta["paths"][0],
-            [self.sha_a, self.sha_b],
-        )
-
         commit = meta["commits"][self.sha_b]
         tree = commit["tree"]
+        self.assertEqual(commit["parents"], [self.sha_a])
 
         with open(f"{target}/trees/{tree}.json", "r", encoding="utf-8") as file:
             data = json.load(file)

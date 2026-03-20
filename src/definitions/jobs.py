@@ -1,7 +1,6 @@
 import os
 import tarfile
 import tempfile
-from pathlib import Path
 from typing import Optional
 
 import dagster as dg
@@ -17,87 +16,6 @@ class SnapshotConfig(dg.Config):
     asset: str
     version: Optional[str] = None
     partition: str = "default"
-
-
-class SnapshotArchive:
-    def __init__(self, bucket, directory: str | Path) -> None:
-        self._bucket = bucket
-        self._directory = Path(directory)
-        self._root = self._directory / "snapshot"
-        self._root.mkdir(parents=True, exist_ok=True)
-
-    def merge(self, blob: str) -> int:
-        count = 0
-
-        with self._bucket.blob(blob).open("rb") as stream:
-            with tarfile.open(fileobj=stream, mode="r|gz") as archive:
-                for member in archive:
-                    path = self._path(member.name)
-
-                    if member.isdir():
-                        path.mkdir(parents=True, exist_ok=True)
-                        continue
-
-                    if member.issym() or member.islnk():
-                        raise dg.Failure(
-                            description=(
-                                f"Snapshot archive {blob} contains unsupported links"
-                            )
-                        )
-
-                    if not member.isfile():
-                        raise dg.Failure(
-                            description=(
-                                f"Snapshot archive {blob} contains unsupported entry "
-                                f"{member.name}"
-                            )
-                        )
-
-                    if path.exists():
-                        raise dg.Failure(
-                            description=(
-                                f"Snapshot archive collision at {member.name} "
-                                f"while merging {blob}"
-                            )
-                        )
-
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    source = archive.extractfile(member)
-
-                    if source is None:
-                        raise dg.Failure(
-                            description=(
-                                f"Snapshot archive {blob} could not read {member.name}"
-                            )
-                        )
-
-                    with open(path, "wb") as file:
-                        while True:
-                            chunk = source.read(8 * 1024 * 1024)
-                            if not chunk:
-                                break
-                            file.write(chunk)
-
-                    count += 1
-
-        return count
-
-    def store(self, target: str | Path) -> None:
-        with tarfile.open(target, "w:gz") as archive:
-            for path in sorted(self._root.rglob("*")):
-                archive.add(path, arcname=str(path.relative_to(self._root)))
-
-    def _path(self, name: str) -> Path:
-        path = self._root / name
-        resolved = path.resolve()
-        root = self._root.resolve()
-
-        if resolved != root and root not in resolved.parents:
-            raise dg.Failure(
-                description=f"Snapshot archive contains invalid path {name}"
-            )
-
-        return resolved
 
 
 @dg.op(name="snapshot_op")
@@ -235,37 +153,50 @@ def snapshot_op(context: dg.OpExecutionContext, config: SnapshotConfig) -> dg.Ou
             )
             storage.store(blob=blob, file=temporary.name)
     if format == "tar.gz":
-        with tempfile.TemporaryDirectory() as temporary:
-            archive = SnapshotArchive(bucket, temporary)
-            files = 0
-
-            for source in sources:
-                count = archive.merge(source["blob"])
-                files += count
-                context.log.info(
-                    "Loaded partition %s with %d files",
-                    source["partition"],
-                    count,
-                )
-
-            output = Path(temporary) / "data.tar.gz"
-            archive.store(output)
-            blob = (
-                storage.prefix(
-                    resolver.key,
-                    version,
-                    location.current,
-                    config.partition.replace("|", ";")
-                    .replace("/", "-")
-                    .replace("_", "-"),
-                )
-                + "data.tar.gz"
+        files = 0
+        blob = (
+            storage.prefix(
+                resolver.key,
+                version,
+                location.current,
+                config.partition.replace("|", ";").replace("/", "-").replace("_", "-"),
             )
-            bucket.blob(blob).upload_from_filename(
-                str(output),
-                content_type="application/gzip",
-            )
-            rows = files
+            + "data.tar.gz"
+        )
+        target = bucket.blob(blob)
+        target.content_type = "application/gzip"
+
+        with target.open("wb") as sink:
+            with tarfile.open(fileobj=sink, mode="w|gz") as output:
+                for source in sources:
+                    count = 0
+
+                    with bucket.blob(source["blob"]).open("rb") as stream:
+                        with tarfile.open(fileobj=stream, mode="r|gz") as archive:
+                            for member in archive:
+                                if not member.isfile():
+                                    continue
+
+                                file = archive.extractfile(member)
+
+                                if file is None:
+                                    continue
+
+                                try:
+                                    output.addfile(member, file)
+                                finally:
+                                    file.close()
+
+                                count += 1
+
+                    files += count
+                    context.log.info(
+                        "Loaded partition %s with %d files",
+                        source["partition"],
+                        count,
+                    )
+
+        rows = files
 
     context.log.info("Compacted %d partitions", len(sources))
 

@@ -654,7 +654,7 @@ def ingest_validation_sources(
 
 
 @asset(
-    metadata={"version": "3.0.0"},
+    metadata={"version": "3.1.0"},
     partitions_def=partitions.ingest_validation_sources_partition,
     group_name="ingest",
     pool="default",
@@ -688,7 +688,7 @@ def ingest_validation_context(
         )
 
     name = tempfile.mkdtemp()
-    work = Path(name.lower())
+    work = Path(name)
     source = work / "repository.tar.gz"
 
     with open(source, "wb") as file:
@@ -699,19 +699,20 @@ def ingest_validation_context(
         tar.extractall(work, filter="data")
 
     control = VersionControl(pygit2.Repository(str(work / "repository.git")))
-    root = work / repository
-    snapshot = root / "snapshot"
-    graphs = root / "graphs"
-    graphs.mkdir(parents=True, exist_ok=True)
-    chains: list[list[str]] = []
+    root = work / repository.lower()
+    meta = root / "meta.json"
+    paths: list[list[str]] = []
     seen: set[tuple[str, ...]] = set()
+    values: list[dict[str, object]] = []
 
-    for row in cases:
-        correction = str(row["correction"])
+    for case in cases:
+        correction = str(case["correction"])
         parents = control.parents(correction)
         base = correction if not parents else parents[0]
         store = KnowledgeGraphBuilder(repository=control).build(base, correction)
-        graph = graphs / f"{correction}.json"
+        graph = root / "context" / f"{correction}.json"
+
+        graph.parent.mkdir(parents=True, exist_ok=True)
 
         with open(graph, "w", encoding="utf-8") as file:
             json.dump(
@@ -732,13 +733,32 @@ def ingest_validation_context(
             if key in seen:
                 continue
             seen.add(key)
-            chains.append(chain)
+            paths.append(chain)
 
-    control.dump(chains, snapshot)
+        values.append(
+            {
+                "correction": correction,
+                "defects": list(case["defects"] or []),
+                "languages": list(case["languages"] or []),
+                "partition": context.partition_key,
+            }
+        )
+
+    with open(meta, "w", encoding="utf-8") as file:
+        json.dump(
+            {
+                "repository": repository,
+                "cases": values,
+            },
+            file,
+            sort_keys=True,
+        )
+
+    control.dump(paths, root / "snapshot")
     output = work / f"{repository.replace('/', '-').lower()}.tar.gz"
 
     with tarfile.open(output, "w:gz") as tar:
-        tar.add(root, arcname=repository)
+        tar.add(root, arcname=repository.lower())
 
     file = open(output, "rb")
 
