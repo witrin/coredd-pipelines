@@ -31,6 +31,20 @@ run_queue:
 concurrency:
   default_op_concurrency_limit: 50
 
+execution:
+  config:
+    multiprocess:
+      max_concurrent: 50
+
+run_coordinator:
+  module: dagster.core.run_coordinator
+  class: QueuedRunCoordinator
+  config:
+    dequeue_interval_seconds: 1
+    dequeue_use_threads: true
+    dequeue_num_workers: 10
+    max_concurrent_runs: 50
+
 run_launcher:
   module: components.launcher
   class: CloudRunJobRunLauncher

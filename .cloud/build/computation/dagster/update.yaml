@@ -113,6 +113,7 @@ osPolicies:
                 CLOUD_RUN_PROJECT=$(v '.project')
                 CLOUD_RUN_REGION=$(v '.region')
                 CLOUD_RUN_JOB=pipelines
+                DAGSTER_ASSET_BACKFILL_RUN_CHUNK_SIZE=50
                 EOF
 
                 cat >/etc/dagster/interface.env <<EOF

@@ -14,12 +14,6 @@ local_artifact_storage:
   config:
     base_dir: /var/lib/dagster
 
-run_queue:
-  max_concurrent_runs: 50
-
-concurrency:
-  default_op_concurrency_limit: 50
-
 telemetry:
   enabled: false
 
