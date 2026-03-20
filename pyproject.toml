@@ -5,13 +5,12 @@ description = "Dagster pipeline for scope, ingestion, discovery, tracing and eva
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "dagster==1.12.13",
-    "dagit==1.12.13",
-    "dagster-postgres==0.28.13",
-    "dagster-gcp==0.28.13",
+    "dagster==1.12.20",
+    "dagster-webserver==1.12.20",
+    "dagster-postgres==0.28.20",
+    "dagster-gcp==0.28.20",
     "google-cloud-bigquery",
     "google-cloud-storage",
-    "fastavro==1.12.1",
     "polars==1.37.0",
     "pyarrow==22.0.0",
     "PyGithub==2.8.1",

@@ -46,9 +46,7 @@ cryptography==46.0.4
     # via
     #   google-auth
     #   pyjwt
-dagit==1.12.13
-    # via benchmark (pyproject.toml)
-dagster==1.12.13
+dagster==1.12.20
     # via
     #   benchmark (pyproject.toml)
     #   dagster-gcp
@@ -56,28 +54,26 @@ dagster==1.12.13
     #   dagster-pandas
     #   dagster-postgres
     #   dagster-webserver
-dagster-gcp==0.28.13
+dagster-gcp==0.28.20
     # via benchmark (pyproject.toml)
-dagster-graphql==1.12.13
+dagster-graphql==1.12.20
     # via dagster-webserver
-dagster-pandas==0.28.13
+dagster-pandas==0.28.20
     # via dagster-gcp
-dagster-pipes==1.12.13
+dagster-pipes==1.12.20
     # via dagster
-dagster-postgres==0.28.13
+dagster-postgres==0.28.20
     # via benchmark (pyproject.toml)
-dagster-shared==1.12.13
+dagster-shared==1.12.20
     # via dagster
-dagster-webserver==1.12.13
-    # via dagit
+dagster-webserver==1.12.20
+    # via benchmark (pyproject.toml)
 db-dtypes==1.5.0
     # via dagster-gcp
 distro==1.9.0
     # via openai
 docstring-parser==0.17.0
     # via dagster
-fastavro==1.12.1
-    # via benchmark (pyproject.toml)
 filelock==3.20.3
     # via dagster
 fsspec==2026.1.0
