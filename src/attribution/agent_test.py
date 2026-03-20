@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -296,7 +297,10 @@ class TestKnowledgeGraphTool(unittest.TestCase):
 
             repository = VersionControl(fixture.repository)
             store = KnowledgeGraphBuilder(repository=repository).build(base, after)
-            snapshot = VersionControlSnapshot.load(repository.dump([[base, after]]))
+            target = tempfile.TemporaryDirectory()
+            self.addCleanup(target.cleanup)
+            repository.dump([[base, after]], target.name)
+            snapshot = VersionControlSnapshot.load(target.name)
             self.addCleanup(snapshot.close)
 
             agent = KnowledgeGraphTool(

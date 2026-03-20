@@ -5,6 +5,7 @@ import json
 import tarfile
 import tempfile
 from datetime import datetime, timezone
+from io import TextIOBase
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -75,9 +76,7 @@ class VersionControl:
             if (parent / "objects").is_dir() and (parent / "refs").is_dir():
                 return parent
 
-        raise FileNotFoundError(
-            f"No bare git repository found under {repo_dir}"
-        )
+        raise FileNotFoundError(f"No bare git repository found under {repo_dir}")
 
     def parents(self, commit: str) -> list[str]:
         """Return parent SHAs of *commit*."""
@@ -88,21 +87,111 @@ class VersionControl:
         c = obj.peel(pygit2.Commit)
         return [str(pid) for pid in c.parent_ids]
 
-    def dump(self, chains: list[list[str]]) -> list[list[dict[str, object]]]:
-        result: list[list[dict[str, object]]] = []
+    def dump(self, chains: list[list[str]], target: str | Path) -> None:
+        target = Path(target)
+        trees = target / "trees"
+        blobs = target / "blobs"
+        target.mkdir(parents=True, exist_ok=True)
+        trees.mkdir(parents=True, exist_ok=True)
+        blobs.mkdir(parents=True, exist_ok=True)
+
+        shas = self._commits(chains)
+        commits: dict[str, dict[str, object]] = {}
+
+        for sha in shas:
+            obj = self._repository.get(sha)
+            if obj is None:
+                raise ValueError(f"Commit {sha} not found")
+
+            commit = obj.peel(pygit2.Commit)
+            message = commit.message.strip()
+
+            if self._filter is not None:
+                message = self._filter("message", message)
+
+            self._dump_tree(commit.tree, target)
+            commits[sha] = {
+                "tree": str(commit.tree.id),
+                "message": message,
+                "time": datetime.fromtimestamp(
+                    commit.commit_time,
+                    tz=timezone.utc,
+                ).isoformat(),
+                "author": commit.author.name,
+                "parents": [
+                    str(parent) for parent in commit.parent_ids if str(parent) in shas
+                ],
+            }
+
+        with open(target / "meta.json", "w", encoding="utf-8") as file:
+            json.dump(
+                {
+                    "paths": chains,
+                    "commits": commits,
+                },
+                file,
+                sort_keys=True,
+            )
+
+    def _commits(self, chains: list[list[str]]) -> set[str]:
+        result: set[str] = set()
 
         for chain in chains:
-            current: list[dict[str, object]] = []
-            for sha in chain:
-                current.append(
-                    {
-                        "sha": sha,
-                        "files": self._files(sha),
-                    }
-                )
-            result.append(current)
+            result.update(chain)
 
         return result
+
+    def _dump_tree(self, tree: pygit2.Tree, target: Path) -> None:
+        tree_path = target / "trees" / f"{tree.id}.json"
+
+        if tree_path.exists():
+            return
+
+        with open(tree_path, "w", encoding="utf-8") as file:
+            file.write('{"files":{')
+            self._dump_tree_items(tree, "", file, target, True)
+            file.write("}}")
+
+    def _dump_tree_items(
+        self,
+        tree: pygit2.Tree,
+        prefix: str,
+        file: TextIOBase,
+        target: Path,
+        first: bool,
+    ) -> bool:
+        current = first
+
+        for entry in sorted(tree, key=lambda item: item.name):
+            path = f"{prefix}/{entry.name}" if prefix else entry.name
+            obj = self._repository.get(entry.id)
+
+            if isinstance(obj, pygit2.Tree):
+                current = self._dump_tree_items(obj, path, file, target, current)
+                continue
+
+            if not isinstance(obj, pygit2.Blob):
+                continue
+
+            self._dump_blob(obj, target)
+
+            if not current:
+                file.write(",")
+
+            file.write(json.dumps(path))
+            file.write(":")
+            file.write(json.dumps(str(obj.id)))
+            current = False
+
+        return current
+
+    def _dump_blob(self, blob: pygit2.Blob, target: Path) -> None:
+        path = target / "blobs" / str(blob.id)
+
+        if path.exists():
+            return
+
+        path.write_bytes(blob.data)
 
     def _first_parent_set(self, start: str) -> set[str]:
         if start in self._cache:
@@ -158,9 +247,7 @@ class VersionControl:
 
                 sha = str(hunk.final_commit_id)
                 origin_line = (
-                    hunk.orig_start_line_number
-                    + line
-                    - hunk.final_start_line_number
+                    hunk.orig_start_line_number + line - hunk.final_start_line_number
                 )
 
                 if commit_sha is None:
@@ -229,11 +316,25 @@ class VersionControl:
             if op_type is None:
                 continue
             if op_type == OperationType.ADD:
-                ops.append(FileOperation(base=None, after=delta.new_file.path, operation=op_type))
+                ops.append(
+                    FileOperation(
+                        base=None, after=delta.new_file.path, operation=op_type
+                    )
+                )
             elif op_type == OperationType.DELETE:
-                ops.append(FileOperation(base=delta.old_file.path, after=None, operation=op_type))
+                ops.append(
+                    FileOperation(
+                        base=delta.old_file.path, after=None, operation=op_type
+                    )
+                )
             else:
-                ops.append(FileOperation(base=delta.old_file.path, after=delta.new_file.path, operation=op_type))
+                ops.append(
+                    FileOperation(
+                        base=delta.old_file.path,
+                        after=delta.new_file.path,
+                        operation=op_type,
+                    )
+                )
 
         return sorted(ops, key=lambda o: o.after or o.base)
 
@@ -428,71 +529,162 @@ class VersionControlSnapshot:
         self.close()
 
     @classmethod
-    def load(cls, data: list[list[dict[str, object]]]) -> VersionControlSnapshot:
+    def load(cls, source: str | Path) -> VersionControlSnapshot:
+        source = Path(source)
+        meta = cls._load_meta(source)
+        paths = cls._paths(meta)
+        commits = cls._commits(meta)
+        cls._validate(source, paths, commits)
+
         work = tempfile.TemporaryDirectory()
         repository = pygit2.init_repository(work.name, bare=True)
         forward: dict[str, str] = {}
         reverse: dict[str, str] = {}
         snapshot = cls(repository, work, forward, reverse)
 
-        seen: dict[str, tuple[tuple[str, bytes], ...]] = {}
-        counter = 0
+        trees: dict[str, pygit2.Oid] = {}
+        blobs: dict[str, pygit2.Oid] = {}
+        pending = snapshot._order(paths)
 
-        for chain in data:
-            parent: str | None = None
+        while pending:
+            current: list[str] = []
+            progress = False
 
-            for item in chain:
-                original = item["sha"]
-                files = item["files"]
-                current = tuple(
-                    sorted(
-                        (str(file["path"]), file["content"])
-                        for file in files
-                    )
-                )
+            for sha in pending:
+                item = commits[sha]
+                parents = cast(list[str], item["parents"])
 
-                if original in forward:
-                    if seen[original] != current:
-                        raise ValueError(
-                            f"Snapshot commit {original} is defined with different content."
-                        )
-                    snapshot._validate(original, parent)
-                    parent = original
+                if any(parent not in forward for parent in parents):
+                    current.append(sha)
                     continue
 
-                tree = snapshot._tree(files)
-                counter += 1
+                tree = snapshot._tree(source, str(item["tree"]), trees, blobs)
+                timestamp = datetime.fromisoformat(str(item["time"]))
+                moment = int(timestamp.astimezone(timezone.utc).timestamp())
+                author = str(item["author"])
+                signature = pygit2.Signature(
+                    author,
+                    "snapshot@test.local",
+                    moment,
+                )
                 imported = str(
                     repository.create_commit(
                         None,
-                        pygit2.Signature(
-                            "Snapshot",
-                            "snapshot@test.local",
-                            counter,
-                        ),
-                        pygit2.Signature(
-                            "Snapshot",
-                            "snapshot@test.local",
-                            counter,
-                        ),
-                        original,
+                        signature,
+                        signature,
+                        str(item["message"]),
                         tree,
-                        []
-                        if parent is None
-                        else [pygit2.Oid(hex=forward[parent])],
+                        [pygit2.Oid(hex=forward[parent]) for parent in parents],
                     )
                 )
-                forward[original] = imported
-                reverse[imported] = original
-                seen[original] = current
-                parent = original
+                forward[sha] = imported
+                reverse[imported] = sha
+                progress = True
+
+            if progress:
+                pending = current
+                continue
+
+            raise ValueError("Snapshot contains unresolved parent references.")
 
         return snapshot
 
+    @classmethod
+    def _load_meta(cls, source: Path) -> dict[str, object]:
+        with open(source / "meta.json", "r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        if not isinstance(data, dict):
+            raise ValueError("Snapshot meta.json must contain an object.")
+
+        return cast(dict[str, object], data)
+
+    @classmethod
+    def _paths(cls, meta: dict[str, object]) -> list[list[str]]:
+        paths = meta.get("paths")
+
+        if not isinstance(paths, list):
+            raise ValueError("Snapshot meta.json is missing paths.")
+
+        result: list[list[str]] = []
+
+        for item in paths:
+            if not isinstance(item, list):
+                raise ValueError("Snapshot paths must contain lists of commits.")
+            result.append([str(value) for value in item])
+
+        return result
+
+    @classmethod
+    def _commits(cls, meta: dict[str, object]) -> dict[str, dict[str, object]]:
+        commits = meta.get("commits")
+
+        if not isinstance(commits, dict):
+            raise ValueError("Snapshot meta.json is missing commits.")
+
+        result: dict[str, dict[str, object]] = {}
+
+        for sha, item in commits.items():
+            if not isinstance(item, dict):
+                raise ValueError(f"Snapshot commit {sha} must contain an object.")
+            result[str(sha)] = dict(item)
+
+        return result
+
+    @classmethod
+    def _validate(
+        cls,
+        source: Path,
+        paths: list[list[str]],
+        commits: dict[str, dict[str, object]],
+    ) -> None:
+        for chain in paths:
+            for sha in chain:
+                if sha not in commits:
+                    raise ValueError(f"Snapshot commit {sha} is missing from commits.")
+
+        seen: set[str] = set()
+
+        for sha, item in commits.items():
+            tree = item.get("tree")
+            parents = item.get("parents")
+
+            if not isinstance(tree, str):
+                raise ValueError(f"Snapshot commit {sha} is missing tree.")
+
+            if not isinstance(parents, list):
+                raise ValueError(f"Snapshot commit {sha} is missing parents.")
+
+            tree_path = source / "trees" / f"{tree}.json"
+
+            if not tree_path.exists():
+                raise ValueError(f"Snapshot tree {tree} is missing.")
+
+            if tree in seen:
+                continue
+
+            seen.add(tree)
+            with open(tree_path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+
+            if not isinstance(data, dict):
+                raise ValueError(f"Snapshot tree {tree} must contain an object.")
+
+            files = data.get("files")
+
+            if not isinstance(files, dict):
+                raise ValueError(f"Snapshot tree {tree} is missing files.")
+
+            for path, blob in files.items():
+                if not isinstance(path, str) or not isinstance(blob, str):
+                    raise ValueError(f"Snapshot tree {tree} contains invalid entries.")
+
+                if not (source / "blobs" / blob).exists():
+                    raise ValueError(f"Snapshot blob {blob} is missing.")
+
     def parents(self, commit: str) -> list[str]:
         return [
-            self._reverse[parent]
-            for parent in self._runtime.parents(self._map(commit))
+            self._reverse[parent] for parent in self._runtime.parents(self._map(commit))
         ]
 
     def blame(
@@ -556,25 +748,59 @@ class VersionControlSnapshot:
         except KeyError as error:
             raise ValueError(f"Commit {commit} not found in snapshot") from error
 
-    def _validate(self, commit: str, parent: str | None) -> None:
-        current = self.parents(commit)
-        expected = [] if parent is None else [parent]
-        if current != expected:
-            raise ValueError(
-                f"Snapshot commit {commit} is linked to inconsistent parents."
-            )
+    def _order(self, paths: list[list[str]]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
 
-    def _tree(self, files: list[dict[str, object]]) -> pygit2.Oid:
+        for chain in paths:
+            for sha in chain:
+                if sha in seen:
+                    continue
+                seen.add(sha)
+                result.append(sha)
+
+        return result
+
+    def _tree(
+        self,
+        source: Path,
+        tree: str,
+        trees: dict[str, pygit2.Oid],
+        blobs: dict[str, pygit2.Oid],
+    ) -> pygit2.Oid:
+        if tree in trees:
+            return trees[tree]
+
+        with open(source / "trees" / f"{tree}.json", "r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        files = data["files"]
         root: dict[str, Any] = {}
 
-        for item in files:
-            parts = str(item["path"]).split("/")
+        for path, blob in cast(dict[str, str], files).items():
+            parts = str(path).split("/")
             current = root
             for part in parts[:-1]:
                 current = cast(dict[str, Any], current.setdefault(part, {}))
-            current[parts[-1]] = bytes(item["content"])
+            current[parts[-1]] = self._blob(source, blob, blobs)
 
-        return self._write(root)
+        result = self._write(root)
+        trees[tree] = result
+        return result
+
+    def _blob(
+        self,
+        source: Path,
+        blob: str,
+        blobs: dict[str, pygit2.Oid],
+    ) -> pygit2.Oid:
+        if blob in blobs:
+            return blobs[blob]
+
+        data = (source / "blobs" / blob).read_bytes()
+        result = self._repository.create_blob(data)
+        blobs[blob] = result
+        return result
 
     def _write(self, node: dict[str, Any]) -> pygit2.Oid:
         builder = self._repository.TreeBuilder()
@@ -586,7 +812,7 @@ class VersionControlSnapshot:
                 continue
             builder.insert(
                 name,
-                self._repository.create_blob(value),
+                cast(pygit2.Oid, value),
                 pygit2.GIT_FILEMODE_BLOB,
             )
 
@@ -677,9 +903,7 @@ class PlatformCache:
 
         blob = gcs_bucket.blob(blob_path)
         if not blob.exists():
-            raise FileNotFoundError(
-                f"Parquet not found: gs://{bucket}/{blob_path}"
-            )
+            raise FileNotFoundError(f"Parquet not found: gs://{bucket}/{blob_path}")
 
         data = blob.download_as_bytes()
         table = pq.read_table(pa.BufferReader(data))
@@ -705,7 +929,7 @@ class PlatformCache:
             raise ValueError(
                 f"Pull request {number} merge_commit_sha is missing or empty"
             )
-        
+
         try:
             return self._cache[commit]
         except KeyError:

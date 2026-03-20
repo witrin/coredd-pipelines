@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pyarrow as pa
 import pygit2
@@ -381,46 +382,47 @@ class TestVersionControlSnapshot(unittest.TestCase):
         self._fixture.__exit__(None, None, None)
         self._outdir.cleanup()
 
-    def test_dump(self) -> None:
-        result = self._candidate.dump([[self.sha_a, self.sha_b]])
+    def _snapshot(self, chains: list[list[str]]) -> VersionControlSnapshot:
+        target = tempfile.mkdtemp(dir=self._outdir.name)
+        self._candidate.dump(chains, target)
+        snapshot = VersionControlSnapshot.load(target)
+        self.addCleanup(snapshot.close)
+        return snapshot
 
-        self.assertEqual(len(result), 1)
+    def test_dump(self) -> None:
+        target = tempfile.mkdtemp(dir=self._outdir.name)
+        self._candidate.dump([[self.sha_a, self.sha_b]], target)
+
+        with open(f"{target}/meta.json", "r", encoding="utf-8") as file:
+            meta = json.load(file)
+
         self.assertEqual(
-            [item["sha"] for item in result[0]],
+            meta["paths"][0],
             [self.sha_a, self.sha_b],
         )
-        self.assertEqual(
-            result[0][0]["files"],
-            [
-                {
-                    "path": "a.py",
-                    "content": b"def foo():\n    return 1\n",
-                }
-            ],
-        )
-        self.assertEqual(
-            result[0][1]["files"],
-            [
-                {
-                    "path": "a.py",
-                    "content": b"def foo():\n    return 2\n",
-                }
-            ],
-        )
+
+        commit = meta["commits"][self.sha_b]
+        tree = commit["tree"]
+
+        with open(f"{target}/trees/{tree}.json", "r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        commit = self._fixture.repository.get(self.sha_b).peel(pygit2.Commit)
+        blob = str(commit.tree["a.py"].id)
+
+        self.assertEqual(data["files"], {"a.py": blob})
+        with open(f"{target}/blobs/{blob}", "rb") as file:
+            self.assertEqual(file.read(), b"def foo():\n    return 2\n")
 
     def test_load_parents(self) -> None:
-        data = self._candidate.dump([[self.sha_a, self.sha_b, self.sha_c]])
-        snapshot = VersionControlSnapshot.load(data)
-        self.addCleanup(snapshot.close)
+        snapshot = self._snapshot([[self.sha_a, self.sha_b, self.sha_c]])
 
         self.assertEqual(snapshot.parents(self.sha_a), [])
         self.assertEqual(snapshot.parents(self.sha_b), [self.sha_a])
         self.assertEqual(snapshot.parents(self.sha_c), [self.sha_b])
 
     def test_diff(self) -> None:
-        data = self._candidate.dump([[self.sha_a, self.sha_b]])
-        snapshot = VersionControlSnapshot.load(data)
-        self.addCleanup(snapshot.close)
+        snapshot = self._snapshot([[self.sha_a, self.sha_b]])
 
         self.assertEqual(
             snapshot.diff(self.sha_a, self.sha_b, context=3).patch,
@@ -428,9 +430,7 @@ class TestVersionControlSnapshot(unittest.TestCase):
         )
 
     def test_manifest(self) -> None:
-        data = self._candidate.dump([[self.sha_b, self.sha_c, self.sha_d, self.sha_e]])
-        snapshot = VersionControlSnapshot.load(data)
-        self.addCleanup(snapshot.close)
+        snapshot = self._snapshot([[self.sha_b, self.sha_c, self.sha_d, self.sha_e]])
 
         self.assertEqual(
             snapshot.manifest(self.sha_b, self.sha_c),
@@ -446,9 +446,7 @@ class TestVersionControlSnapshot(unittest.TestCase):
         )
 
     def test_blob(self) -> None:
-        data = self._candidate.dump([[self.sha_c, self.sha_d]])
-        snapshot = VersionControlSnapshot.load(data)
-        self.addCleanup(snapshot.close)
+        snapshot = self._snapshot([[self.sha_c, self.sha_d]])
 
         self.assertEqual(
             snapshot.blob(self.sha_d, "renamed.py"),
@@ -456,14 +454,12 @@ class TestVersionControlSnapshot(unittest.TestCase):
         )
 
     def test_load_reuse(self) -> None:
-        data = self._candidate.dump(
+        snapshot = self._snapshot(
             [
                 [self.sha_a, self.sha_b, self.sha_c],
                 [self.sha_a, self.sha_b],
             ]
         )
-        snapshot = VersionControlSnapshot.load(data)
-        self.addCleanup(snapshot.close)
 
         self.assertEqual(snapshot.parents(self.sha_b), [self.sha_a])
         self.assertEqual(snapshot.parents(self.sha_c), [self.sha_b])
@@ -473,9 +469,7 @@ class TestVersionControlSnapshot(unittest.TestCase):
         )
 
     def test_expand(self) -> None:
-        data = self._candidate.dump([[self.sha_a, self.sha_b]])
-        snapshot = VersionControlSnapshot.load(data)
-        self.addCleanup(snapshot.close)
+        snapshot = self._snapshot([[self.sha_a, self.sha_b]])
 
         patchset = PatchFactory(snapshot).expand(
             self.sha_a,
@@ -494,6 +488,38 @@ class TestVersionControlSnapshot(unittest.TestCase):
         rendered = str(patchset)
         self.assertIn("diff --git a/a.py b/a.py", rendered)
         self.assertIn("def foo():", rendered)
+
+    def test_dump_deduplicates_blobs(self) -> None:
+        target = tempfile.mkdtemp(dir=self._outdir.name)
+        self._candidate.dump([[self.sha_b, self.sha_c, self.sha_d]], target)
+
+        self.assertEqual(len(list(Path(target, "blobs").iterdir())), 2)
+
+    def test_dump_deduplicates_trees(self) -> None:
+        source = self._fixture.repository.get(self.sha_b).peel(pygit2.Commit)
+        clone = self._fixture.commit(source.tree.id, [self.sha_b], "clone", ref=None)
+        target = tempfile.mkdtemp(dir=self._outdir.name)
+        self._candidate.dump([[self.sha_b, clone]], target)
+
+        self.assertEqual(len(list(Path(target, "trees").iterdir())), 1)
+
+    def test_load_missing_blob(self) -> None:
+        target = tempfile.mkdtemp(dir=self._outdir.name)
+        self._candidate.dump([[self.sha_a, self.sha_b]], target)
+
+        with open(f"{target}/meta.json", "r", encoding="utf-8") as file:
+            meta = json.load(file)
+
+        tree = meta["commits"][self.sha_b]["tree"]
+
+        with open(f"{target}/trees/{tree}.json", "r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        blob = data["files"]["a.py"]
+        Path(target, "blobs", blob).unlink()
+
+        with self.assertRaises(ValueError):
+            VersionControlSnapshot.load(target)
 
 
 class TestPlatformCache(unittest.TestCase):

@@ -1,6 +1,7 @@
-import json
 import os
+import tarfile
 import tempfile
+from pathlib import Path
 from typing import Optional
 
 import dagster as dg
@@ -16,6 +17,87 @@ class SnapshotConfig(dg.Config):
     asset: str
     version: Optional[str] = None
     partition: str = "default"
+
+
+class SnapshotArchive:
+    def __init__(self, bucket, directory: str | Path) -> None:
+        self._bucket = bucket
+        self._directory = Path(directory)
+        self._root = self._directory / "snapshot"
+        self._root.mkdir(parents=True, exist_ok=True)
+
+    def merge(self, blob: str) -> int:
+        count = 0
+
+        with self._bucket.blob(blob).open("rb") as stream:
+            with tarfile.open(fileobj=stream, mode="r|gz") as archive:
+                for member in archive:
+                    path = self._path(member.name)
+
+                    if member.isdir():
+                        path.mkdir(parents=True, exist_ok=True)
+                        continue
+
+                    if member.issym() or member.islnk():
+                        raise dg.Failure(
+                            description=(
+                                f"Snapshot archive {blob} contains unsupported links"
+                            )
+                        )
+
+                    if not member.isfile():
+                        raise dg.Failure(
+                            description=(
+                                f"Snapshot archive {blob} contains unsupported entry "
+                                f"{member.name}"
+                            )
+                        )
+
+                    if path.exists():
+                        raise dg.Failure(
+                            description=(
+                                f"Snapshot archive collision at {member.name} "
+                                f"while merging {blob}"
+                            )
+                        )
+
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    source = archive.extractfile(member)
+
+                    if source is None:
+                        raise dg.Failure(
+                            description=(
+                                f"Snapshot archive {blob} could not read {member.name}"
+                            )
+                        )
+
+                    with open(path, "wb") as file:
+                        while True:
+                            chunk = source.read(8 * 1024 * 1024)
+                            if not chunk:
+                                break
+                            file.write(chunk)
+
+                    count += 1
+
+        return count
+
+    def store(self, target: str | Path) -> None:
+        with tarfile.open(target, "w:gz") as archive:
+            for path in sorted(self._root.rglob("*")):
+                archive.add(path, arcname=str(path.relative_to(self._root)))
+
+    def _path(self, name: str) -> Path:
+        path = self._root / name
+        resolved = path.resolve()
+        root = self._root.resolve()
+
+        if resolved != root and root not in resolved.parents:
+            raise dg.Failure(
+                description=f"Snapshot archive contains invalid path {name}"
+            )
+
+        return resolved
 
 
 @dg.op(name="snapshot_op")
@@ -60,11 +142,14 @@ def snapshot_op(context: dg.OpExecutionContext, config: SnapshotConfig) -> dg.Ou
         for place in places:
             prefix = storage.prefix(resolver.key, version, place, normalized)
             parquet = prefix + "data.parquet"
-            avro = prefix + "data.avro"
             has_parquet = bucket.blob(parquet).exists()
-            has_avro = bucket.blob(avro).exists()
+            archives = [
+                item.name
+                for item in bucket.list_blobs(prefix=prefix)
+                if item.name.endswith(".tar.gz")
+            ]
 
-            if has_parquet and has_avro:
+            if has_parquet and archives:
                 raise dg.Failure(
                     description=f"Multiple payloads found for asset prefix {prefix}"
                 )
@@ -77,8 +162,19 @@ def snapshot_op(context: dg.OpExecutionContext, config: SnapshotConfig) -> dg.Ou
                 }
                 break
 
-            if has_avro:
-                source = {"blob": avro, "format": "avro", "partition": partition}
+            if len(archives) > 1:
+                raise dg.Failure(
+                    description=(
+                        f"Multiple tar.gz payloads found for asset prefix {prefix}"
+                    )
+                )
+
+            if archives:
+                source = {
+                    "blob": archives[0],
+                    "format": "tar.gz",
+                    "partition": partition,
+                }
                 break
 
         if source is None:
@@ -89,7 +185,7 @@ def snapshot_op(context: dg.OpExecutionContext, config: SnapshotConfig) -> dg.Ou
         elif format != source["format"]:
             raise dg.Failure(
                 description=(
-                    "Snapshot input mixes Parquet and Avro partitions, "
+                    "Snapshot input mixes Parquet and tar.gz partitions, "
                     "which is not supported"
                 )
             )
@@ -138,52 +234,22 @@ def snapshot_op(context: dg.OpExecutionContext, config: SnapshotConfig) -> dg.Ou
                 config.partition.replace("|", ";").replace("/", "-").replace("_", "-"),
             )
             storage.store(blob=blob, file=temporary.name)
-    if format == "avro":
-        from fastavro import reader
-        from fastavro.write import Writer
-
-        with tempfile.NamedTemporaryFile(suffix=".avro") as temporary:
-            writer = None
-            schema: str | None = None
+    if format == "tar.gz":
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = SnapshotArchive(bucket, temporary)
+            files = 0
 
             for source in sources:
-                count = 0
-
-                with bucket.blob(source["blob"]).open("rb") as stream:
-                    records = reader(stream)
-                    current = records.writer_schema
-                    current_schema = json.dumps(current, sort_keys=True)
-
-                    if writer is None:
-                        schema = current_schema
-                        writer = Writer(temporary, current)
-                    elif current_schema != schema:
-                        raise dg.Failure(
-                            description=(
-                                "Avro schema mismatch while compacting partition "
-                                f"{source['partition']}"
-                            )
-                        )
-
-                    for record in records:
-                        writer.write(record)
-                        count += 1
-                        rows += 1
-
+                count = archive.merge(source["blob"])
+                files += count
                 context.log.info(
-                    "Loaded partition %s with %d rows",
+                    "Loaded partition %s with %d files",
                     source["partition"],
                     count,
                 )
 
-            if writer is None:
-                raise dg.Failure(description="No partition data found")
-
-            if hasattr(writer, "flush"):
-                writer.flush()
-
-            temporary.flush()
-
+            output = Path(temporary) / "data.tar.gz"
+            archive.store(output)
             blob = (
                 storage.prefix(
                     resolver.key,
@@ -193,12 +259,13 @@ def snapshot_op(context: dg.OpExecutionContext, config: SnapshotConfig) -> dg.Ou
                     .replace("/", "-")
                     .replace("_", "-"),
                 )
-                + "data.avro"
+                + "data.tar.gz"
             )
             bucket.blob(blob).upload_from_filename(
-                temporary.name,
-                content_type="application/avro",
+                str(output),
+                content_type="application/gzip",
             )
+            rows = files
 
     context.log.info("Compacted %d partitions", len(sources))
 

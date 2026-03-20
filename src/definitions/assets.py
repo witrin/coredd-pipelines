@@ -21,7 +21,6 @@ import pyarrow.compute as pc
 import dagster as dg
 from google.cloud import bigquery
 from github.GithubException import UnknownObjectException
-import ormsgpack
 import pygit2
 
 
@@ -655,7 +654,7 @@ def ingest_validation_sources(
 
 
 @asset(
-    metadata={"version": "2.0.0"},
+    metadata={"version": "3.0.0"},
     partitions_def=partitions.ingest_validation_sources_partition,
     group_name="ingest",
     pool="default",
@@ -668,90 +667,84 @@ def ingest_validation_context(
     import os
     from io import BytesIO
     import polars as pl
-    from fastavro.write import Writer
 
     from benchmark.attribution.ingestion import FileResponseAdapter
 
     rows = pl.from_arrow(ingest_validation_set)
     names = sorted(rows["repository"].unique().to_list())
     repository = partitions.Shard.from_space(context.partition_key, names)
-    cases = rows.filter(pl.col("repository") == repository).iter_rows(named=True)
+    cases = list(rows.filter(pl.col("repository") == repository).iter_rows(named=True))
 
-    if not rows.height:
+    if not rows.height or not cases:
+        payload = BytesIO()
+        with tarfile.open(fileobj=payload, mode="w:gz"):
+            pass
+        payload.seek(0)
         return BlobStream(
-            content_type="application/avro",
-            filename="data.avro",
-            response=FileResponseAdapter(BytesIO(b"")),
-            size=0,
+            content_type="application/gzip",
+            filename="data.tar.gz",
+            response=FileResponseAdapter(payload),
+            size=payload.getbuffer().nbytes,
         )
 
     name = tempfile.mkdtemp()
-    work = Path(name)
-    archive = work / "repository.tar.gz"
+    work = Path(name.lower())
+    source = work / "repository.tar.gz"
 
-    with open(archive, "wb") as file:
+    with open(source, "wb") as file:
         for chunk in iter(lambda: ingest_validation_sources.read(8 * 1024 * 1024), b""):
             file.write(chunk)
 
-    with tarfile.open(archive, "r:gz") as tar:
+    with tarfile.open(source, "r:gz") as tar:
         tar.extractall(work, filter="data")
 
     control = VersionControl(pygit2.Repository(str(work / "repository.git")))
-    output = work / "data.avro"
+    root = work / repository
+    snapshot = root / "snapshot"
+    graphs = root / "graphs"
+    graphs.mkdir(parents=True, exist_ok=True)
+    chains: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
 
-    with open(output, "wb") as file:
-        writer = Writer(
-            file,
-            {
-                "type": "record",
-                "name": "Row",
-                "fields": [
-                    {"name": "repository", "type": "string"},
-                    {"name": "languages", "type": {"type": "array", "items": "string"}},
-                    {"name": "correction", "type": "string"},
-                    {"name": "defects", "type": {"type": "array", "items": "string"}},
-                    {"name": "partition", "type": "string"},
-                    {"name": "archive", "type": "string"},
-                    {"name": "store", "type": "bytes"},
-                    {"name": "trees", "type": "bytes"},
-                ],
-            },
-        )
+    for row in cases:
+        correction = str(row["correction"])
+        parents = control.parents(correction)
+        base = correction if not parents else parents[0]
+        store = KnowledgeGraphBuilder(repository=control).build(base, correction)
+        graph = graphs / f"{correction}.json"
 
-        for row in cases:
-            correction = str(row["correction"])
-            parents = control.parents(correction)
-            store = KnowledgeGraphBuilder(repository=control).build(
-                parents[0], correction
+        with open(graph, "w", encoding="utf-8") as file:
+            json.dump(
+                store.dump(),
+                file,
+                default=lambda value: (
+                    value.isoformat()
+                    if isinstance(value, datetime)
+                    else (_ for _ in ()).throw(
+                        TypeError(f"Unsupported JSON value {type(value)!r}")
+                    )
+                ),
+                sort_keys=True,
             )
 
-            writer.write(
-                {
-                    "repository": str(row["repository"]),
-                    "languages": list(row["languages"] or []),
-                    "correction": correction,
-                    "defects": list(row["defects"] or []),
-                    "partition": context.partition_key,
-                    "archive": str(archive),
-                    "store": json.dumps(
-                        store.dump(),
-                        default=lambda value: (
-                            value.isoformat()
-                            if isinstance(value, datetime)
-                            else (_ for _ in ()).throw(
-                                TypeError(f"Unsupported JSON value {type(value)!r}")
-                            )
-                        ),
-                    ).encode("utf-8"),
-                    "trees": ormsgpack.packb(control.dump(store.chains())),
-                }
-            )
+        for chain in store.chains():
+            key = tuple(chain)
+            if key in seen:
+                continue
+            seen.add(key)
+            chains.append(chain)
+
+    control.dump(chains, snapshot)
+    output = work / f"{repository.replace('/', '-').lower()}.tar.gz"
+
+    with tarfile.open(output, "w:gz") as tar:
+        tar.add(root, arcname=repository)
 
     file = open(output, "rb")
 
     return BlobStream(
-        content_type="application/avro",
-        filename="data.avro",
+        content_type="application/gzip",
+        filename=output.name,
         response=FileResponseAdapter(file),
         size=os.path.getsize(output),
     )
