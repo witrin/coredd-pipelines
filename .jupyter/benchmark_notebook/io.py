@@ -141,13 +141,13 @@ class CloudStorage:
         blob.reload()
         path, meta = self._cache_path(blob)
         if self._is_cache_valid(blob, path, meta):
-            return pq.ParquetFile(path)
+            return pq.read_table(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.parent / f".{path.name}.tmp"
         blob.download_to_filename(str(temp))
         temp.replace(path)
         self._write_cache_meta(blob, path, meta)
-        return pq.ParquetFile(path)
+        return pq.read_table(path)
 
     def _list_tables(
         self,
