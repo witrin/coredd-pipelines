@@ -10,9 +10,6 @@ storage:
             db_name:
               env: DATABASE_NAME
 
-telemetry:
-  enabled: false
-
 compute_logs:
   module: dagster._core.storage.local_compute_log_manager
   class: LocalComputeLogManager
@@ -37,6 +34,8 @@ run_coordinator:
     dequeue_num_workers: 10
     max_concurrent_runs: 50
 
+telemetry:
+  enabled: false
 run_launcher:
   module: components.launcher
   class: CloudRunJobRunLauncher
