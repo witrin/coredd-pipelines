@@ -87,7 +87,7 @@ class VersionControl:
         c = obj.peel(pygit2.Commit)
         return [str(pid) for pid in c.parent_ids]
 
-    def dump(self, chains: list[list[str]], target: str | Path) -> None:
+    def dump(self, paths: list[list[str]], target: str | Path) -> None:
         target = Path(target)
         trees = target / "trees"
         blobs = target / "blobs"
@@ -95,15 +95,12 @@ class VersionControl:
         trees.mkdir(parents=True, exist_ok=True)
         blobs.mkdir(parents=True, exist_ok=True)
 
-        shas = self._commits(chains)
+        shas = self._commits(paths)
         parents: dict[str, list[str]] = {sha: [] for sha in shas}
 
-        for path in chains:
+        for path in paths:
             for index, sha in enumerate(path):
                 lineage = [] if index == 0 else [path[index - 1]]
-
-                if sha not in parents:
-                    raise ValueError(f"Commit {sha} not found")
 
                 if parents[sha] and parents[sha] != lineage:
                     raise ValueError(f"Commit {sha} has inconsistent parents")
@@ -144,11 +141,11 @@ class VersionControl:
                 sort_keys=True,
             )
 
-    def _commits(self, chains: list[list[str]]) -> set[str]:
+    def _commits(self, paths: list[list[str]]) -> set[str]:
         result: set[str] = set()
 
-        for chain in chains:
-            result.update(chain)
+        for path in paths:
+            result.update(path)
 
         return result
 
@@ -562,9 +559,9 @@ class VersionControlSnapshot:
 
             for sha in pending:
                 item = commits[sha]
-                lineage = cast(list[str], item["parents"])
+                parents = cast(list[str], item["parents"])
 
-                if any(parent not in forward for parent in lineage):
+                if any(parent not in forward for parent in parents):
                     current.append(sha)
                     continue
 
@@ -584,7 +581,7 @@ class VersionControlSnapshot:
                         signature,
                         str(item["message"]),
                         tree,
-                        [pygit2.Oid(hex=forward[parent]) for parent in lineage],
+                        [pygit2.Oid(hex=forward[parent]) for parent in parents],
                     )
                 )
                 forward[sha] = imported
