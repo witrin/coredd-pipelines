@@ -51,6 +51,55 @@ describe_engine_state() {
     --format='value(status)'
 }
 
+wait_for_operation() {
+  local operation_id="$1"
+
+  log "Waiting for Cloud SQL operation ${operation_id}"
+  gcloud sql operations wait "${operation_id}" \
+    --project="${project}" \
+    --timeout=unlimited
+}
+
+patch_database_policy() {
+  local policy="$1"
+  local output
+  local operation_id
+
+  set +e
+  output="$(
+    gcloud sql instances patch "${database}" \
+      --activation-policy="${policy}" \
+      --project="${project}" \
+      2>&1
+  )"
+  local status=$?
+  set -e
+
+  printf '%s\n' "${output}"
+
+  if [[ ${status} -eq 0 ]]; then
+    return 0
+  fi
+
+  if [[ "${output}" == *"taking longer than expected"* ]]; then
+    operation_id="$(
+      printf '%s\n' "${output}" \
+        | sed -n 's#.*operations/\([^[:space:]]*\).*#\1#p' \
+        | tail -n 1
+    )"
+
+    if [[ -z "${operation_id}" ]]; then
+      echo "Cloud SQL patch timed out and the operation ID could not be parsed." >&2
+      return 1
+    fi
+
+    wait_for_operation "${operation_id}"
+    return 0
+  fi
+
+  return "${status}"
+}
+
 wait_for_database() {
   local wait_seconds=600
   local sleep_seconds=5
@@ -88,9 +137,7 @@ print_status() {
 
 start_stack() {
   log "Starting database ${database} in ${region}"
-  gcloud sql instances patch "${database}" \
-    --activation-policy=ALWAYS \
-    --project="${project}"
+  patch_database_policy "ALWAYS"
 
   wait_for_database
 
@@ -109,9 +156,7 @@ stop_stack() {
     --zone="${zone}"
 
   log "Stopping database ${database} in ${region}"
-  gcloud sql instances patch "${database}" \
-    --activation-policy=NEVER \
-    --project="${project}"
+  patch_database_policy "NEVER"
 
   print_status
 }

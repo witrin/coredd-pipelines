@@ -22,7 +22,7 @@ resource "google_sql_database_instance" "database" {
   deletion_protection = false
 
   settings {
-    tier      = "db-f1-micro"
+    tier      = "db-custom-2-4096"
     disk_type = "PD_HDD"
     disk_size = 10
 
