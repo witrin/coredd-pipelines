@@ -38,6 +38,12 @@ resource "google_sql_database_instance" "database" {
       }
     }
   }
+
+  lifecycle {
+    ignore_changes = [
+      settings[0].activation_policy
+    ]
+  }
 }
 
 resource "null_resource" "database_credentials_hash" {

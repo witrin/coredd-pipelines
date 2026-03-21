@@ -285,7 +285,6 @@ resource "google_compute_instance" "engine" {
 
   lifecycle {
     replace_triggered_by = [
-      google_sql_database_instance.database,
       null_resource.database_credentials_hash,
     ]
   }

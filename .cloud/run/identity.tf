@@ -35,9 +35,10 @@ data "archive_file" "signup_dummy" {
 }
 
 resource "google_storage_bucket_object" "signup_dummy" {
-  name   = "functions/signup.zip"
-  bucket = data.terraform_remote_state.build.outputs.bucket
-  source = data.archive_file.signup_dummy.output_path
+  name           = "functions/signup.zip"
+  bucket         = data.terraform_remote_state.build.outputs.bucket
+  source         = data.archive_file.signup_dummy.output_path
+  source_md5hash = filemd5(data.archive_file.signup_dummy.output_path)
 
   lifecycle {
     ignore_changes = [
@@ -62,6 +63,13 @@ resource "google_cloudfunctions_function" "signup" {
     GITHUB_ORG = var.github_org
   }
 
+  secret_environment_variables {
+    key        = "GITHUB_GUARD_TOKEN"
+    project_id = tostring(local.project_number)
+    secret     = data.google_secret_manager_secret_version.github_guard_token.secret
+    version    = "latest"
+  }
+
   lifecycle {
     ignore_changes = [
       source_archive_bucket,
@@ -83,6 +91,11 @@ resource "google_identity_platform_config" "project" {
     allow_tenants = true
   }
   blocking_functions {
+    forward_inbound_credentials {
+      access_token  = false
+      id_token      = false
+      refresh_token = false
+    }
     triggers {
       event_type = "beforeCreate"
       function_uri = google_cloudfunctions_function.signup.https_trigger_url
@@ -108,6 +121,7 @@ resource "google_cloud_run_v2_service" "engine_authentication" {
       image = "gcr.io/gcip-iap/authui"
       resources {
         limits = {
+          cpu    = "1000m"
           memory = "256Mi"
         }
         cpu_idle = true
