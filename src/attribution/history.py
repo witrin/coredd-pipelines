@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections
 import json
+import shutil
 import tarfile
 import tempfile
 from datetime import datetime, timezone
@@ -513,12 +514,12 @@ class VersionControlSnapshot:
     def __init__(
         self,
         repository: pygit2.Repository,
-        work: tempfile.TemporaryDirectory[str],
+        cleanup: Callable[[], None],
         forward: dict[str, str],
         reverse: dict[str, str],
     ) -> None:
         self._repository = repository
-        self._work = work
+        self._cleanup = cleanup
         self._forward = forward
         self._reverse = reverse
         self._runtime = VersionControl(repository)
@@ -527,7 +528,7 @@ class VersionControlSnapshot:
     def close(self) -> None:
         if self._closed:
             return
-        self._work.cleanup()
+        self._cleanup()
         self._closed = True
 
     def __enter__(self) -> VersionControlSnapshot:
@@ -537,17 +538,73 @@ class VersionControlSnapshot:
         self.close()
 
     @classmethod
-    def load(cls, source: str | Path) -> VersionControlSnapshot:
+    def load(
+        cls,
+        source: str | Path,
+        *,
+        cache: str | Path | None = None,
+    ) -> VersionControlSnapshot:
         source = Path(source)
+
+        if cache is not None:
+            target = Path(cache)
+            if target.exists():
+                try:
+                    return cls._load_cache(target)
+                except ValueError:
+                    return cls._rewrite_cache(source, target)
+            return cls._build_cache(source, target)
+
         meta = cls._load_meta(source)
         commits = cls._commits(meta)
         cls._validate(source, commits)
 
         work = tempfile.TemporaryDirectory()
         repository = pygit2.init_repository(work.name, bare=True)
+        return cls._replay(source, repository, work.cleanup, commits)
+
+    @classmethod
+    def _build_cache(cls, source: Path, target: Path) -> VersionControlSnapshot:
+        meta = cls._load_meta(source)
+        commits = cls._commits(meta)
+        cls._validate(source, commits)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.mkdir(parents=True, exist_ok=True)
+        repository = pygit2.init_repository(str(target), bare=True)
+        snapshot = cls._replay(source, repository, lambda: None, commits)
+        cls._write_cache(target, snapshot._forward, snapshot._reverse)
+        return snapshot
+
+    @classmethod
+    def _load_cache(cls, target: Path) -> VersionControlSnapshot:
+        try:
+            repository = pygit2.Repository(str(target))
+        except (pygit2.GitError, KeyError, ValueError) as error:
+            raise ValueError(f"Snapshot cache at {target} is invalid.") from error
+
+        forward, reverse = cls._read_cache(target, repository)
+        return cls(repository, lambda: None, forward, reverse)
+
+    @classmethod
+    def _rewrite_cache(cls, source: Path, target: Path) -> VersionControlSnapshot:
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+
+        return cls._build_cache(source, target)
+
+    @classmethod
+    def _replay(
+        cls,
+        source: Path,
+        repository: pygit2.Repository,
+        cleanup: Callable[[], None],
+        commits: dict[str, dict[str, object]],
+    ) -> VersionControlSnapshot:
         forward: dict[str, str] = {}
         reverse: dict[str, str] = {}
-        snapshot = cls(repository, work, forward, reverse)
+        snapshot = cls(repository, cleanup, forward, reverse)
 
         trees: dict[str, pygit2.Oid] = {}
         blobs: dict[str, pygit2.Oid] = {}
@@ -595,6 +652,76 @@ class VersionControlSnapshot:
             raise ValueError("Snapshot contains unresolved parent references.")
 
         return snapshot
+
+    @classmethod
+    def _cache_file(cls, target: Path) -> Path:
+        return target / "snapshot.json"
+
+    @classmethod
+    def _write_cache(
+        cls,
+        target: Path,
+        forward: dict[str, str],
+        reverse: dict[str, str],
+    ) -> None:
+        with open(cls._cache_file(target), "w", encoding="utf-8") as file:
+            json.dump(
+                {
+                    "forward": forward,
+                    "reverse": reverse,
+                },
+                file,
+                sort_keys=True,
+            )
+
+    @classmethod
+    def _read_cache(
+        cls,
+        target: Path,
+        repository: pygit2.Repository,
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        try:
+            with open(cls._cache_file(target), "r", encoding="utf-8") as file:
+                data = json.load(file)
+        except FileNotFoundError as error:
+            raise ValueError(f"Snapshot cache at {target} is missing mapping.") from error
+
+        if not isinstance(data, dict):
+            raise ValueError(f"Snapshot cache at {target} has invalid mapping.")
+
+        forward = cls._read_mapping(data.get("forward"), target, "forward")
+        reverse = cls._read_mapping(data.get("reverse"), target, "reverse")
+
+        if len(forward) != len(reverse):
+            raise ValueError(f"Snapshot cache at {target} has inconsistent mapping.")
+
+        for commit, mapped in forward.items():
+            if reverse.get(mapped) != commit:
+                raise ValueError(f"Snapshot cache at {target} has inconsistent mapping.")
+
+            if repository.get(mapped) is None:
+                raise ValueError(f"Snapshot cache at {target} references missing commits.")
+
+        return forward, reverse
+
+    @classmethod
+    def _read_mapping(
+        cls,
+        data: object,
+        target: Path,
+        name: str,
+    ) -> dict[str, str]:
+        if not isinstance(data, dict):
+            raise ValueError(f"Snapshot cache at {target} is missing {name} mapping.")
+
+        result: dict[str, str] = {}
+
+        for key, value in data.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise ValueError(f"Snapshot cache at {target} has invalid mapping.")
+            result[key] = value
+
+        return result
 
     @classmethod
     def _load_meta(cls, source: Path) -> dict[str, object]:

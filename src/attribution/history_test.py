@@ -389,6 +389,11 @@ class TestVersionControlSnapshot(unittest.TestCase):
         self.addCleanup(snapshot.close)
         return snapshot
 
+    def _source(self, chains: list[list[str]]) -> Path:
+        target = Path(tempfile.mkdtemp(dir=self._outdir.name))
+        self._candidate.dump(chains, target)
+        return target
+
     def test_dump(self) -> None:
         target = tempfile.mkdtemp(dir=self._outdir.name)
         self._candidate.dump([[self.sha_a, self.sha_b]], target)
@@ -463,6 +468,59 @@ class TestVersionControlSnapshot(unittest.TestCase):
             snapshot.diff(self.sha_a, self.sha_b).patch,
             self._candidate.diff(self.sha_a, self.sha_b).patch,
         )
+
+    def test_load_cache_builds_repo(self) -> None:
+        source = self._source([[self.sha_a, self.sha_b]])
+        cache = Path(self._outdir.name) / "cache-build"
+        snapshot = VersionControlSnapshot.load(source, cache=cache)
+        self.addCleanup(snapshot.close)
+
+        self.assertTrue(cache.is_dir())
+        self.assertTrue((cache / "snapshot.json").is_file())
+        self.assertEqual(snapshot.parents(self.sha_b), [self.sha_a])
+        self.assertEqual(
+            snapshot.diff(self.sha_a, self.sha_b, context=3).patch,
+            self._candidate.diff(self.sha_a, self.sha_b, context=3).patch,
+        )
+
+    def test_load_cache_reuses_repo_without_source(self) -> None:
+        source = self._source([[self.sha_a, self.sha_b]])
+        cache = Path(self._outdir.name) / "cache-reuse"
+
+        first = VersionControlSnapshot.load(source, cache=cache)
+        self.addCleanup(first.close)
+        source.joinpath("meta.json").unlink()
+
+        second = VersionControlSnapshot.load(source, cache=cache)
+        self.addCleanup(second.close)
+
+        self.assertEqual(second.parents(self.sha_b), [self.sha_a])
+        self.assertEqual(
+            second.diff(self.sha_a, self.sha_b).patch,
+            self._candidate.diff(self.sha_a, self.sha_b).patch,
+        )
+
+    def test_close_keeps_explicit_cache(self) -> None:
+        source = self._source([[self.sha_a, self.sha_b]])
+        cache = Path(self._outdir.name) / "cache-close"
+        snapshot = VersionControlSnapshot.load(source, cache=cache)
+
+        snapshot.close()
+
+        self.assertTrue(cache.is_dir())
+        self.assertTrue((cache / "HEAD").is_file())
+
+    def test_load_cache_rewrites_invalid_cache(self) -> None:
+        source = self._source([[self.sha_a, self.sha_b]])
+        cache = Path(self._outdir.name) / "cache-invalid"
+        cache.mkdir()
+        pygit2.init_repository(str(cache), bare=True)
+
+        snapshot = VersionControlSnapshot.load(source, cache=cache)
+        self.addCleanup(snapshot.close)
+
+        self.assertTrue((cache / "snapshot.json").is_file())
+        self.assertEqual(snapshot.parents(self.sha_b), [self.sha_a])
 
     def test_expand(self) -> None:
         snapshot = self._snapshot([[self.sha_a, self.sha_b]])
