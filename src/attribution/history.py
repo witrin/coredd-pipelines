@@ -225,13 +225,14 @@ class VersionControl:
     def blame(
         self, path: str, commit: str, lines: list[tuple[int, int]]
     ) -> list[tuple[str | None, tuple[int, int] | None]]:
-        """Return aligned blame results for *lines* at *commit*.
+        """Return blamed segments for *lines* at *commit*.
 
         *lines* is a list of ``(start_line, end_line)`` 1-indexed inclusive
-        ranges. The result has the same length and order. Each entry contains
-        the blamed commit SHA and the corresponding origin line range in that
-        blamed commit, or ``(None, None)`` when the range cannot be resolved to
-        one contiguous blame hunk.
+        ranges. Each result entry contains the blamed commit SHA and the
+        corresponding origin line range in that blamed commit. One input range
+        may produce multiple entries when blame crosses commit boundaries.
+        Entries stay ordered by the queried line sequence. Invalid ranges still
+        yield ``(None, None)``.
         """
         oid = pygit2.Oid(hex=commit)
         blame_result = self._repository.blame(path, newest_commit=oid)
@@ -242,6 +243,7 @@ class VersionControl:
                 result.append((None, None))
                 continue
 
+            partial: list[tuple[str, tuple[int, int]]] = []
             commit_sha: str | None = None
             origin_start: int | None = None
             origin_end: int | None = None
@@ -266,8 +268,19 @@ class VersionControl:
                     continue
 
                 if sha != commit_sha or origin_line != origin_end + 1:
-                    valid = False
-                    break
+                    partial.append(
+                        (
+                            commit_sha,
+                            (
+                                cast(int, origin_start),
+                                cast(int, origin_end),
+                            ),
+                        )
+                    )
+                    commit_sha = sha
+                    origin_start = origin_line
+                    origin_end = origin_line
+                    continue
 
                 origin_end = origin_line
 
@@ -280,7 +293,8 @@ class VersionControl:
                 result.append((None, None))
                 continue
 
-            result.append((commit_sha, (origin_start, origin_end)))
+            partial.append((commit_sha, (origin_start, origin_end)))
+            result.extend(partial)
 
         return result
 

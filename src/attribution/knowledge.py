@@ -314,8 +314,12 @@ class KnowledgeCommitGit:
                 trace.setdefault(key, set()).update(values)
         trace = {sha: files for sha, files in trace.items() if files}
 
-        predecessors, order = self._parents(set(trace))
-        commits = self._commits(after, order, blame, trace, predecessors)
+        files: dict[str, set[str]] = {sha: set(values) for sha, values in trace.items()}
+        for sha, values in seeds.items():
+            files.setdefault(sha, set()).update(values)
+
+        predecessors, order = self._parents(set(files))
+        commits = self._commits(after, order, blame, files, predecessors)
         commits = self._limit(after, commits)
         return commits
 
@@ -456,59 +460,73 @@ class KnowledgeCommitGit:
             seen.add(state)
 
             ancestors = list(node.parents) if node.parents else []
-
-            diff = (
-                repository.diff(ancestors[0].tree, node.tree)
-                if ancestors
-                else repository.diff(
-                    repository[repository.TreeBuilder().write()], node.tree
-                )
-            )
-            diff.find_similar()
-
-            tracking = set(head)
+            branches: list[tuple[pygit2.Commit, set[str]]] = []
             touched: set[str] = set()
 
-            for patch in diff:
-                delta = patch.delta
-                old, new = delta.old_file.path, delta.new_file.path
-
-                if new not in head and old not in head:
-                    continue
-
-                if new in head:
-                    tracking.discard(new)
-                if old in head:
-                    tracking.discard(old)
-
-                if old:
-                    touched.add(old)
-                if new:
-                    touched.add(new)
-
-                if delta.status == pygit2.GIT_DELTA_ADDED:
-                    continue
-
-                if old:
-                    tracking.add(old)
+            if ancestors:
+                for ancestor in ancestors:
+                    diff = repository.diff(ancestor.tree, node.tree)
+                    branch, tracking = self._collect(diff, head)
+                    touched.update(branch)
+                    branches.append((ancestor, tracking))
+            else:
+                diff = repository.diff(
+                    repository[repository.TreeBuilder().write()],
+                    node.tree,
+                )
+                branch, _ = self._collect(diff, head)
+                touched.update(branch)
 
             if touched:
                 trace.setdefault(sha, set()).update(touched)
                 for name in touched:
                     counts[name] = counts.get(name, 0) + 1
 
-            exhausted = {
-                name for name in tracking if counts.get(name, 0) >= self._depth
-            }
-            tracking -= exhausted
-
-            if not tracking:
-                continue
-
-            for ancestor in ancestors:
+            for ancestor, tracking in branches:
+                exhausted = {
+                    name for name in tracking if counts.get(name, 0) >= self._depth
+                }
+                tracking -= exhausted
+                if not tracking:
+                    continue
                 queue.append((ancestor, set(tracking)))
 
         return trace
+
+    def _collect(
+        self,
+        diff: pygit2.Diff,
+        head: set[str],
+    ) -> tuple[set[str], set[str]]:
+        diff.find_similar()
+
+        tracking = set(head)
+        touched: set[str] = set()
+
+        for patch in diff:
+            delta = patch.delta
+            old, new = delta.old_file.path, delta.new_file.path
+
+            if new not in head and old not in head:
+                continue
+
+            if new in head:
+                tracking.discard(new)
+            if old in head:
+                tracking.discard(old)
+
+            if old:
+                touched.add(old)
+            if new:
+                touched.add(new)
+
+            if delta.status == pygit2.GIT_DELTA_ADDED:
+                continue
+
+            if old:
+                tracking.add(old)
+
+        return touched, tracking
 
     def _parents(
         self,
@@ -552,9 +570,7 @@ class KnowledgeCommitGit:
         for sha in order:
             meta = self._commit(sha)
             category: str | None = (
-                "correction" if sha == after
-                else "blame" if sha in blame
-                else None
+                "correction" if sha == after else "blame" if sha in blame else None
             )
             result.append(
                 KnowledgeCommit(
@@ -864,7 +880,9 @@ class KnowledgeEntityGit:
         seen.add(key)
         result.append(value)
 
-    def _program(self, file: KnowledgeFile, operation: OperationType) -> KnowledgeEntity:
+    def _program(
+        self, file: KnowledgeFile, operation: OperationType
+    ) -> KnowledgeEntity:
         name = file.path.rsplit("/", 1)[-1]
         if "." in name:
             name = name.rsplit(".", 1)[0]

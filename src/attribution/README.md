@@ -96,6 +96,7 @@ $$
 #### Candidate Commit Extraction
 
 The suspicious locations in the refined context are mapped back to earlier revisions and resolved via blame into a candidate set.
+When one traced buggy interval spans multiple blamed commits, all resulting blame segments contribute to that candidate set rather than being collapsed to one hit or discarded.
 
 $$
 \Delta_{b \to a}^{\ast} \rightarrow \mathcal{C} = \{c_1, c_2, \dots, c_n\}

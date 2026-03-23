@@ -1466,6 +1466,121 @@ class TestLLM4SZZGraph(unittest.TestCase):
             ],
         )
 
+    def test_blame_segmented_interval(self) -> None:
+        repository = object.__new__(VersionControl)
+        node = BlameNode(factory=PatchFactory(repository))
+
+        with (
+            patch(
+                "benchmark.attribution.reason.PatchView.resolve",
+                return_value=[
+                    Slice(
+                        file=("a.py", "a.py"),
+                        anchors=[Anchor(base=(2, 4), after=(1, 2))],
+                    )
+                ],
+            ),
+            patch.object(
+                VersionControl,
+                "blame",
+                autospec=True,
+                return_value=[
+                    ("sha-old", (2, 2)),
+                    ("sha-mid", (3, 3)),
+                ],
+            ) as blame,
+            patch.object(
+                VersionControl,
+                "parents",
+                autospec=True,
+                return_value=["parent-sha"],
+            ),
+            patch.object(
+                VersionControl,
+                "blob",
+                autospec=True,
+                return_value=b"present\n",
+            ),
+            patch.object(
+                VersionControl,
+                "meta",
+                autospec=True,
+                side_effect=[
+                    Commit(
+                        "sha-old", "", datetime(2024, 1, 1, tzinfo=timezone.utc), "a"
+                    ),
+                    Commit(
+                        "sha-mid", "", datetime(2024, 2, 1, tzinfo=timezone.utc), "a"
+                    ),
+                ],
+            ),
+        ):
+            result = node.run(
+                {
+                    "correction": Change(
+                        number=1,
+                        base="base-sha",
+                        after="after-sha",
+                        description="Fix parser",
+                    ),
+                    "expansion": "\n".join(
+                        [
+                            "diff --git a/a.py b/a.py",
+                            "--- a/a.py",
+                            "+++ b/a.py",
+                            "@@ -1,3 +1,1 @@",
+                            " keep",
+                            "-old_a1",
+                            "-old_a2",
+                        ]
+                    ),
+                    "causes": [
+                        {
+                            "reason": "Bug lines.",
+                            "statements": [
+                                {
+                                    "reference": "0-0-1",
+                                    "scope": None,
+                                    "excerpt": None,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+
+        self.assertEqual(
+            [call.args[1:] for call in blame.call_args_list],
+            [
+                ("a.py", "base-sha", [(2, 3)]),
+            ],
+        )
+        self.assertEqual(
+            result["candidates"],
+            [
+                {
+                    "commit": "sha-mid",
+                    "parent": "parent-sha",
+                    "slices": [
+                        {
+                            "file": ("a.py", "a.py"),
+                            "anchors": [{"base": (0, 0), "after": (3, 4)}],
+                        }
+                    ],
+                },
+                {
+                    "commit": "sha-old",
+                    "parent": "parent-sha",
+                    "slices": [
+                        {
+                            "file": ("a.py", "a.py"),
+                            "anchors": [{"base": (0, 0), "after": (2, 3)}],
+                        }
+                    ],
+                },
+            ],
+        )
+
     def test_blame_inputs(self) -> None:
         with self.assertRaises(ValueError):
             BlameNode().run({})

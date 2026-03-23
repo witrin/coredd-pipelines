@@ -649,6 +649,39 @@ class TestKnowledgeCommitGit(unittest.TestCase):
                 return commit
         raise KeyError(sha)
 
+    def test_build_keeps_seed_without_trace(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "x = 1\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({"a.py": "x = 2\n"})
+            foo = fixture.commit(tree, [init], "foo")
+
+            tree = fixture.tree({"a.py": "x = 2\ny = 1\n"})
+            base = fixture.commit(tree, [foo], "base")
+
+            tree = fixture.tree({"a.py": "x = 3\ny = 1\n"})
+            after = fixture.commit(tree, [base], "after")
+
+            repository = VersionControl(fixture.repository)
+            with patch.object(
+                KnowledgeCommitGit,
+                "_trace",
+                autospec=True,
+                return_value={},
+            ):
+                commits = KnowledgeCommitGit(repository, cap=200).build(base, after)
+
+            shas = {c.sha for c in commits}
+            self.assertIn(foo, shas)
+            self.assertIn(after, shas)
+
+            blame = self._commit(commits, foo)
+            self.assertEqual(blame.category, "blame")
+            self.assertEqual(blame.kind, "blame")
+            self.assertEqual(blame.score, 1.0)
+            self.assertIn("a.py", blame.files)
+
     def test_build_blame(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"a.py": "x = 1\n"})
@@ -680,6 +713,62 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             self.assertEqual(correction.category, "correction")
             self.assertEqual(correction.kind, "correction")
             self.assertEqual(correction.score, 0.0)
+
+    def test_build_blame_mixed_hunk(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "head\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({"a.py": "head\none\n"})
+            foo = fixture.commit(tree, [init], "foo")
+
+            tree = fixture.tree({"a.py": "head\none\ntwo\n"})
+            bar = fixture.commit(tree, [foo], "bar")
+
+            tree = fixture.tree({"a.py": "head\none\ntwo\nkeep\n"})
+            base = fixture.commit(tree, [bar], "base")
+
+            tree = fixture.tree({"a.py": "head\nkeep\n"})
+            after = fixture.commit(tree, [base], "after")
+
+            repository = VersionControl(fixture.repository)
+            commits = KnowledgeCommitGit(repository, cap=200).build(base, after)
+
+            blame_foo = self._commit(commits, foo)
+            blame_bar = self._commit(commits, bar)
+
+            self.assertEqual(blame_foo.category, "blame")
+            self.assertEqual(blame_bar.category, "blame")
+            self.assertEqual(blame_foo.score, 1.0)
+            self.assertEqual(blame_bar.score, 1.0)
+            self.assertIn("a.py", blame_foo.files)
+            self.assertIn("a.py", blame_bar.files)
+
+    def test_trace_merge_non_first_parent(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "base\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({"a.py": "left\n"})
+            left = fixture.commit(tree, [init], "left")
+
+            tree = fixture.tree({
+                "a.py": "base\n",
+                "b.py": "right\n",
+            })
+            right = fixture.commit(tree, [init], "right", ref=None)
+
+            tree = fixture.tree({
+                "a.py": "left\n",
+                "b.py": "right\n",
+            })
+            merge = fixture.commit(tree, [left, right], "merge")
+
+            repository = VersionControl(fixture.repository)
+            trace = KnowledgeCommitGit(repository, cap=200)._trace(merge, {"a.py"})
+
+            self.assertIn("a.py", trace[merge])
+            self.assertIn("a.py", trace[left])
 
     def test_build_trace(self) -> None:
         with HistoryFixture() as fixture:
