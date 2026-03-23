@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 import re
@@ -308,10 +309,17 @@ class KnowledgeCommitGit:
         blame = {sha for sha in seeds if sha != after}
 
         trace: dict[str, set[str]] = {}
-        for sha, files in seeds.items():
-            partial = self._trace(sha, files)
-            for key, values in partial.items():
-                trace.setdefault(key, set()).update(values)
+        path = self._repository._repository.path
+        with ProcessPoolExecutor(max_workers=min(8, len(seeds) or 1)) as pool:
+            for partial in pool.map(
+                self._worker,
+                (
+                    (path, self._depth, sha, frozenset(files))
+                    for sha, files in seeds.items()
+                ),
+            ):
+                for key, values in partial.items():
+                    trace.setdefault(key, set()).update(values)
         trace = {sha: files for sha, files in trace.items() if files}
 
         files: dict[str, set[str]] = {sha: set(values) for sha, values in trace.items()}
@@ -424,8 +432,17 @@ class KnowledgeCommitGit:
             values.add(sha)
         return values
 
+    @staticmethod
+    def _worker(
+        item: tuple[str, int, str, frozenset[str]],
+    ) -> dict[str, set[str]]:
+        path, depth, sha, files = item
+        return KnowledgeCommitGit._trace(path, depth, sha, set(files))
+
+    @staticmethod
     def _trace(
-        self,
+        path: str,
+        depth: int,
         commit: str,
         files: set[str],
     ) -> dict[str, set[str]]:
@@ -433,7 +450,7 @@ class KnowledgeCommitGit:
         # `head` tracks the file paths currently being followed
         # changes are checked only for paths in `head`
 
-        repository = self._repository._repository
+        repository = pygit2.Repository(path)
         node = repository.revparse_single(commit)
 
         if not isinstance(node, pygit2.Commit):
@@ -466,7 +483,7 @@ class KnowledgeCommitGit:
             if ancestors:
                 for ancestor in ancestors:
                     diff = repository.diff(ancestor.tree, node.tree)
-                    branch, tracking = self._collect(diff, head)
+                    branch, tracking = KnowledgeCommitGit._collect(diff, head)
                     touched.update(branch)
                     branches.append((ancestor, tracking))
             else:
@@ -474,7 +491,7 @@ class KnowledgeCommitGit:
                     repository[repository.TreeBuilder().write()],
                     node.tree,
                 )
-                branch, _ = self._collect(diff, head)
+                branch, _ = KnowledgeCommitGit._collect(diff, head)
                 touched.update(branch)
 
             if touched:
@@ -484,7 +501,7 @@ class KnowledgeCommitGit:
 
             for ancestor, tracking in branches:
                 exhausted = {
-                    name for name in tracking if counts.get(name, 0) >= self._depth
+                    name for name in tracking if counts.get(name, 0) >= depth
                 }
                 tracking -= exhausted
                 if not tracking:
@@ -493,19 +510,27 @@ class KnowledgeCommitGit:
 
         return trace
 
+    @staticmethod
     def _collect(
-        self,
         diff: pygit2.Diff,
         head: set[str],
     ) -> tuple[set[str], set[str]]:
-        diff.find_similar()
+        diff.find_similar(
+            flags=(
+                pygit2.enums.DiffFind.FIND_RENAMES
+                | pygit2.enums.DiffFind.FIND_RENAMES_FROM_REWRITES
+            ),
+            rename_threshold=50,
+            rename_from_rewrite_threshold=50,
+            rename_limit=1000,
+        )
 
         tracking = set(head)
         touched: set[str] = set()
 
-        for patch in diff:
-            delta = patch.delta
-            old, new = delta.old_file.path, delta.new_file.path
+        for delta in diff.deltas:
+            old = delta.old_file.path or ""
+            new = delta.new_file.path or ""
 
             if new not in head and old not in head:
                 continue

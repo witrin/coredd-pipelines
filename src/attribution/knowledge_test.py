@@ -744,7 +744,7 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             self.assertIn("a.py", blame_foo.files)
             self.assertIn("a.py", blame_bar.files)
 
-    def test_trace_merge_non_first_parent(self) -> None:
+    def test_build_merge_non_first_parent(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"a.py": "base\n"})
             init = fixture.commit(tree, [], "init")
@@ -764,11 +764,19 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             })
             merge = fixture.commit(tree, [left, right], "merge")
 
-            repository = VersionControl(fixture.repository)
-            trace = KnowledgeCommitGit(repository, cap=200)._trace(merge, {"a.py"})
+            tree = fixture.tree({
+                "a.py": "after\n",
+                "b.py": "right\n",
+            })
+            after = fixture.commit(tree, [merge], "after")
 
-            self.assertIn("a.py", trace[merge])
-            self.assertIn("a.py", trace[left])
+            repository = VersionControl(fixture.repository)
+            commits = KnowledgeCommitGit(repository, cap=200).build(merge, after)
+
+            self.assertIn(merge, {commit.sha for commit in commits})
+            self.assertIn(left, {commit.sha for commit in commits})
+            self.assertIn("a.py", self._commit(commits, merge).files)
+            self.assertIn("a.py", self._commit(commits, left).files)
 
     def test_build_trace(self) -> None:
         with HistoryFixture() as fixture:
