@@ -197,7 +197,7 @@ For edge naming, the paper distinguishes `MODIFIES_FILE` and `MODIFIES_FUNCTION`
 
 > “This schema enables the agent to reason about code-level relationships, identifying candidates that share modified functions or files with the BFC. Unlike prior works on knowledge graphs in software engineering, our approach explicitly leverages the temporal dimension of software evolution, constructing a temporal knowledge graph that preserves commit ordering and enables chronological reasoning about bug introduction.”
 
-> **Implementation deviation.** The current prototype does not use commit timestamps for `PRECEDES`. Instead, it follows Git parent history. This is an intentional deviation from the paper because Git history is more precise than wall-clock time for commit ordering.
+> **Implementation deviation.** The current prototype does not use commit timestamps for `PRECEDES`. Instead, it follows Git parent history so the graph keeps explicit structural lineage.
 
 #### Agent Tools
 

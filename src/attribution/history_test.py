@@ -138,7 +138,16 @@ class TestVersionControlBlame(unittest.TestCase):
 
     def test_blame_mixed(self) -> None:
         result = self._candidate.blame("foo.txt", self.sha_x2, [(1, 5)])
-        self.assertEqual(result, [(None, None)])
+        self.assertEqual(
+            result,
+            [
+                (self.sha_i, (1, 1)),
+                (self.sha_x1, (2, 2)),
+                (self.sha_i, (3, 3)),
+                (self.sha_f2, (4, 4)),
+                (self.sha_x2, (5, 5)),
+            ],
+        )
 
     def test_blame_range(self) -> None:
         result = self._candidate.blame("foo.txt", self.sha_x2, [(9, 9)])

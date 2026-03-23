@@ -4,6 +4,7 @@ from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
+import multiprocessing
 import re
 from typing import Any, cast
 
@@ -305,12 +306,16 @@ class KnowledgeCommitGit:
         base: str,
         after: str,
     ) -> list[KnowledgeCommit]:
+        """Build commit candidates for one corrective change. The backward traversal runs separately for each seed with the same per-seed depth limit, and the global cap is applied only after all seed results have been merged and ranked. Structural PRECEDES information remains parent-based and is preserved independently from that final ranking step."""
         seeds = self._seed(base, after)
         blame = {sha for sha in seeds if sha != after}
 
         trace: dict[str, set[str]] = {}
         path = self._repository._repository.path
-        with ProcessPoolExecutor(max_workers=min(8, len(seeds) or 1)) as pool:
+        with ProcessPoolExecutor(
+            max_workers=min(8, len(seeds) or 1),
+            mp_context=multiprocessing.get_context("spawn"),
+        ) as pool:
             for partial in pool.map(
                 self._worker,
                 (
@@ -648,10 +653,9 @@ class KnowledgeCommitGit:
         if len(commits) <= self._cap + 1:
             return commits
 
-        position = {c.sha: i for i, c in enumerate(commits)}
         direct = [c for c in commits if c.sha != after and c.category == "blame"]
         others = [c for c in commits if c.sha != after and c.category != "blame"]
-        others.sort(key=lambda c: (-c.score, -position[c.sha]))
+        others.sort(key=lambda c: (-c.score, -c.timestamp.timestamp(), c.sha))
         remaining = max(self._cap - len(direct), 0)
         keep = {after, *(c.sha for c in direct), *(c.sha for c in others[:remaining])}
         return [c for c in commits if c.sha in keep]

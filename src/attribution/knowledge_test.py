@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from benchmark.attribution.domain import OperationType
 from benchmark.attribution.history import VersionControl
 from benchmark.attribution.history_fixture import HistoryFixture
 from benchmark.attribution.knowledge import (
     KnowledgeAuditBuilder,
+    KnowledgeCommit,
     KnowledgeCommitGit,
     KnowledgeEntity,
     KnowledgeEntityGit,
@@ -664,10 +665,16 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             after = fixture.commit(tree, [base], "after")
 
             repository = VersionControl(fixture.repository)
-            with patch.object(
+            pool = MagicMock()
+            pool.__enter__.return_value = pool
+            pool.__exit__.return_value = None
+            pool.map.side_effect = lambda fn, items: [fn(item) for item in items]
+            with patch(
+                "benchmark.attribution.knowledge.ProcessPoolExecutor",
+                return_value=pool,
+            ), patch.object(
                 KnowledgeCommitGit,
-                "_trace",
-                autospec=True,
+                "_worker",
                 return_value={},
             ):
                 commits = KnowledgeCommitGit(repository, cap=200).build(base, after)
@@ -961,6 +968,118 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             self.assertIn(after, shas)
             self.assertIn(qux, shas)
             self.assertLessEqual(len(commits), 3)
+
+    def test_build_limit_prefers_newer_timestamp(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "base\n"})
+            base = fixture.commit(tree, [], "base")
+
+            tree = fixture.tree({"a.py": "old\n"})
+            old = fixture.commit(tree, [base], "old")
+
+            tree = fixture.tree({"a.py": "mid\n"})
+            mid = fixture.commit(tree, [old], "mid")
+
+            tree = fixture.tree({"a.py": "new\n"})
+            new = fixture.commit(tree, [mid], "new")
+
+            tree = fixture.tree({"a.py": "after\n"})
+            after = fixture.commit(tree, [new], "after")
+
+            repository = VersionControl(fixture.repository)
+            builder = KnowledgeCommitGit(repository, cap=1)
+            commits = [
+                KnowledgeCommit(
+                    sha=after,
+                    kind="correction",
+                    score=0.0,
+                    timestamp=builder._commit(after)["timestamp"],
+                    message="after",
+                    parents=(),
+                    files=frozenset({"a.py"}),
+                    category="correction",
+                ),
+                KnowledgeCommit(
+                    sha=old,
+                    kind="candidate",
+                    score=0.6,
+                    timestamp=builder._commit(old)["timestamp"],
+                    message="old",
+                    parents=(),
+                    files=frozenset({"a.py"}),
+                    category=None,
+                ),
+                KnowledgeCommit(
+                    sha=new,
+                    kind="candidate",
+                    score=0.6,
+                    timestamp=builder._commit(new)["timestamp"],
+                    message="new",
+                    parents=(),
+                    files=frozenset({"a.py"}),
+                    category=None,
+                ),
+            ]
+
+            limited = builder._limit(after, commits)
+
+            self.assertIn(after, {commit.sha for commit in limited})
+            self.assertIn(new, {commit.sha for commit in limited})
+            self.assertNotIn(old, {commit.sha for commit in limited})
+
+    def test_build_limit_timestamp_tie_is_deterministic(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "base\n"})
+            base = fixture.commit(tree, [], "base")
+
+            tree = fixture.tree({"a.py": "left\n"})
+            left = fixture.commit(tree, [base], "left")
+
+            tree = fixture.tree({"a.py": "right\n"})
+            right = fixture.commit(tree, [left], "right")
+
+            tree = fixture.tree({"a.py": "after\n"})
+            after = fixture.commit(tree, [right], "after")
+
+            repository = VersionControl(fixture.repository)
+            builder = KnowledgeCommitGit(repository, cap=1)
+            timestamp = builder._commit(left)["timestamp"]
+            commits = [
+                KnowledgeCommit(
+                    sha=after,
+                    kind="correction",
+                    score=0.0,
+                    timestamp=builder._commit(after)["timestamp"],
+                    message="after",
+                    parents=(),
+                    files=frozenset({"a.py"}),
+                    category="correction",
+                ),
+                KnowledgeCommit(
+                    sha="bbb",
+                    kind="candidate",
+                    score=0.6,
+                    timestamp=timestamp,
+                    message="bbb",
+                    parents=(),
+                    files=frozenset({"a.py"}),
+                    category=None,
+                ),
+                KnowledgeCommit(
+                    sha="aaa",
+                    kind="candidate",
+                    score=0.6,
+                    timestamp=timestamp,
+                    message="aaa",
+                    parents=(),
+                    files=frozenset({"a.py"}),
+                    category=None,
+                ),
+            ]
+
+            limited = builder._limit(after, commits)
+
+            self.assertEqual([commit.sha for commit in limited], [after, "aaa"])
 
     def test_build_exclude(self) -> None:
         with HistoryFixture() as fixture:
