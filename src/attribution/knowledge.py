@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-from collections import deque
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
-import multiprocessing
 import re
 from typing import Any, cast
 
@@ -14,7 +11,7 @@ import pygit2
 
 from benchmark.attribution.diff.entity import EntityPath
 from benchmark.attribution.domain import FileOperation, OperationType
-from benchmark.attribution.history import VersionControl
+from benchmark.attribution.history import VersionControl, VersionHistoryPathWalker
 
 
 @dataclass(frozen=True)
@@ -306,25 +303,23 @@ class KnowledgeCommitGit:
         base: str,
         after: str,
     ) -> list[KnowledgeCommit]:
-        """Build commit candidates for one corrective change. The backward traversal runs separately for each seed with the same per-seed depth limit, and the global cap is applied only after all seed results have been merged and ranked. Structural PRECEDES information remains parent-based and is preserved independently from that final ranking step."""
         seeds = self._seed(base, after)
         blame = {sha for sha in seeds if sha != after}
 
         trace: dict[str, set[str]] = {}
-        path = self._repository._repository.path
-        with ProcessPoolExecutor(
-            max_workers=min(8, len(seeds) or 1),
-            mp_context=multiprocessing.get_context("spawn"),
-        ) as pool:
-            for partial in pool.map(
-                self._worker,
-                (
-                    (path, self._depth, sha, frozenset(files))
-                    for sha, files in seeds.items()
-                ),
-            ):
-                for key, values in partial.items():
-                    trace.setdefault(key, set()).update(values)
+        for sha, paths in seeds.items():
+            for name in sorted(f for f in paths if f):
+                try:
+                    walker = VersionHistoryPathWalker(
+                        self._repository._repository, sha, name, self._depth,
+                    )
+                except (TypeError, FileNotFoundError):
+                    continue
+                for entry in walker.entries():
+                    if entry.type in ("renamed", "copied"):
+                        trace.setdefault(entry.commit, set()).update(entry.path)
+                    else:
+                        trace.setdefault(entry.commit, set()).add(entry.path)
         trace = {sha: files for sha, files in trace.items() if files}
 
         files: dict[str, set[str]] = {sha: set(values) for sha, values in trace.items()}
@@ -436,127 +431,6 @@ class KnowledgeCommitGit:
                 continue
             values.add(sha)
         return values
-
-    @staticmethod
-    def _worker(
-        item: tuple[str, int, str, frozenset[str]],
-    ) -> dict[str, set[str]]:
-        path, depth, sha, files = item
-        return KnowledgeCommitGit._trace(path, depth, sha, set(files))
-
-    @staticmethod
-    def _trace(
-        path: str,
-        depth: int,
-        commit: str,
-        files: set[str],
-    ) -> dict[str, set[str]]:
-        # Breadth-first search over ancestors using a queue
-        # `head` tracks the file paths currently being followed
-        # changes are checked only for paths in `head`
-
-        repository = pygit2.Repository(path)
-        node = repository.revparse_single(commit)
-
-        if not isinstance(node, pygit2.Commit):
-            raise TypeError(f"{commit!r} does not resolve to a commit")
-
-        head = {name for name in files if name}
-        if not head:
-            return {}
-
-        trace: dict[str, set[str]] = {}
-        counts: dict[str, int] = {name: 0 for name in head}
-
-        queue: deque[tuple[pygit2.Commit, set[str]]] = deque([(node, head)])
-
-        seen: set[tuple[str, frozenset[str]]] = set()
-
-        while queue:
-            node, head = queue.popleft()
-            sha = str(node.id)
-
-            state = (sha, frozenset(head))
-            if state in seen:
-                continue
-            seen.add(state)
-
-            ancestors = list(node.parents) if node.parents else []
-            branches: list[tuple[pygit2.Commit, set[str]]] = []
-            touched: set[str] = set()
-
-            if ancestors:
-                for ancestor in ancestors:
-                    diff = repository.diff(ancestor.tree, node.tree)
-                    branch, tracking = KnowledgeCommitGit._collect(diff, head)
-                    touched.update(branch)
-                    branches.append((ancestor, tracking))
-            else:
-                diff = repository.diff(
-                    repository[repository.TreeBuilder().write()],
-                    node.tree,
-                )
-                branch, _ = KnowledgeCommitGit._collect(diff, head)
-                touched.update(branch)
-
-            if touched:
-                trace.setdefault(sha, set()).update(touched)
-                for name in touched:
-                    counts[name] = counts.get(name, 0) + 1
-
-            for ancestor, tracking in branches:
-                exhausted = {
-                    name for name in tracking if counts.get(name, 0) >= depth
-                }
-                tracking -= exhausted
-                if not tracking:
-                    continue
-                queue.append((ancestor, set(tracking)))
-
-        return trace
-
-    @staticmethod
-    def _collect(
-        diff: pygit2.Diff,
-        head: set[str],
-    ) -> tuple[set[str], set[str]]:
-        diff.find_similar(
-            flags=(
-                pygit2.enums.DiffFind.FIND_RENAMES
-                | pygit2.enums.DiffFind.FIND_RENAMES_FROM_REWRITES
-            ),
-            rename_threshold=50,
-            rename_from_rewrite_threshold=50,
-            rename_limit=1000,
-        )
-
-        tracking = set(head)
-        touched: set[str] = set()
-
-        for delta in diff.deltas:
-            old = delta.old_file.path or ""
-            new = delta.new_file.path or ""
-
-            if new not in head and old not in head:
-                continue
-
-            if new in head:
-                tracking.discard(new)
-            if old in head:
-                tracking.discard(old)
-
-            if old:
-                touched.add(old)
-            if new:
-                touched.add(new)
-
-            if delta.status == pygit2.GIT_DELTA_ADDED:
-                continue
-
-            if old:
-                tracking.add(old)
-
-        return touched, tracking
 
     def _parents(
         self,
@@ -810,6 +684,20 @@ class KnowledgeEntityGumtree:
                 continue
             result.append(value)
 
+        if result or file.operation == OperationType.MOVE:
+            return result
+
+        result.append(
+            KnowledgeEntity(
+                sha=file.sha,
+                path=file.path,
+                urn="entity:program",
+                kind="program",
+                name=self._stem(file.path),
+                operation=file.operation,
+                source="gumtree",
+            )
+        )
         return result
 
     def _blob(self, commit: str, path: str | None) -> bytes | None:
@@ -1062,6 +950,8 @@ class KnowledgeGraphMaterializer:
 
         for file in state.files:
             store.link("MODIFIES", f"commit:{file.sha}", f"file:{file.path}")
+            if file.operation == OperationType.MOVE:
+                store.link("MOVE", f"file:{file.base}", f"file:{file.after}")
 
         for entity in state.entities:
             target = f"entity:{entity.path}:{entity.urn.removeprefix('entity:')}"

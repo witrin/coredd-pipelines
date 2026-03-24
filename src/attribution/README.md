@@ -199,6 +199,8 @@ For edge naming, the paper distinguishes `MODIFIES_FILE` and `MODIFIES_FUNCTION`
 
 > **Implementation deviation.** The current prototype does not use commit timestamps for `PRECEDES`. Instead, it follows Git parent history so the graph keeps explicit structural lineage.
 
+> **`--follow` semantics.** The commit-history expansion used by `KnowledgeCommitGit` delegates file-history traversal to `VersionHistoryPathWalker`. The walker skips merge commits and follows first-parent edges only, switching to the old path on renames so that both the old and new path are recorded. `KnowledgeFileGit` still materializes merge-file metadata from the first parent only.
+
 #### Agent Tools
 
 The agent consumes the constructed graph together with the corrective commit context and narrows the search space through a small set of graph-oriented tools.

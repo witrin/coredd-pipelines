@@ -5,16 +5,313 @@ import json
 import shutil
 import tarfile
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import TextIOBase
 from pathlib import Path
 from typing import Any, Callable, cast
+from typing import Iterator
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pygit2
 from google.cloud import storage
 from benchmark.attribution.domain import Change, Commit, FileOperation, OperationType
+
+
+@dataclass(frozen=True)
+class PathState:
+    commit: pygit2.Commit
+    path: str
+    depth: int
+
+
+@dataclass(frozen=True)
+class FileChange:
+    commit: str
+    path: str | tuple[str, str]
+    type: str
+
+
+class VersionHistoryPathIterator(Iterator[pygit2.Commit]):
+    def __init__(self, walker: VersionHistoryPathWalker) -> None:
+        self._walker = walker
+        self._entries = iter(walker.entries())
+
+    def __iter__(self) -> VersionHistoryPathIterator:
+        return self
+
+    def __next__(self) -> pygit2.Commit:
+        entry = next(self._entries)
+        node = self._walker.repository.revparse_single(entry.commit)
+        if not isinstance(node, pygit2.Commit):
+            raise TypeError(f"{entry.commit!r} does not resolve to a commit")
+        return node
+
+
+class VersionHistoryPathWalker:
+    """Walks file history for a single path, reproducing git log --follow semantics via pygit2.
+
+    Git's --follow disables history simplification (prune = 0), so every commit
+    enters the revision walk regardless of TREESAME status. Merge commits still
+    pass through the walk but are suppressed in the output layer: without the -m
+    flag, git never diffs a merge against its parents, so no output is produced.
+    This walker mirrors that behavior by skipping commits with more than one parent.
+
+    Rename detection in git requires an actual diff call (diff_tree_oid), which
+    is never invoked for merges without -m. Renames are therefore only recognized
+    on the linear first-parent history. Git's pathspec mutation on rename is global
+    and side-effect-laden; this walker avoids that pitfall by tracking the current
+    path locally per traversal step.
+
+    Consequently, renames introduced across a merge boundary are not detected,
+    matching the default behavior of git log --follow without -m.
+
+    The underlying git rules (from revision.c, log-tree.c, tree-diff.c):
+
+        R1: --follow sets revs->prune = 0.
+        R2: All commits pass the revision walk (no TREESAME filtering).
+        R3: Merge commits are suppressed in the output layer (log_tree_diff -> 0).
+        R4: Rename detection requires a diff call (diff_tree_oid).
+        R5: Without -m, no diff call happens for merges.
+        R6: A rename across a merge boundary is NOT detected without -m.
+        R7: The pathspec mutation is global and side-effect-laden.
+
+    Observable behavior that follows from these rules:
+
+        B1: Merge commits never appear in git log --follow (without -m).
+        B2: All non-merge commits that touched the path on any side appear.
+        B3: Renames are only detected on the linear first-parent history,
+            or when -m breaks the merge into per-parent diffs.
+    """
+
+    def __init__(
+        self,
+        repository: pygit2.Repository,
+        commit: str,
+        path: str,
+        depth: int,
+    ) -> None:
+        node = repository.revparse_single(commit)
+        if not isinstance(node, pygit2.Commit):
+            raise TypeError(f"{commit!r} does not resolve to a commit")
+        if not path:
+            raise ValueError("path must not be empty")
+        if depth < 0:
+            raise ValueError("depth must be >= 0")
+        if self._entry(repository, node.tree, path) is None:
+            raise FileNotFoundError(
+                f"Path {path!r} does not exist in start commit {node.id}"
+            )
+
+        self._repository = repository
+        self._state = PathState(node, path, depth)
+
+    @property
+    def repository(self) -> pygit2.Repository:
+        return self._repository
+
+    def __iter__(self) -> VersionHistoryPathIterator:
+        return VersionHistoryPathIterator(self)
+
+    def commits(self) -> VersionHistoryPathIterator:
+        return VersionHistoryPathIterator(self)
+
+    def entries(self) -> Iterator[FileChange]:
+        current = self._state.path
+        remaining = self._state.depth
+
+        for node in self._walk(self._state.commit):
+            if remaining == 0:
+                break
+
+            parents = list(node.parents)
+            if len(parents) > 1:
+                continue
+
+            parent = None if not parents else parents[0]
+            entry, current = self._inspect(parent, node, current)
+            if entry is None:
+                continue
+
+            remaining -= 1
+            yield entry
+
+    def _walk(self, node: pygit2.Commit) -> Iterator[pygit2.Commit]:
+        for item in self._repository.walk(node.id, pygit2.GIT_SORT_TIME):
+            yield item
+
+    def _inspect(
+        self,
+        parent: pygit2.Commit | None,
+        node: pygit2.Commit,
+        path: str,
+    ) -> tuple[FileChange | None, str]:
+        if parent is None:
+            if self._entry(self._repository, node.tree, path) is None:
+                return None, path
+            return FileChange(str(node.id), path, "root"), path
+
+        old = self._entry(self._repository, parent.tree, path)
+        new = self._entry(self._repository, node.tree, path)
+
+        if old is not None and new is not None:
+            if old.id == new.id and old.filemode == new.filemode:
+                return None, path
+            return FileChange(str(node.id), path, "modified"), path
+
+        if old is None and new is None:
+            return None, path
+
+        return self._diff(parent, node, path)
+
+    def _diff(
+        self,
+        parent: pygit2.Commit,
+        node: pygit2.Commit,
+        path: str,
+    ) -> tuple[FileChange | None, str]:
+        diff = self._repository.diff(parent.tree, node.tree)
+        diff.find_similar(
+            flags=(
+                pygit2.enums.DiffFind.FIND_COPIES
+                | pygit2.enums.DiffFind.FIND_COPIES_FROM_UNMODIFIED
+                | pygit2.enums.DiffFind.FIND_RENAMES
+                | pygit2.enums.DiffFind.FIND_RENAMES_FROM_REWRITES
+            ),
+            copy_threshold=50,
+            rename_threshold=50,
+            rename_from_rewrite_threshold=50,
+            rename_limit=1000,
+        )
+
+        for delta in diff.deltas:
+            old = delta.old_file.path or ""
+            new = delta.new_file.path or ""
+
+            if old != path and new != path:
+                continue
+
+            if (
+                delta.status
+                in {
+                    pygit2.GIT_DELTA_RENAMED,
+                    pygit2.GIT_DELTA_COPIED,
+                }
+                and new == path
+                and old
+            ):
+                return (
+                    FileChange(
+                        str(node.id),
+                        (old, path),
+                        (
+                            "copied"
+                            if delta.status == pygit2.GIT_DELTA_COPIED
+                            else "renamed"
+                        ),
+                    ),
+                    old,
+                )
+
+            if delta.status == pygit2.GIT_DELTA_ADDED and new == path:
+                previous = self._copy(parent.tree, node.tree, path)
+                if previous is not None:
+                    return (
+                        FileChange(
+                            str(node.id),
+                            (previous, path),
+                            "copied",
+                        ),
+                        previous,
+                    )
+                return FileChange(str(node.id), path, "added"), path
+
+            if delta.status == pygit2.GIT_DELTA_DELETED and old == path:
+                return FileChange(str(node.id), path, "deleted"), path
+
+            if delta.status in {
+                pygit2.GIT_DELTA_MODIFIED,
+                pygit2.GIT_DELTA_TYPECHANGE,
+            }:
+                return FileChange(str(node.id), path, "modified"), path
+
+            if (
+                delta.status
+                in {
+                    pygit2.GIT_DELTA_RENAMED,
+                    pygit2.GIT_DELTA_COPIED,
+                }
+                and old == path
+            ):
+                return (
+                    FileChange(
+                        str(node.id),
+                        path,
+                        (
+                            "copied"
+                            if delta.status == pygit2.GIT_DELTA_COPIED
+                            else "renamed"
+                        ),
+                    ),
+                    path,
+                )
+
+        return None, path
+
+    def _copy(
+        self,
+        parent: pygit2.Tree,
+        node: pygit2.Tree,
+        path: str,
+    ) -> str | None:
+        current = self._entry(self._repository, node, path)
+        if current is None:
+            return None
+
+        for name, candidate in self._entries(parent, ""):
+            if name == path:
+                continue
+            if candidate.id != current.id or candidate.filemode != current.filemode:
+                continue
+            return name
+
+        return None
+
+    @staticmethod
+    def _entry(
+        repository: pygit2.Repository,
+        tree: pygit2.Tree,
+        path: str,
+    ) -> pygit2.TreeEntry | None:
+        current: pygit2.Tree | pygit2.Blob = tree
+        parts = [part for part in path.split("/") if part]
+
+        for index, part in enumerate(parts):
+            if not isinstance(current, pygit2.Tree):
+                return None
+            try:
+                entry = current[part]
+            except KeyError:
+                return None
+            if index == len(parts) - 1:
+                return entry
+            current = repository[entry.id]
+
+        return None
+
+    def _entries(
+        self,
+        tree: pygit2.Tree,
+        prefix: str,
+    ) -> Iterator[tuple[str, pygit2.TreeEntry]]:
+        for entry in tree:
+            path = entry.name if not prefix else f"{prefix}/{entry.name}"
+            node = self._repository[entry.id]
+            if isinstance(node, pygit2.Tree):
+                yield from self._entries(node, path)
+                continue
+            yield path, entry
 
 
 class VersionControl:
@@ -698,7 +995,9 @@ class VersionControlSnapshot:
             with open(cls._cache_file(target), "r", encoding="utf-8") as file:
                 data = json.load(file)
         except FileNotFoundError as error:
-            raise ValueError(f"Snapshot cache at {target} is missing mapping.") from error
+            raise ValueError(
+                f"Snapshot cache at {target} is missing mapping."
+            ) from error
 
         if not isinstance(data, dict):
             raise ValueError(f"Snapshot cache at {target} has invalid mapping.")
@@ -711,10 +1010,14 @@ class VersionControlSnapshot:
 
         for commit, mapped in forward.items():
             if reverse.get(mapped) != commit:
-                raise ValueError(f"Snapshot cache at {target} has inconsistent mapping.")
+                raise ValueError(
+                    f"Snapshot cache at {target} has inconsistent mapping."
+                )
 
             if repository.get(mapped) is None:
-                raise ValueError(f"Snapshot cache at {target} references missing commits.")
+                raise ValueError(
+                    f"Snapshot cache at {target} references missing commits."
+                )
 
         return forward, reverse
 

@@ -142,6 +142,7 @@ class KnowledgeGraphRenderer:
             "ADD": ([], []),
             "EDIT": ([], []),
             "DELETE": ([], []),
+            "MOVE": ([], []),
             "IN": ([], []),
             "PRECEDES": ([], []),
         }
@@ -158,7 +159,7 @@ class KnowledgeGraphRenderer:
                 store.graph.nodes[source]["kind"] == "commit"
                 and store.graph.nodes[target]["kind"]
                 in {"class", "function", "method", "program"}
-                and label in {"ADD", "EDIT", "DELETE"}
+                and label in {"ADD", "EDIT", "DELETE", "MOVE"}
             ):
                 xs, ys = result[label]
                 xs.extend([x0, x1, None])
@@ -174,6 +175,11 @@ class KnowledgeGraphRenderer:
                 xs.extend([x0, x1, None])
                 ys.extend([y0, y1, None])
 
+            if label == "MOVE":
+                xs, ys = result["MOVE"]
+                xs.extend([x0, x1, None])
+                ys.extend([y0, y1, None])
+
         return result
 
     def _traces(
@@ -184,6 +190,7 @@ class KnowledgeGraphRenderer:
             "ADD": {"width": 1.6, "color": "#2f855a"},
             "EDIT": {"width": 1.6, "color": "#3182ce"},
             "DELETE": {"width": 1.6, "color": "#c53030"},
+            "MOVE": {"width": 1.6, "color": "#d69e2e"},
             "IN": {"width": 1.0, "color": "#bdbdbd"},
             "PRECEDES": {"width": 1.0, "color": "grey"},
         }

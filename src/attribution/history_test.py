@@ -1,5 +1,8 @@
 import json
+import shutil
+import subprocess
 import tempfile
+import types
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +16,7 @@ from benchmark.attribution.history import (
     PlatformCache,
     VersionControl,
     VersionControlSnapshot,
+    VersionHistoryPathWalker,
 )
 from benchmark.attribution.history_fixture import HistoryFixture
 
@@ -691,6 +695,352 @@ class TestPlatformCache(unittest.TestCase):
         }])
         with self.assertRaises(KeyError):
             cache.load(999)
+
+
+class TestVersionHistoryPathWalker(unittest.TestCase):
+    def _walker(
+        self,
+        fixture: HistoryFixture,
+        commit: str,
+        path: str,
+        depth: int = 100,
+    ):
+        return VersionHistoryPathWalker(
+            repository=fixture.repository,
+            commit=commit,
+            path=path,
+            depth=depth,
+        )
+
+    def _entries(
+        self,
+        fixture: HistoryFixture,
+        commit: str,
+        path: str,
+        depth: int = 100,
+    ) -> list[object]:
+        return list(self._walker(fixture, commit, path, depth).entries())
+
+    def _commits(
+        self,
+        fixture: HistoryFixture,
+        commit: str,
+        path: str,
+        depth: int = 100,
+    ) -> list[str]:
+        return [
+            str(node.id)
+            for node in self._walker(fixture, commit, path, depth).commits()
+        ]
+
+    def _git(
+        self,
+        fixture: HistoryFixture,
+        commit: str,
+        path: str,
+    ) -> list[str]:
+        if shutil.which("git") is None:
+            self.skipTest("git is required for oracle comparisons")
+
+        result = subprocess.run(
+            [
+                "git",
+                f"--git-dir={fixture.repository.path}",
+                "log",
+                "--follow",
+                "--format=%H",
+                commit,
+                "--",
+                path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return [line for line in result.stdout.splitlines() if line]
+
+    def _clone_git(
+        self,
+        fixture: HistoryFixture,
+        commit: str,
+        path: str,
+    ) -> list[str]:
+        if shutil.which("git") is None:
+            self.skipTest("git is required for oracle comparisons")
+
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--quiet",
+                    fixture.repository.path,
+                    directory,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    directory,
+                    "log",
+                    "--follow",
+                    "--format=%H",
+                    commit,
+                    "--",
+                    path,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        return [line for line in result.stdout.splitlines() if line]
+
+    def _oracle(
+        self,
+        fixture: HistoryFixture,
+        commit: str,
+        path: str,
+    ) -> list[str]:
+        try:
+            return self._git(fixture, commit, path)
+        except subprocess.CalledProcessError:
+            return self._clone_git(fixture, commit, path)
+
+    def _entry(
+        self,
+        item: object,
+    ) -> types.SimpleNamespace:
+        return types.SimpleNamespace(
+            commit=str(getattr(item, "commit")),
+            path=getattr(item, "path"),
+            type=str(getattr(item, "type")),
+        )
+
+    def test_linear_modify_matches_git(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "one\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({"a.py": "two\n"})
+            mid = fixture.commit(tree, [init], "mid")
+
+            tree = fixture.tree({"a.py": "three\n"})
+            after = fixture.commit(tree, [mid], "after")
+
+            self.assertEqual(
+                self._commits(fixture, after, "a.py"),
+                self._oracle(fixture, after, "a.py"),
+            )
+
+    def test_linear_rename_matches_git(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"old.py": "one\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({"new.py": "one\n"})
+            rename = fixture.commit(tree, [init], "rename")
+
+            tree = fixture.tree({"new.py": "two\n"})
+            after = fixture.commit(tree, [rename], "after")
+
+            self.assertEqual(
+                self._commits(fixture, after, "new.py"),
+                self._oracle(fixture, after, "new.py"),
+            )
+
+            entries = [self._entry(item) for item in self._entries(fixture, after, "new.py")]
+            self.assertEqual(
+                [(item.type, item.path) for item in entries],
+                [
+                    ("modified", "new.py"),
+                    ("renamed", ("old.py", "new.py")),
+                    ("root", "old.py"),
+                ],
+            )
+
+    def test_copy_matches_git(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"src.py": "one\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({"src.py": "two\n"})
+            source = fixture.commit(tree, [init], "source")
+
+            tree = fixture.tree({
+                "src.py": "two\n",
+                "copy.py": "two\n",
+            })
+            copy = fixture.commit(tree, [source], "copy")
+
+            tree = fixture.tree({
+                "src.py": "three\n",
+                "copy.py": "three\n",
+            })
+            after = fixture.commit(tree, [copy], "after")
+
+            self.assertEqual(
+                self._commits(fixture, after, "copy.py"),
+                self._oracle(fixture, after, "copy.py"),
+            )
+
+            entries = [self._entry(item) for item in self._entries(fixture, after, "copy.py")]
+            self.assertEqual(
+                [(item.type, item.path) for item in entries],
+                [
+                    ("modified", "copy.py"),
+                    ("copied", ("src.py", "copy.py")),
+                    ("modified", "src.py"),
+                    ("root", "src.py"),
+                ],
+            )
+
+    def test_merge_treesame_to_first_parent_matches_git(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "base\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({"a.py": "left\n"})
+            left = fixture.commit(tree, [init], "left")
+
+            tree = fixture.tree({"a.py": "right\n"})
+            right = fixture.commit(tree, [init], "right", ref=None)
+
+            tree = fixture.tree({"a.py": "left\n"})
+            merge = fixture.commit(tree, [left, right], "merge")
+
+            tree = fixture.tree({"a.py": "after\n"})
+            after = fixture.commit(tree, [merge], "after")
+
+            result = self._commits(fixture, after, "a.py")
+            self.assertEqual(result, self._oracle(fixture, after, "a.py"))
+            self.assertNotIn(merge, result)
+
+    def test_merge_treesame_to_second_parent_matches_git(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "base\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({"a.py": "left\n"})
+            left = fixture.commit(tree, [init], "left")
+
+            tree = fixture.tree({"a.py": "right\n"})
+            right = fixture.commit(tree, [init], "right", ref=None)
+
+            tree = fixture.tree({"a.py": "right\n"})
+            merge = fixture.commit(tree, [left, right], "merge")
+
+            tree = fixture.tree({"a.py": "after\n"})
+            after = fixture.commit(tree, [merge], "after")
+
+            result = self._commits(fixture, after, "a.py")
+            self.assertEqual(result, self._oracle(fixture, after, "a.py"))
+            self.assertNotIn(merge, result)
+
+    def test_merge_differs_from_both_parents_matches_git(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "base\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({"a.py": "left\n"})
+            left = fixture.commit(tree, [init], "left")
+
+            tree = fixture.tree({"a.py": "right\n"})
+            right = fixture.commit(tree, [init], "right", ref=None)
+
+            tree = fixture.tree({"a.py": "merge\n"})
+            merge = fixture.commit(tree, [left, right], "merge")
+
+            tree = fixture.tree({"a.py": "after\n"})
+            after = fixture.commit(tree, [merge], "after")
+
+            result = self._commits(fixture, after, "a.py")
+            self.assertEqual(result, self._oracle(fixture, after, "a.py"))
+            self.assertNotIn(merge, result)
+
+    def test_rename_through_merge_does_not_cross_boundary(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"old.py": "base\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({"old.py": "main\n"})
+            main = fixture.commit(tree, [init], "main")
+
+            tree = fixture.tree({"old.py": "branch\n"})
+            branch = fixture.commit(tree, [init], "branch", ref=None)
+
+            tree = fixture.tree({"new.py": "merge\n"})
+            merge = fixture.commit(tree, [main, branch], "merge")
+
+            tree = fixture.tree({"new.py": "after\n"})
+            after = fixture.commit(tree, [merge], "after")
+
+            result = self._commits(fixture, after, "new.py")
+            self.assertEqual(result, self._oracle(fixture, after, "new.py"))
+            self.assertNotIn(init, result)
+            self.assertNotIn(merge, result)
+
+    def test_add_delete_root_matches_git(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "root\n"})
+            root = fixture.commit(tree, [], "root")
+
+            tree = fixture.tree({})
+            delete = fixture.commit(tree, [root], "delete")
+
+            tree = fixture.tree({"a.py": "again\n"})
+            after = fixture.commit(tree, [delete], "after")
+
+            self.assertEqual(
+                self._commits(fixture, after, "a.py"),
+                self._oracle(fixture, after, "a.py"),
+            )
+
+            entries = [self._entry(item) for item in self._entries(fixture, after, "a.py")]
+            self.assertEqual(
+                [(item.type, item.path) for item in entries],
+                [
+                    ("added", "a.py"),
+                    ("deleted", "a.py"),
+                    ("root", "a.py"),
+                ],
+            )
+
+    def test_depth_limits_visible_commits(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "one\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({"a.py": "two\n"})
+            two = fixture.commit(tree, [init], "two")
+
+            tree = fixture.tree({"a.py": "three\n"})
+            three = fixture.commit(tree, [two], "three")
+
+            tree = fixture.tree({"a.py": "four\n"})
+            after = fixture.commit(tree, [three], "after")
+
+            self.assertEqual(
+                self._commits(fixture, after, "a.py", depth=2),
+                self._oracle(fixture, after, "a.py")[:2],
+            )
+
+    def test_iterator_matches_commit_list(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "one\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({"a.py": "two\n"})
+            after = fixture.commit(tree, [init], "after")
+
+            walker = self._walker(fixture, after, "a.py")
+            self.assertEqual(
+                [str(node.id) for node in walker],
+                self._commits(fixture, after, "a.py"),
+            )
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from benchmark.attribution.knowledge import (
     KnowledgeCommit,
     KnowledgeCommitGit,
     KnowledgeEntity,
+    KnowledgeEntityGumtree,
     KnowledgeEntityGit,
     KnowledgeFile,
     KnowledgeGraphBuilder,
@@ -643,6 +644,41 @@ class TestKnowledgeEntityGit(unittest.TestCase):
         self.assertEqual(entity[0].urn, "entity:function=foo")
 
 
+class TestKnowledgeEntityGumtree(unittest.TestCase):
+    def test_build_falls_back_to_program_when_resolve_is_empty(self) -> None:
+        file = KnowledgeFile(
+            sha="after",
+            parent="base",
+            base="a.js",
+            after="a.js",
+            path="a.js",
+            language="javascript",
+            operation=OperationType.EDIT,
+        )
+        repository = SimpleNamespace(blob=MagicMock(side_effect=FileNotFoundError))
+
+        with patch(
+            "benchmark.attribution.knowledge.EntityPath.resolve",
+            return_value=set(),
+        ):
+            entity = KnowledgeEntityGumtree(repository).build([file])
+
+        self.assertEqual(
+            entity,
+            [
+                KnowledgeEntity(
+                    sha="after",
+                    path="a.js",
+                    urn="entity:program",
+                    kind="program",
+                    name="a",
+                    operation=OperationType.EDIT,
+                    source="gumtree",
+                )
+            ],
+        )
+
+
 class TestKnowledgeCommitGit(unittest.TestCase):
     def _commit(self, commits, sha):
         for commit in commits:
@@ -665,17 +701,9 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             after = fixture.commit(tree, [base], "after")
 
             repository = VersionControl(fixture.repository)
-            pool = MagicMock()
-            pool.__enter__.return_value = pool
-            pool.__exit__.return_value = None
-            pool.map.side_effect = lambda fn, items: [fn(item) for item in items]
             with patch(
-                "benchmark.attribution.knowledge.ProcessPoolExecutor",
-                return_value=pool,
-            ), patch.object(
-                KnowledgeCommitGit,
-                "_worker",
-                return_value={},
+                "benchmark.attribution.knowledge.VersionHistoryPathWalker",
+                side_effect=FileNotFoundError("mocked"),
             ):
                 commits = KnowledgeCommitGit(repository, cap=200).build(base, after)
 
@@ -751,7 +779,7 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             self.assertIn("a.py", blame_foo.files)
             self.assertIn("a.py", blame_bar.files)
 
-    def test_build_merge_non_first_parent(self) -> None:
+    def test_build_merge_hides_merge_commit(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"a.py": "base\n"})
             init = fixture.commit(tree, [], "init")
@@ -780,49 +808,42 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             repository = VersionControl(fixture.repository)
             commits = KnowledgeCommitGit(repository, cap=200).build(merge, after)
 
-            self.assertIn(merge, {commit.sha for commit in commits})
+            self.assertNotIn(merge, {commit.sha for commit in commits})
             self.assertIn(left, {commit.sha for commit in commits})
-            self.assertIn("a.py", self._commit(commits, merge).files)
             self.assertIn("a.py", self._commit(commits, left).files)
 
-    def test_build_trace(self) -> None:
+    def test_build_merge_follows_second_parent(self) -> None:
         with HistoryFixture() as fixture:
-            tree = fixture.tree({"a.ts": """
-                function foo() {
-                    return 1;
-                }
-            """})
-            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree({"a.py": "base\n"})
+            init = fixture.commit(tree, [], "init")
 
-            tree = fixture.tree({"a.ts": """
-                function foo() {
-                    return 2;
-                }
-            """})
-            foo = fixture.commit(tree, [base], "foo")
+            tree = fixture.tree({
+                "a.py": "base\n",
+                "b.py": "left\n",
+            })
+            left = fixture.commit(tree, [init], "left")
 
-            tree = fixture.tree({"a.ts": """
-                function foo() {
-                    return 3;
-                }
-            """})
-            bar = fixture.commit(tree, [foo], "bar")
+            tree = fixture.tree({"a.py": "right\n"})
+            right = fixture.commit(tree, [init], "right", ref=None)
 
-            tree = fixture.tree({"a.ts": """
-                function foo() {
-                    return 4;
-                }
-            """})
-            after = fixture.commit(tree, [bar], "after")
+            tree = fixture.tree({
+                "a.py": "right\n",
+                "b.py": "left\n",
+            })
+            merge = fixture.commit(tree, [left, right], "merge")
+
+            tree = fixture.tree({
+                "a.py": "after\n",
+                "b.py": "left\n",
+            })
+            after = fixture.commit(tree, [merge], "after")
 
             repository = VersionControl(fixture.repository)
-            commits = KnowledgeCommitGit(repository, cap=200).build(base, after)
-            shas = {c.sha for c in commits}
+            commits = KnowledgeCommitGit(repository, cap=200).build(merge, after)
 
-            self.assertIn(foo, shas)
-            self.assertIn(bar, shas)
-            self.assertIn("a.ts", self._commit(commits, foo).files)
-            self.assertIn("a.ts", self._commit(commits, bar).files)
+            self.assertNotIn(merge, {commit.sha for commit in commits})
+            self.assertIn(right, {commit.sha for commit in commits})
+            self.assertIn("a.py", self._commit(commits, right).files)
 
     def test_build_score(self) -> None:
         with HistoryFixture() as fixture:
