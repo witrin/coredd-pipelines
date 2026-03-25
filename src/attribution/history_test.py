@@ -15,13 +15,13 @@ from benchmark.attribution.domain import Change, Commit, FileOperation, Operatio
 from benchmark.attribution.history import (
     PlatformCache,
     VersionControl,
+    VersionControlPathWalker,
     VersionControlSnapshot,
-    VersionHistoryPathWalker,
 )
 from benchmark.attribution.history_fixture import HistoryFixture
 
 
-class TestVersionHistoryPathWalkerSubmodule(unittest.TestCase):
+class TestVersionControlPathWalkerSubmodule(unittest.TestCase):
     def setUp(self) -> None:
         self._fixture = HistoryFixture()
         self._fixture.__enter__()
@@ -48,7 +48,7 @@ class TestVersionHistoryPathWalkerSubmodule(unittest.TestCase):
         root.insert("baz.py", baz, pygit2.GIT_FILEMODE_BLOB)
         child = self._fixture.commit(root.write(), [parent], "bar")
 
-        walker = VersionHistoryPathWalker(repository, child, "baz.py", 10)
+        walker = VersionControlPathWalker(repository, child, "baz.py", 10)
         result = list(walker.entries())
 
         self.assertEqual(len(result), 1)
@@ -733,7 +733,7 @@ class TestPlatformCache(unittest.TestCase):
             cache.load(999)
 
 
-class TestVersionHistoryPathWalker(unittest.TestCase):
+class TestVersionControlPathWalker(unittest.TestCase):
     def _walker(
         self,
         fixture: HistoryFixture,
@@ -741,7 +741,7 @@ class TestVersionHistoryPathWalker(unittest.TestCase):
         path: str,
         depth: int = 100,
     ):
-        return VersionHistoryPathWalker(
+        return VersionControlPathWalker(
             repository=fixture.repository,
             commit=commit,
             path=path,

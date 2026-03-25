@@ -11,7 +11,7 @@ import pygit2
 
 from benchmark.attribution.diff.entity import EntityPath
 from benchmark.attribution.domain import FileOperation, OperationType
-from benchmark.attribution.history import VersionControl, VersionHistoryPathWalker
+from benchmark.attribution.history import VersionControl, VersionControlPathWalker
 
 
 @dataclass(frozen=True)
@@ -310,7 +310,7 @@ class KnowledgeCommitGit:
         for sha, paths in seeds.items():
             for name in sorted(f for f in paths if f):
                 try:
-                    walker = VersionHistoryPathWalker(
+                    walker = VersionControlPathWalker(
                         self._repository._repository,
                         sha,
                         name,

@@ -735,7 +735,7 @@ class TestKnowledgeCommitGit(unittest.TestCase):
 
             repository = VersionControl(fixture.repository)
             with patch(
-                "benchmark.attribution.knowledge.VersionHistoryPathWalker",
+                "benchmark.attribution.knowledge.VersionControlPathWalker",
                 side_effect=FileNotFoundError("mocked"),
             ):
                 commits = KnowledgeCommitGit(repository, cap=200).build(base, after)

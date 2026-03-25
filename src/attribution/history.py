@@ -33,12 +33,12 @@ class FileChange:
     type: str
 
 
-class VersionHistoryPathIterator(Iterator[pygit2.Commit]):
-    def __init__(self, walker: VersionHistoryPathWalker) -> None:
+class VersionControlPathIterator(Iterator[pygit2.Commit]):
+    def __init__(self, walker: VersionControlPathWalker) -> None:
         self._walker = walker
         self._entries = iter(walker.entries())
 
-    def __iter__(self) -> VersionHistoryPathIterator:
+    def __iter__(self) -> VersionControlPathIterator:
         return self
 
     def __next__(self) -> pygit2.Commit:
@@ -49,7 +49,7 @@ class VersionHistoryPathIterator(Iterator[pygit2.Commit]):
         return node
 
 
-class VersionHistoryPathWalker:
+class VersionControlPathWalker:
     """Walks file history for a single path, reproducing git log --follow semantics via pygit2.
 
     Git's --follow disables history simplification (prune = 0), so every commit
@@ -111,11 +111,11 @@ class VersionHistoryPathWalker:
     def repository(self) -> pygit2.Repository:
         return self._repository
 
-    def __iter__(self) -> VersionHistoryPathIterator:
-        return VersionHistoryPathIterator(self)
+    def __iter__(self) -> VersionControlPathIterator:
+        return VersionControlPathIterator(self)
 
-    def commits(self) -> VersionHistoryPathIterator:
-        return VersionHistoryPathIterator(self)
+    def commits(self) -> VersionControlPathIterator:
+        return VersionControlPathIterator(self)
 
     def entries(self) -> Iterator[FileChange]:
         current = self._state.path
