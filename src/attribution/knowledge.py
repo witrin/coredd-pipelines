@@ -342,12 +342,14 @@ class KnowledgeCommitGit:
 
         for patch in diff:
             path = patch.delta.old_file.path
+            if path is None:
+                path = patch.delta.new_file.path
             if not path:
                 continue
+            files.add(path)
 
             changes = self._changes(patch)
             if changes:
-                files.add(path)
                 for sha in self._blame(path, base, changes):
                     seeds.setdefault(sha, set()).add(path)
                 continue
@@ -359,7 +361,6 @@ class KnowledgeCommitGit:
                 values = self._blame(path, base, contexts)
             except KeyError:
                 continue
-            files.add(path)
             for sha in values:
                 seeds.setdefault(sha, set()).add(path)
 

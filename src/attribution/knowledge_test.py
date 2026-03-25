@@ -263,6 +263,39 @@ class TestKnowledgeGraphBuilder(unittest.TestCase):
                 ],
             )
 
+    def test_build_graph_add_only_seed(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({})
+            base = fixture.commit(tree, [], "base")
+
+            tree = fixture.tree({"a.py": """
+                def foo():
+                    return 1
+            """})
+            after = fixture.commit(tree, [base], "after")
+
+            store = KnowledgeGraphBuilder(
+                repository=VersionControl(fixture.repository)
+            ).build(base, after)
+
+            self.assertIn(f"commit:{after}", store.graph.nodes)
+            self.assertIn("file:a.py", store.graph.nodes)
+            self.assertIn(
+                (f"commit:{after}", "file:a.py", "MODIFIES"),
+                [
+                    (source, target, data["edge"])
+                    for source, target, data in store.graph.edges(data=True)
+                ],
+            )
+            self.assertTrue(
+                any(
+                    source == f"commit:{after}"
+                    and target.startswith("entity:a.py:")
+                    and data["edge"] == "ADD"
+                    for source, target, data in store.graph.edges(data=True)
+                )
+            )
+
     def test_build_skip_java(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"A.java": """
@@ -778,6 +811,26 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             self.assertEqual(blame_bar.score, 1.0)
             self.assertIn("a.py", blame_foo.files)
             self.assertIn("a.py", blame_bar.files)
+
+    def test_build_add_only_seed(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({})
+            base = fixture.commit(tree, [], "base")
+
+            tree = fixture.tree({"a.py": """
+                def foo():
+                    return 1
+            """})
+            after = fixture.commit(tree, [base], "after")
+
+            repository = VersionControl(fixture.repository)
+            commits = KnowledgeCommitGit(repository, cap=200).build(base, after)
+
+            self.assertEqual([commit.sha for commit in commits], [after])
+            correction = self._commit(commits, after)
+            self.assertEqual(correction.category, "correction")
+            self.assertEqual(correction.kind, "correction")
+            self.assertEqual(correction.files, frozenset({"a.py"}))
 
     def test_build_merge_hides_merge_commit(self) -> None:
         with HistoryFixture() as fixture:
