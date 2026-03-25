@@ -21,6 +21,41 @@ from benchmark.attribution.history import (
 from benchmark.attribution.history_fixture import HistoryFixture
 
 
+class TestVersionHistoryPathWalkerSubmodule(unittest.TestCase):
+    def setUp(self) -> None:
+        self._fixture = HistoryFixture()
+        self._fixture.__enter__()
+
+    def tearDown(self) -> None:
+        self._fixture.__exit__(None, None, None)
+
+    def _tree(self) -> pygit2.Oid:
+        repository = self._fixture.repository
+        submodule = repository.TreeBuilder()
+        submodule.insert("bar", pygit2.Oid(hex="1" * 40), 0o160000)
+        nested = submodule.write()
+
+        root = repository.TreeBuilder()
+        root.insert("foo", nested, pygit2.GIT_FILEMODE_TREE)
+        return root.write()
+
+    def test_entries_ignore_missing_gitlink_object(self) -> None:
+        parent = self._fixture.commit(self._tree(), [], "foo")
+
+        repository = self._fixture.repository
+        root = repository.TreeBuilder(self._tree())
+        baz = repository.create_blob(b"baz\n")
+        root.insert("baz.py", baz, pygit2.GIT_FILEMODE_BLOB)
+        child = self._fixture.commit(root.write(), [parent], "bar")
+
+        walker = VersionHistoryPathWalker(repository, child, "baz.py", 10)
+        result = list(walker.entries())
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].type, "added")
+        self.assertEqual(result[0].path, "baz.py")
+
+
 class TestVersionControlParents(unittest.TestCase):
     """Tests parents() across merge, squash and rebase strategies.
 
@@ -156,6 +191,7 @@ class TestVersionControlBlame(unittest.TestCase):
     def test_blame_range(self) -> None:
         result = self._candidate.blame("foo.txt", self.sha_x2, [(9, 9)])
         self.assertEqual(result, [(None, None)])
+
 
 class TestVersionControlMaterialize(unittest.TestCase):
     def setUp(self) -> None:

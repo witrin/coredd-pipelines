@@ -296,7 +296,10 @@ class VersionHistoryPathWalker:
                 return None
             if index == len(parts) - 1:
                 return entry
-            current = repository[entry.id]
+            try:
+                current = repository[entry.id]
+            except KeyError:
+                return None
 
         return None
 
@@ -307,7 +310,11 @@ class VersionHistoryPathWalker:
     ) -> Iterator[tuple[str, pygit2.TreeEntry]]:
         for entry in tree:
             path = entry.name if not prefix else f"{prefix}/{entry.name}"
-            node = self._repository[entry.id]
+            try:
+                node = self._repository[entry.id]
+            except KeyError:
+                yield path, entry
+                continue
             if isinstance(node, pygit2.Tree):
                 yield from self._entries(node, path)
                 continue
