@@ -311,7 +311,10 @@ class KnowledgeCommitGit:
             for name in sorted(f for f in paths if f):
                 try:
                     walker = VersionHistoryPathWalker(
-                        self._repository._repository, sha, name, self._depth,
+                        self._repository._repository,
+                        sha,
+                        name,
+                        self._depth,
                     )
                 except (TypeError, FileNotFoundError):
                     continue
@@ -438,16 +441,31 @@ class KnowledgeCommitGit:
         commits: set[str],
     ) -> tuple[dict[str, tuple[str, ...]], list[str]]:
         repository = self._repository._repository
-        identifiers = {sha: repository.revparse_single(sha).id for sha in commits}
-
         edges: set[tuple[str, str]] = set()
-        members = list(commits)
-        for i, a in enumerate(members):
-            for b in members[i + 1 :]:
-                if repository.descendant_of(identifiers[a], identifiers[b]):
-                    edges.add((b, a))
-                elif repository.descendant_of(identifiers[b], identifiers[a]):
-                    edges.add((a, b))
+
+        for sha in commits:
+            node = repository.revparse_single(sha)
+            stack = [str(parent.id) for parent in node.parents]
+            visited: set[str] = set()
+            found: set[str] = set()
+
+            while stack:
+                current = stack.pop()
+
+                if current in visited:
+                    continue
+                visited.add(current)
+
+                if current in commits:
+                    found.add(current)
+                    continue
+
+                ancestor = repository.revparse_single(current)
+                for parent in ancestor.parents:
+                    stack.append(str(parent.id))
+
+            for parent in found:
+                edges.add((parent, sha))
 
         dag = nx.DiGraph()
         dag.add_nodes_from(commits)
