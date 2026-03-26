@@ -554,7 +554,7 @@ def ingest_sources_raw(
 
 
 @asset(
-    metadata={"version": "1.1.0"},
+    metadata={"version": "1.1.1"},
     group_name="ingest",
     kinds={"github"},
     pool="github",
@@ -589,7 +589,7 @@ def ingest_validation_set(
                 if isinstance(language, str) and language != ""
             }
         )
-        if not set(languages).intersection({"js", "py"}):
+        if not languages or set(languages) - {"js", "py"}:
             continue
 
         defects = [
