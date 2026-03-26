@@ -563,7 +563,7 @@ def ingest_validation_set(
     context: dg.AssetExecutionContext,
     github: GithubResource,
 ) -> pa.Table:
-    """Ingest the Rosa validation dataset."""
+    """Ingest the Rosa et al. validation dataset."""
     client = github.client()
     repository = client.get_repo("grosa1/icse2021-szz-replication-package")
     branch = repository.default_branch
@@ -701,8 +701,7 @@ def ingest_validation_context(
     control = VersionControl(pygit2.Repository(str(work / "repository.git")))
     root = work / repository.lower()
     meta = root / "meta.json"
-    paths: list[list[str]] = []
-    seen: set[tuple[str, ...]] = set()
+    fragments: list[dict[str, list[str]]] = []
     values: list[dict[str, object]] = []
 
     for case in cases:
@@ -728,12 +727,8 @@ def ingest_validation_context(
                 sort_keys=True,
             )
 
-        for chain in store.chains():
-            key = tuple(chain)
-            if key in seen:
-                continue
-            seen.add(key)
-            paths.append(chain)
+        fragment = store.fragment()
+        fragments.append(fragment)
 
         values.append(
             {
@@ -754,7 +749,7 @@ def ingest_validation_context(
             sort_keys=True,
         )
 
-    control.dump(paths, root / "snapshot")
+    control.dump(fragments, root / "snapshot")
     output = work / f"{repository.replace('/', '-').lower()}.tar.gz"
 
     with tarfile.open(output, "w:gz") as tar:

@@ -431,21 +431,33 @@ class TestVersionControlSnapshot(unittest.TestCase):
         self._fixture.__exit__(None, None, None)
         self._outdir.cleanup()
 
-    def _snapshot(self, chains: list[list[str]]) -> VersionControlSnapshot:
+    def _fragment(self, chains: list[list[str]]) -> dict[str, list[str]]:
+        result: dict[str, list[str]] = {}
+
+        for chain in chains:
+            for index, sha in enumerate(chain):
+                parents = [] if index == 0 else [chain[index - 1]]
+                if sha in result and result[sha] != parents:
+                    raise ValueError(f"Conflicting test fragment for {sha}")
+                result[sha] = parents
+
+        return result
+
+    def _snapshot(self, fragments: list[dict[str, list[str]]]) -> VersionControlSnapshot:
         target = tempfile.mkdtemp(dir=self._outdir.name)
-        self._candidate.dump(chains, target)
+        self._candidate.dump(fragments, target)
         snapshot = VersionControlSnapshot.load(target)
         self.addCleanup(snapshot.close)
         return snapshot
 
-    def _source(self, chains: list[list[str]]) -> Path:
+    def _source(self, fragments: list[dict[str, list[str]]]) -> Path:
         target = Path(tempfile.mkdtemp(dir=self._outdir.name))
-        self._candidate.dump(chains, target)
+        self._candidate.dump(fragments, target)
         return target
 
     def test_dump(self) -> None:
         target = tempfile.mkdtemp(dir=self._outdir.name)
-        self._candidate.dump([[self.sha_a, self.sha_b]], target)
+        self._candidate.dump([self._fragment([[self.sha_a, self.sha_b]])], target)
 
         with open(f"{target}/meta.json", "r", encoding="utf-8") as file:
             meta = json.load(file)
@@ -465,14 +477,14 @@ class TestVersionControlSnapshot(unittest.TestCase):
             self.assertEqual(file.read(), b"def foo():\n    return 2\n")
 
     def test_load_parents(self) -> None:
-        snapshot = self._snapshot([[self.sha_a, self.sha_b, self.sha_c]])
+        snapshot = self._snapshot([self._fragment([[self.sha_a, self.sha_b, self.sha_c]])])
 
         self.assertEqual(snapshot.parents(self.sha_a), [])
         self.assertEqual(snapshot.parents(self.sha_b), [self.sha_a])
         self.assertEqual(snapshot.parents(self.sha_c), [self.sha_b])
 
     def test_diff(self) -> None:
-        snapshot = self._snapshot([[self.sha_a, self.sha_b]])
+        snapshot = self._snapshot([self._fragment([[self.sha_a, self.sha_b]])])
 
         self.assertEqual(
             snapshot.diff(self.sha_a, self.sha_b, context=3).patch,
@@ -480,7 +492,9 @@ class TestVersionControlSnapshot(unittest.TestCase):
         )
 
     def test_manifest(self) -> None:
-        snapshot = self._snapshot([[self.sha_b, self.sha_c, self.sha_d, self.sha_e]])
+        snapshot = self._snapshot(
+            [self._fragment([[self.sha_b, self.sha_c, self.sha_d, self.sha_e]])]
+        )
 
         self.assertEqual(
             snapshot.manifest(self.sha_b, self.sha_c),
@@ -496,7 +510,7 @@ class TestVersionControlSnapshot(unittest.TestCase):
         )
 
     def test_blob(self) -> None:
-        snapshot = self._snapshot([[self.sha_c, self.sha_d]])
+        snapshot = self._snapshot([self._fragment([[self.sha_c, self.sha_d]])])
 
         self.assertEqual(
             snapshot.blob(self.sha_d, "renamed.py"),
@@ -506,8 +520,8 @@ class TestVersionControlSnapshot(unittest.TestCase):
     def test_load_reuse(self) -> None:
         snapshot = self._snapshot(
             [
-                [self.sha_a, self.sha_b, self.sha_c],
-                [self.sha_a, self.sha_b],
+                self._fragment([[self.sha_a, self.sha_b, self.sha_c]]),
+                self._fragment([[self.sha_a, self.sha_b]]),
             ]
         )
 
@@ -519,7 +533,7 @@ class TestVersionControlSnapshot(unittest.TestCase):
         )
 
     def test_load_cache_builds_repo(self) -> None:
-        source = self._source([[self.sha_a, self.sha_b]])
+        source = self._source([self._fragment([[self.sha_a, self.sha_b]])])
         cache = Path(self._outdir.name) / "cache-build"
         snapshot = VersionControlSnapshot.load(source, cache=cache)
         self.addCleanup(snapshot.close)
@@ -533,7 +547,7 @@ class TestVersionControlSnapshot(unittest.TestCase):
         )
 
     def test_load_cache_reuses_repo_without_source(self) -> None:
-        source = self._source([[self.sha_a, self.sha_b]])
+        source = self._source([self._fragment([[self.sha_a, self.sha_b]])])
         cache = Path(self._outdir.name) / "cache-reuse"
 
         first = VersionControlSnapshot.load(source, cache=cache)
@@ -550,7 +564,7 @@ class TestVersionControlSnapshot(unittest.TestCase):
         )
 
     def test_close_keeps_explicit_cache(self) -> None:
-        source = self._source([[self.sha_a, self.sha_b]])
+        source = self._source([self._fragment([[self.sha_a, self.sha_b]])])
         cache = Path(self._outdir.name) / "cache-close"
         snapshot = VersionControlSnapshot.load(source, cache=cache)
 
@@ -560,7 +574,7 @@ class TestVersionControlSnapshot(unittest.TestCase):
         self.assertTrue((cache / "HEAD").is_file())
 
     def test_load_cache_rewrites_invalid_cache(self) -> None:
-        source = self._source([[self.sha_a, self.sha_b]])
+        source = self._source([self._fragment([[self.sha_a, self.sha_b]])])
         cache = Path(self._outdir.name) / "cache-invalid"
         cache.mkdir()
         pygit2.init_repository(str(cache), bare=True)
@@ -572,7 +586,7 @@ class TestVersionControlSnapshot(unittest.TestCase):
         self.assertEqual(snapshot.parents(self.sha_b), [self.sha_a])
 
     def test_expand(self) -> None:
-        snapshot = self._snapshot([[self.sha_a, self.sha_b]])
+        snapshot = self._snapshot([self._fragment([[self.sha_a, self.sha_b]])])
 
         patchset = PatchFactory(snapshot).expand(
             self.sha_a,
@@ -594,7 +608,10 @@ class TestVersionControlSnapshot(unittest.TestCase):
 
     def test_dump_deduplicates_blobs(self) -> None:
         target = tempfile.mkdtemp(dir=self._outdir.name)
-        self._candidate.dump([[self.sha_b, self.sha_c, self.sha_d]], target)
+        self._candidate.dump(
+            [self._fragment([[self.sha_b, self.sha_c, self.sha_d]])],
+            target,
+        )
 
         self.assertEqual(len(list(Path(target, "blobs").iterdir())), 2)
 
@@ -602,13 +619,13 @@ class TestVersionControlSnapshot(unittest.TestCase):
         source = self._fixture.repository.get(self.sha_b).peel(pygit2.Commit)
         clone = self._fixture.commit(source.tree.id, [self.sha_b], "clone", ref=None)
         target = tempfile.mkdtemp(dir=self._outdir.name)
-        self._candidate.dump([[self.sha_b, clone]], target)
+        self._candidate.dump([self._fragment([[self.sha_b, clone]])], target)
 
         self.assertEqual(len(list(Path(target, "trees").iterdir())), 1)
 
     def test_load_missing_blob(self) -> None:
         target = tempfile.mkdtemp(dir=self._outdir.name)
-        self._candidate.dump([[self.sha_a, self.sha_b]], target)
+        self._candidate.dump([self._fragment([[self.sha_a, self.sha_b]])], target)
 
         with open(f"{target}/meta.json", "r", encoding="utf-8") as file:
             meta = json.load(file)
@@ -623,6 +640,65 @@ class TestVersionControlSnapshot(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             VersionControlSnapshot.load(target)
+
+    def test_dump_merge_parents(self) -> None:
+        left = self._fixture.commit(
+            self._fixture.tree({"merge.py": "left\n"}),
+            [self.sha_b],
+            "left",
+            ref=None,
+        )
+        right = self._fixture.commit(
+            self._fixture.tree({"merge.py": "right\n"}),
+            [self.sha_b],
+            "right",
+            ref=None,
+        )
+        merge = self._fixture.commit(
+            self._fixture.tree({"merge.py": "merge\n"}),
+            [left, right],
+            "merge",
+            ref=None,
+        )
+        snapshot = self._snapshot([{
+            self.sha_a: [],
+            self.sha_b: [self.sha_a],
+            left: [self.sha_b],
+            right: [self.sha_b],
+            merge: [left, right],
+        }])
+
+        self.assertEqual(snapshot.parents(merge), [left, right])
+
+    def test_dump_rejects_inconsistent_fragment_parents(self) -> None:
+        target = tempfile.mkdtemp(dir=self._outdir.name)
+
+        with self.assertRaises(ValueError):
+            self._candidate.dump(
+                [
+                    {self.sha_b: [self.sha_a], self.sha_a: []},
+                    {self.sha_b: [self.sha_c], self.sha_c: []},
+                ],
+                target,
+            )
+
+    def test_dump_prefers_concrete_parents_over_stub(self) -> None:
+        target = tempfile.mkdtemp(dir=self._outdir.name)
+        source = self._fixture.repository.get(self.sha_c).peel(pygit2.Commit)
+        parent = self._fixture.commit(source.tree.id, [self.sha_c], "parent", ref=None)
+        child = self._fixture.commit(source.tree.id, [parent], "child", ref=None)
+
+        self._candidate.dump(
+            [
+                {child: [parent], parent: []},
+                {parent: [self.sha_c], self.sha_c: [self.sha_b]},
+            ],
+            target,
+        )
+
+        snapshot = VersionControlSnapshot.load(target)
+        self.addCleanup(snapshot.close)
+        self.assertEqual(snapshot.parents(parent), [self.sha_c])
 
 
 class TestPlatformCache(unittest.TestCase):

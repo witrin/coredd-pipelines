@@ -392,7 +392,13 @@ class VersionControl:
         c = obj.peel(pygit2.Commit)
         return [str(pid) for pid in c.parent_ids]
 
-    def dump(self, paths: list[list[str]], target: str | Path) -> None:
+    def dump(self, fragments: list[dict[str, list[str]]], target: str | Path) -> None:
+        """Serialize explicit commit-DAG fragments without reconstructing history.
+
+        The exported snapshot replays exactly the supplied commit-to-parent
+        mapping. Parent lists are copied verbatim from *fragments* and are only
+        validated structurally against the exported commit set and repository.
+        """
         target = Path(target)
         trees = target / "trees"
         blobs = target / "blobs"
@@ -400,17 +406,33 @@ class VersionControl:
         trees.mkdir(parents=True, exist_ok=True)
         blobs.mkdir(parents=True, exist_ok=True)
 
-        shas = self._commits(paths)
-        parents: dict[str, list[str]] = {sha: [] for sha in shas}
+        shas = self._commits(fragments)
+        incoming: dict[str, list[list[str]]] = {}
 
-        for path in paths:
-            for index, sha in enumerate(path):
-                lineage = [] if index == 0 else [path[index - 1]]
+        for fragment in fragments:
+            for sha, value in fragment.items():
+                incoming.setdefault(sha, []).append(list(value))
 
-                if parents[sha] and parents[sha] != lineage:
-                    raise ValueError(f"Commit {sha} has inconsistent parents")
+        parents: dict[str, list[str]] = {}
 
-                parents[sha] = lineage
+        for sha, candidates in incoming.items():
+            nonempty: list[list[str]] = []
+
+            for value in candidates:
+                if value and value not in nonempty:
+                    nonempty.append(value)
+
+            if len(nonempty) > 1:
+                raise ValueError(f"Commit {sha} has inconsistent parents")
+
+            parents[sha] = nonempty[0] if nonempty else []
+
+        for sha, lineage in parents.items():
+            for parent in lineage:
+                if parent not in shas:
+                    raise ValueError(
+                        f"Commit {sha} references parent {parent} outside fragments"
+                    )
 
         commits: dict[str, dict[str, object]] = {}
 
@@ -418,6 +440,10 @@ class VersionControl:
             obj = self._repository.get(sha)
             if obj is None:
                 raise ValueError(f"Commit {sha} not found")
+
+            for parent in parents.get(sha, []):
+                if self._repository.get(parent) is None:
+                    raise ValueError(f"Commit {sha} references missing parent {parent}")
 
             commit = obj.peel(pygit2.Commit)
             message = commit.message.strip()
@@ -434,7 +460,7 @@ class VersionControl:
                     tz=timezone.utc,
                 ).isoformat(),
                 "author": commit.author.name,
-                "parents": parents[sha],
+                "parents": parents.get(sha, []),
             }
 
         with open(target / "meta.json", "w", encoding="utf-8") as file:
@@ -446,11 +472,11 @@ class VersionControl:
                 sort_keys=True,
             )
 
-    def _commits(self, paths: list[list[str]]) -> set[str]:
+    def _commits(self, fragments: list[dict[str, list[str]]]) -> set[str]:
         result: set[str] = set()
 
-        for path in paths:
-            result.update(path)
+        for fragment in fragments:
+            result.update(fragment)
 
         return result
 
@@ -827,7 +853,12 @@ class VersionControl:
 
 
 class VersionControlSnapshot:
-    """Snapshot-backed git operations replayed into a temporary pygit2 repository."""
+    """Snapshot-backed git operations replayed into a temporary pygit2 repository.
+
+    A snapshot is a replayed commit-DAG fragment rather than a full clone of the
+    source repository. Every operation therefore reflects only the exported
+    fragment and its parent relationships.
+    """
 
     def __init__(
         self,

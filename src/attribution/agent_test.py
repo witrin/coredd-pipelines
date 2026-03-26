@@ -299,7 +299,7 @@ class TestKnowledgeGraphTool(unittest.TestCase):
             store = KnowledgeGraphBuilder(repository=repository).build(base, after)
             target = tempfile.TemporaryDirectory()
             self.addCleanup(target.cleanup)
-            repository.dump([[base, after]], target.name)
+            repository.dump([{base: [], after: [base]}], target.name)
             snapshot = VersionControlSnapshot.load(target.name)
             self.addCleanup(snapshot.close)
 

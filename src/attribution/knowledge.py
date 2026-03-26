@@ -22,6 +22,7 @@ class KnowledgeCommit:
     timestamp: datetime
     message: str
     parents: tuple[str, ...]
+    predecessors: tuple[str, ...]
     files: frozenset[str]
     category: str | None
 
@@ -29,7 +30,6 @@ class KnowledgeCommit:
 @dataclass(frozen=True)
 class KnowledgeFile:
     sha: str
-    parent: str | None
     base: str | None
     after: str | None
     path: str
@@ -200,49 +200,25 @@ class KnowledgeGraphStore:
             result.append(source)
         return result
 
-    def chains(self) -> list[list[str]]:
-        commits = self.nodes("commit")
-        next = {
-            self.payload(node)["sha"]: self._commits(
-                [
-                    self.payload(target)["sha"]
-                    for target in self.targets(node, "PRECEDES")
-                ]
-            )
-            for node in commits
-        }
-        previous = {
-            self.payload(node)["sha"]: self._commits(
-                [
-                    self.payload(source)["sha"]
-                    for source in self.sources(node, "PRECEDES")
-                ]
-            )
-            for node in commits
-        }
-        chains: list[list[str]] = []
-        seen: set[str] = set()
-        starts = self._commits([sha for sha in next if not previous[sha]])
+    def fragment(self) -> dict[str, list[str]]:
+        """Project the replayable snapshot fragment from commit payload parents.
 
-        for start in starts + self._commits([sha for sha in next if sha not in seen]):
-            if start in seen:
-                continue
-            chain = [start]
-            seen.add(start)
-            current = start
+        Commit payloads retain the full Git parent list. Referenced parents are
+        preserved in the fragment; missing parent nodes are added as empty
+        stubs while PRECEDES stays untouched.
+        """
+        result: dict[str, list[str]] = {}
 
-            while next[current]:
-                current = next[current][0]
+        for commit in self.nodes("commit"):
+            payload = self.payload(commit)
+            sha = str(payload["sha"])
+            result[sha] = list(cast(tuple[str, ...], payload["parents"]))
 
-                if current in seen:
-                    break
+        for parents in list(result.values()):
+            for parent in parents:
+                result.setdefault(parent, [])
 
-                chain.append(current)
-                seen.add(current)
-
-            chains.append(chain)
-
-        return chains
+        return result
 
     def resolve(self, node: str) -> str:
         if self._graph.has_node(node):
@@ -492,6 +468,7 @@ class KnowledgeCommitGit:
         result: list[KnowledgeCommit] = []
         for sha in order:
             meta = self._commit(sha)
+            parents = tuple(self._repository.parents(sha))
             category: str | None = (
                 "correction" if sha == after else "blame" if sha in blame else None
             )
@@ -502,7 +479,8 @@ class KnowledgeCommitGit:
                     score=scores[sha],
                     timestamp=cast(datetime, meta["timestamp"]),
                     message=cast(str, meta["message"]),
-                    parents=predecessors.get(sha, ()),
+                    parents=parents,
+                    predecessors=predecessors.get(sha, ()),
                     files=frozenset(trace.get(sha, set())),
                     category=category,
                 )
@@ -577,7 +555,6 @@ class KnowledgeFileGit:
                     result.append(
                         KnowledgeFile(
                             sha=commit.sha,
-                            parent=None,
                             base=path,
                             after=path,
                             path=path,
@@ -604,7 +581,6 @@ class KnowledgeFileGit:
                 result.append(
                     KnowledgeFile(
                         sha=commit.sha,
-                        parent=parent,
                         base=old,
                         after=new,
                         path=path,
@@ -620,7 +596,6 @@ class KnowledgeFileGit:
                 result.append(
                     KnowledgeFile(
                         sha=commit.sha,
-                        parent=parent,
                         base=path,
                         after=path,
                         path=path,
@@ -682,7 +657,9 @@ class KnowledgeEntityGumtree:
         return result
 
     def _build(self, file: KnowledgeFile) -> list[KnowledgeEntity]:
-        if file.parent is None or file.language is None:
+        parent = self._parent(file.sha)
+
+        if parent is None or file.language is None:
             return []
 
         result: list[KnowledgeEntity] = []
@@ -692,7 +669,7 @@ class KnowledgeEntityGumtree:
                 after=file.after,
                 operation=file.operation,
             ),
-            self._blob(file.parent, file.base),
+            self._blob(parent, file.base),
             self._blob(file.sha, file.after),
             language=file.language,
         )
@@ -718,6 +695,10 @@ class KnowledgeEntityGumtree:
             )
         )
         return result
+
+    def _parent(self, sha: str) -> str | None:
+        parents = self._repository.parents(sha)
+        return parents[0] if parents else None
 
     def _blob(self, commit: str, path: str | None) -> bytes | None:
         if not path:
@@ -783,7 +764,9 @@ class KnowledgeEntityGit:
             if file.language is None:
                 continue
 
-            if file.parent is None or file.operation == OperationType.ADD:
+            parent = self._parent(file.sha)
+
+            if parent is None or file.operation == OperationType.ADD:
                 self._collect(self._program(file, OperationType.ADD), seen, result)
                 continue
 
@@ -791,7 +774,7 @@ class KnowledgeEntityGit:
                 self._collect(self._program(file, OperationType.DELETE), seen, result)
                 continue
 
-            patch = self._patch(file)
+            patch = self._patch(parent, file)
             if patch is None:
                 continue
 
@@ -832,8 +815,8 @@ class KnowledgeEntityGit:
             source="git",
         )
 
-    def _patch(self, file: KnowledgeFile) -> pygit2.Patch | None:
-        diff = self._repository.diff(cast(str, file.parent), file.sha)
+    def _patch(self, parent: str, file: KnowledgeFile) -> pygit2.Patch | None:
+        diff = self._repository.diff(parent, file.sha)
 
         for patch in diff:
             old = patch.delta.old_file.path
@@ -844,6 +827,10 @@ class KnowledgeEntityGit:
                 return patch
 
         return None
+
+    def _parent(self, sha: str) -> str | None:
+        parents = self._repository.parents(sha)
+        return parents[0] if parents else None
 
     def _entity(self, file: KnowledgeFile, header: str) -> KnowledgeEntity | None:
         value = self._header(file.language, header)
@@ -939,6 +926,7 @@ class KnowledgeGraphMaterializer:
                     "score": commit.score,
                     "timestamp": commit.timestamp,
                     "message": commit.message,
+                    "parents": commit.parents,
                     "files": tuple(sorted(files.get(commit.sha, []))),
                 },
             )
@@ -982,7 +970,7 @@ class KnowledgeGraphMaterializer:
                 store.link("BLAME", f"commit:{state.after}", f"commit:{commit.sha}")
 
         for commit in state.commits:
-            for predecessor in commit.parents:
+            for predecessor in commit.predecessors:
                 store.link("PRECEDES", f"commit:{predecessor}", f"commit:{commit.sha}")
 
         return store
@@ -1034,6 +1022,7 @@ class KnowledgeAuditBuilder:
             raise ValueError("depth must be non-negative")
         if cap < 1:
             raise ValueError("cap must be positive")
+        self._repository = repository
         self._commits = KnowledgeCommitGit(repository, cap, depth)
         self._files = KnowledgeFileGit(repository)
         self._entities = KnowledgeEntityGumtree(repository)
@@ -1080,7 +1069,9 @@ class KnowledgeAuditBuilder:
         count = 0
 
         for file in files:
-            if file.parent is None or file.language is None:
+            parent = self._parent(file.sha)
+
+            if parent is None or file.language is None:
                 continue
 
             count += 1
@@ -1092,7 +1083,7 @@ class KnowledgeAuditBuilder:
                         kind="entity",
                         error=error,
                         sha=file.sha,
-                        parent=file.parent,
+                        parent=parent,
                         path=file.path,
                         language=file.language,
                     )
@@ -1106,6 +1097,10 @@ class KnowledgeAuditBuilder:
             entities=entities,
             failures=failures,
         )
+
+    def _parent(self, sha: str) -> str | None:
+        parents = self._repository.parents(sha)
+        return parents[0] if parents else None
 
     def _failure(
         self,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -438,7 +439,10 @@ class TestKnowledgeEntityGit(unittest.TestCase):
         )
 
     def _repository(self, patches):
-        return SimpleNamespace(diff=lambda base, after: patches)
+        return SimpleNamespace(
+            diff=lambda base, after: patches,
+            parents=lambda sha: ["base"],
+        )
 
     def _file(
         self,
@@ -450,7 +454,6 @@ class TestKnowledgeEntityGit(unittest.TestCase):
     ) -> KnowledgeFile:
         return KnowledgeFile(
             sha="after",
-            parent="base",
             base=path if base is None else base,
             after=path if after is None else after,
             path=path,
@@ -553,7 +556,6 @@ class TestKnowledgeEntityGit(unittest.TestCase):
     def test_build_add_file(self) -> None:
         file = KnowledgeFile(
             sha="after",
-            parent=None,
             base="a.py",
             after="a.py",
             path="a.py",
@@ -582,7 +584,6 @@ class TestKnowledgeEntityGit(unittest.TestCase):
     def test_build_add_file_diff(self) -> None:
         file = KnowledgeFile(
             sha="after",
-            parent="base",
             base=None,
             after="a.py",
             path="a.py",
@@ -611,7 +612,6 @@ class TestKnowledgeEntityGit(unittest.TestCase):
     def test_build_delete_file(self) -> None:
         file = KnowledgeFile(
             sha="after",
-            parent="base",
             base="a.py",
             after=None,
             path="a.py",
@@ -681,14 +681,16 @@ class TestKnowledgeEntityGumtree(unittest.TestCase):
     def test_build_falls_back_to_program_when_resolve_is_empty(self) -> None:
         file = KnowledgeFile(
             sha="after",
-            parent="base",
             base="a.js",
             after="a.js",
             path="a.js",
             language="javascript",
             operation=OperationType.EDIT,
         )
-        repository = SimpleNamespace(blob=MagicMock(side_effect=FileNotFoundError))
+        repository = SimpleNamespace(
+            blob=MagicMock(side_effect=FileNotFoundError),
+            parents=lambda sha: ["base"],
+        )
 
         with patch(
             "benchmark.attribution.knowledge.EntityPath.resolve",
@@ -997,6 +999,128 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             )
             self.assertIn((f"commit:{after}", f"commit:{foo}"), blame)
 
+    def test_build_payload_parents_follow_git(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "base\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({"a.py": "left\n"})
+            left = fixture.commit(tree, [init], "left")
+
+            tree = fixture.tree({"a.py": "right\n"})
+            right = fixture.commit(tree, [init], "right", ref=None)
+
+            tree = fixture.tree({"a.py": "merge\n"})
+            merge = fixture.commit(tree, [left, right], "merge")
+
+            store = KnowledgeGraphBuilder(
+                repository=VersionControl(fixture.repository)
+            ).build(left, merge)
+
+            self.assertEqual(
+                store.payload(f"commit:{merge}")["parents"],
+                (left, right),
+            )
+
+    def test_fragment(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "base\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({"a.py": "left\n"})
+            left = fixture.commit(tree, [init], "left")
+
+            tree = fixture.tree({"a.py": "right\n"})
+            right = fixture.commit(tree, [init], "right", ref=None)
+
+            tree = fixture.tree({"a.py": "merge\n"})
+            merge = fixture.commit(tree, [left, right], "merge")
+
+            store = KnowledgeGraphStore()
+            store.add(
+                "commit",
+                {
+                    "sha": init,
+                    "type": "candidate",
+                    "score": 0.0,
+                    "timestamp": datetime.fromtimestamp(0),
+                    "message": "init",
+                    "parents": (),
+                    "files": (),
+                },
+            )
+            store.add(
+                "commit",
+                {
+                    "sha": left,
+                    "type": "candidate",
+                    "score": 0.0,
+                    "timestamp": datetime.fromtimestamp(1),
+                    "message": "left",
+                    "parents": (init,),
+                    "files": (),
+                },
+            )
+            store.add(
+                "commit",
+                {
+                    "sha": right,
+                    "type": "candidate",
+                    "score": 0.0,
+                    "timestamp": datetime.fromtimestamp(2),
+                    "message": "right",
+                    "parents": (init,),
+                    "files": (),
+                },
+            )
+            store.add(
+                "commit",
+                {
+                    "sha": merge,
+                    "type": "candidate",
+                    "score": 0.0,
+                    "timestamp": datetime.fromtimestamp(3),
+                    "message": "merge",
+                    "parents": (left, right),
+                    "files": (),
+                },
+            )
+
+            self.assertEqual(
+                store.fragment(),
+                {
+                    init: [],
+                    left: [init],
+                    right: [init],
+                    merge: [left, right],
+                },
+            )
+
+    def test_fragment_adds_missing_parent_stub(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "base\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({"a.py": "child\n"})
+            child = fixture.commit(tree, [init], "child")
+
+            store = KnowledgeGraphStore()
+            store.add(
+                "commit",
+                {
+                    "sha": child,
+                    "type": "candidate",
+                    "score": 0.0,
+                    "timestamp": datetime.fromtimestamp(1),
+                    "message": "child",
+                    "parents": (init,),
+                    "files": (),
+                },
+            )
+
+            self.assertEqual(store.payload(f"commit:{child}")["parents"], (init,))
+            self.assertEqual(store.fragment(), {child: [init], init: []})
+
     def test_build_limit(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"a.py": """
@@ -1070,6 +1194,7 @@ class TestKnowledgeCommitGit(unittest.TestCase):
                     timestamp=builder._commit(after)["timestamp"],
                     message="after",
                     parents=(),
+                    predecessors=(),
                     files=frozenset({"a.py"}),
                     category="correction",
                 ),
@@ -1080,6 +1205,7 @@ class TestKnowledgeCommitGit(unittest.TestCase):
                     timestamp=builder._commit(old)["timestamp"],
                     message="old",
                     parents=(),
+                    predecessors=(),
                     files=frozenset({"a.py"}),
                     category=None,
                 ),
@@ -1090,6 +1216,7 @@ class TestKnowledgeCommitGit(unittest.TestCase):
                     timestamp=builder._commit(new)["timestamp"],
                     message="new",
                     parents=(),
+                    predecessors=(),
                     files=frozenset({"a.py"}),
                     category=None,
                 ),
@@ -1126,6 +1253,7 @@ class TestKnowledgeCommitGit(unittest.TestCase):
                     timestamp=builder._commit(after)["timestamp"],
                     message="after",
                     parents=(),
+                    predecessors=(),
                     files=frozenset({"a.py"}),
                     category="correction",
                 ),
@@ -1136,6 +1264,7 @@ class TestKnowledgeCommitGit(unittest.TestCase):
                     timestamp=timestamp,
                     message="bbb",
                     parents=(),
+                    predecessors=(),
                     files=frozenset({"a.py"}),
                     category=None,
                 ),
@@ -1146,6 +1275,7 @@ class TestKnowledgeCommitGit(unittest.TestCase):
                     timestamp=timestamp,
                     message="aaa",
                     parents=(),
+                    predecessors=(),
                     files=frozenset({"a.py"}),
                     category=None,
                 ),
