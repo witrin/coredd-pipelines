@@ -1,11 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable, Sequence
-
-import pygit2
-from google.cloud import storage
 
 from benchmark.attribution.domain import Change
 from benchmark.attribution.graph import AttributionGraphBuilder, AttributionResult
@@ -34,21 +30,11 @@ class ValidationExecutor:
         self,
         candidate: AttributionGraphBuilder,
         cache: PlatformCache,
-        bucket: str | None = None,
-        key: str | None = None,
-        location: str | None = None,
-        version: str | None = None,
-        client: storage.Client | None = None,
-        filter: Callable[[str, str], str] | None = None,
+        repository: Callable[[ValidationCase], VersionControl],
     ) -> None:
-        self._bucket = bucket
-        self._key = key
-        self._location = location
-        self._version = version
         self._candidate = candidate
         self._cache = cache
-        self._client = client
-        self._filter = filter
+        self._repository = repository
 
     def run(self, cases: Sequence[ValidationCase]) -> list[ValidationRun]:
         result: list[ValidationRun] = []
@@ -79,31 +65,6 @@ class ValidationExecutor:
             )
 
         return result
-
-    def _repository(self, case: ValidationCase) -> VersionControl:
-        if self._client is None:
-            return VersionControl(
-                pygit2.Repository(str(Path(case.repository))),
-                filter=self._filter,
-            )
-        if (
-            self._bucket is None
-            or self._key is None
-            or self._location is None
-            or self._version is None
-        ):
-            raise ValueError(
-                "bucket, key, location, and version are required when client is set."
-            )
-        return VersionControl.create(
-            self._client,
-            self._bucket,
-            self._key,
-            self._location,
-            self._version,
-            "default" if case.partition is None else case.partition,
-            filter=self._filter,
-        )
 
     def _change(
         self,

@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel
 
-from benchmark.attribution.agent import KnowledgeGraphTool
+from benchmark.attribution.agent import KnowledgeGraphTool, KnowledgeGraphToolFactory
 from benchmark.attribution.diff.entity import EntityPath
 from benchmark.attribution.domain import Change, FileOperation
 from benchmark.attribution.history import VersionControl
@@ -45,7 +45,10 @@ class SearchResult(BaseModel):
 class SeedNode:
     """Build the BFC context used by the agentic search flow."""
 
-    def __init__(self, repository: VersionControl | None = None) -> None:
+    def __init__(
+        self,
+        repository: VersionControl | None = None,
+    ) -> None:
         self._repository = repository
 
     def run(self, input: SeedInput) -> SeedOutput:
@@ -152,7 +155,7 @@ class SearchNode:
 
     def __init__(
         self,
-        tool: KnowledgeGraphTool | None = None,
+        tool: KnowledgeGraphTool | KnowledgeGraphToolFactory | None = None,
         llm: object | None = None,
     ) -> None:
         self._tool = tool
@@ -169,13 +172,23 @@ class SearchNode:
             or self._tool is None
             or self._llm is None
         ):
-            raise ValueError("SearchNode requires base, after, seed, tool, and llm.")
+            raise ValueError(
+                "SearchNode requires base, after, seed, tool, and llm."
+            )
 
-        result = self._invoke(seed)
+        tool = self._tool
+        if isinstance(tool, KnowledgeGraphToolFactory):
+            tool = tool.create(base, after)
+
+        result = self._invoke(seed, tool)
         return self._normalize(result)
 
-    def _invoke(self, seed: list[SeedItem]) -> object:
-        tools = self._tool.tools()
+    def _invoke(
+        self,
+        seed: list[SeedItem],
+        tool: KnowledgeGraphTool,
+    ) -> object:
+        tools = tool.tools()
         prompt = inspect.cleandoc(
             """
             Identify which commit first introduced the bug fixed by the given correction.

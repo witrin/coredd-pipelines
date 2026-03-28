@@ -519,6 +519,18 @@ class TestVersionControlSnapshot(unittest.TestCase):
             self._candidate.manifest(self.sha_qux, self.sha_quux),
         )
 
+    def test_load_filter(self) -> None:
+        source = self._source([self._fragment([[self.sha_foo, self.sha_bar]])])
+        snapshot = VersionControlSnapshot.load(
+            source,
+            filter=lambda kind, value: (
+                "filtered" if kind == "message" else value
+            ),
+        )
+        self.addCleanup(snapshot.close)
+
+        self.assertEqual(snapshot.meta(self.sha_bar).message, "filtered")
+
     def test_blob(self) -> None:
         snapshot = self._snapshot([self._fragment([[self.sha_baz, self.sha_qux]])])
 

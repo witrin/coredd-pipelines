@@ -31,14 +31,15 @@ class AttributionGraph(Protocol):
         *,
         trace: Trace | None = None,
         **kwargs: object,
-    ) -> AttributionResult:
-        ...
+    ) -> AttributionResult: ...
 
 
 @runtime_checkable
 class AttributionGraphBuilder(Protocol):
-    def create(self, repository: VersionControl) -> AttributionGraph:
-        ...
+    def create(
+        self,
+        repository: VersionControl,
+    ) -> AttributionGraph: ...
 
 
 class LLM4SZZGraphState(AttributionResult, total=False):
@@ -531,7 +532,10 @@ class LLM4SZZGraphBuilder:
         self._abort = abort
         self._finalize = finalize
 
-    def create(self, repository: VersionControl) -> AttributionGraph:
+    def create(
+        self,
+        repository: VersionControl,
+    ) -> AttributionGraph:
         return LLM4SZZGraph(
             summarize=self._summarize(repository),
             explain=self._explain(repository),
@@ -557,13 +561,14 @@ class AgenticSZZGraphBuilder:
         search: Callable[[VersionControl], Any] | None = None,
     ) -> None:
         if seed is None or search is None:
-            raise ValueError(
-                "AgenticSZZGraphBuilder requires explicit node builders."
-            )
+            raise ValueError("AgenticSZZGraphBuilder requires explicit node builders.")
         self._seed = seed
         self._search = search
 
-    def create(self, repository: VersionControl) -> AttributionGraph:
+    def create(
+        self,
+        repository: VersionControl,
+    ) -> AttributionGraph:
         return AgenticSZZGraph(
             seed=self._seed(repository),
             search=self._search(repository),

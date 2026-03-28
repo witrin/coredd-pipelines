@@ -866,12 +866,13 @@ class VersionControlSnapshot:
         cleanup: Callable[[], None],
         forward: dict[str, str],
         reverse: dict[str, str],
+        filter: Callable[[str, str], str] | None = None,
     ) -> None:
         self._repository = repository
         self._cleanup = cleanup
         self._forward = forward
         self._reverse = reverse
-        self._runtime = VersionControl(repository)
+        self._runtime = VersionControl(repository, filter=filter)
         self._closed = False
 
     def close(self) -> None:
@@ -892,6 +893,7 @@ class VersionControlSnapshot:
         source: str | Path,
         *,
         cache: str | Path | None = None,
+        filter: Callable[[str, str], str] | None = None,
     ) -> VersionControlSnapshot:
         source = Path(source)
 
@@ -899,10 +901,10 @@ class VersionControlSnapshot:
             target = Path(cache)
             if target.exists():
                 try:
-                    return cls._load_cache(target)
+                    return cls._load_cache(target, filter=filter)
                 except ValueError:
-                    return cls._rewrite_cache(source, target)
-            return cls._build_cache(source, target)
+                    return cls._rewrite_cache(source, target, filter=filter)
+            return cls._build_cache(source, target, filter=filter)
 
         meta = cls._load_meta(source)
         commits = cls._commits(meta)
@@ -910,38 +912,61 @@ class VersionControlSnapshot:
 
         work = tempfile.TemporaryDirectory()
         repository = pygit2.init_repository(work.name, bare=True)
-        return cls._replay(source, repository, work.cleanup, commits)
+        return cls._replay(source, repository, work.cleanup, commits, filter=filter)
 
     @classmethod
-    def _build_cache(cls, source: Path, target: Path) -> VersionControlSnapshot:
+    def _build_cache(
+        cls,
+        source: Path,
+        target: Path,
+        *,
+        filter: Callable[[str, str], str] | None = None,
+    ) -> VersionControlSnapshot:
         meta = cls._load_meta(source)
         commits = cls._commits(meta)
         cls._validate(source, commits)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.mkdir(parents=True, exist_ok=True)
         repository = pygit2.init_repository(str(target), bare=True)
-        snapshot = cls._replay(source, repository, lambda: None, commits)
+        snapshot = cls._replay(
+            source,
+            repository,
+            lambda: None,
+            commits,
+            filter=filter,
+        )
         cls._write_cache(target, snapshot._forward, snapshot._reverse)
         return snapshot
 
     @classmethod
-    def _load_cache(cls, target: Path) -> VersionControlSnapshot:
+    def _load_cache(
+        cls,
+        target: Path,
+        *,
+        filter: Callable[[str, str], str] | None = None,
+    ) -> VersionControlSnapshot:
         try:
             repository = pygit2.Repository(str(target))
         except (pygit2.GitError, KeyError, ValueError) as error:
             raise ValueError(f"Snapshot cache at {target} is invalid.") from error
 
         forward, reverse = cls._read_cache(target, repository)
-        return cls(repository, lambda: None, forward, reverse)
+        return cls(repository, lambda: None, forward, reverse, filter=filter)
 
     @classmethod
-    def _rewrite_cache(cls, source: Path, target: Path) -> VersionControlSnapshot:
+    def _rewrite_cache(
+        cls,
+        source: Path,
+        target: Path,
+        *,
+        filter: Callable[[str, str], str] | None = None,
+    ) -> VersionControlSnapshot:
         if target.is_dir():
             shutil.rmtree(target)
         else:
             target.unlink()
 
-        return cls._build_cache(source, target)
+        return cls._build_cache(source, target, filter=filter)
 
     @classmethod
     def _replay(
@@ -950,10 +975,12 @@ class VersionControlSnapshot:
         repository: pygit2.Repository,
         cleanup: Callable[[], None],
         commits: dict[str, dict[str, object]],
+        *,
+        filter: Callable[[str, str], str] | None = None,
     ) -> VersionControlSnapshot:
         forward: dict[str, str] = {}
         reverse: dict[str, str] = {}
-        snapshot = cls(repository, cleanup, forward, reverse)
+        snapshot = cls(repository, cleanup, forward, reverse, filter=filter)
 
         trees: dict[str, pygit2.Oid] = {}
         blobs: dict[str, pygit2.Oid] = {}

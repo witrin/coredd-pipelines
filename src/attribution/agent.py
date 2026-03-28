@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 from langchain_core.tools import BaseTool, tool
 
-from benchmark.attribution.history import VersionControl, VersionControlSnapshot
-from benchmark.attribution.knowledge import KnowledgeGraphStore
+from benchmark.attribution.history import VersionControl
+from benchmark.attribution.knowledge import KnowledgeGraphBuilder, KnowledgeGraphStore
 
 
 class KnowledgeGraphTool:
@@ -13,7 +15,7 @@ class KnowledgeGraphTool:
 
     def __init__(
         self,
-        repository: VersionControl | VersionControlSnapshot,
+        repository: VersionControl,
         store: KnowledgeGraphStore,
     ) -> None:
         self._repository = repository
@@ -134,3 +136,24 @@ class KnowledgeGraphTool:
             "path": path,
             "patch": patch,
         }
+
+
+class KnowledgeGraphToolFactory:
+    def __init__(
+        self,
+        repository: VersionControl,
+        source: KnowledgeGraphBuilder | Path,
+    ) -> None:
+        self._repository = repository
+        self._source = source
+
+    def create(self, base: str, after: str) -> KnowledgeGraphTool:
+        if isinstance(self._source, Path):
+            with open(self._source / f"{after}.json", "r", encoding="utf-8") as file:
+                store = KnowledgeGraphStore.load(json.load(file))
+        else:
+            store = self._source.build(base, after)
+        return KnowledgeGraphTool(
+            repository=self._repository,
+            store=store,
+        )
