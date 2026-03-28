@@ -9,8 +9,8 @@ from pathlib import Path
 from components.decorator import asset
 from components.infrastructure import GithubResource
 from benchmark.definitions import partitions
-from benchmark.attribution.history import VersionControl
-from benchmark.attribution.knowledge import KnowledgeGraphBuilder
+from benchmark.attribution.history import VersionControl, VersionControlSnapshot
+from benchmark.attribution.knowledge import KnowledgeGraphBuilder, KnowledgeGraphStore
 from benchmark.scope.cohort import ChangeCollector, IssueCollector
 from benchmark.attribution.ingestion import ValidationExtractor
 from benchmark.scope.ingestion import ChangeExtractor, IssueExtractor, SourceExtractor
@@ -19,6 +19,7 @@ from components.io import BlobStream
 import pyarrow as pa
 import pyarrow.compute as pc
 import dagster as dg
+import networkx as nx
 from google.cloud import bigquery
 from github.GithubException import UnknownObjectException
 import pygit2
@@ -763,3 +764,215 @@ def ingest_validation_context(
         response=FileResponseAdapter(file),
         size=os.path.getsize(output),
     )
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    partitions_def=partitions.ingest_validation_sources_partition,
+    group_name="ingest",
+    pool="default",
+)
+def ingest_validation_context_index(
+    context: dg.AssetExecutionContext,
+    ingest_validation_context,
+) -> pa.Table:
+    rows: list[dict[str, object]] = []
+    schema = pa.schema(
+        [
+            ("repository", pa.string()),
+            ("correction", pa.string()),
+            ("defects", pa.list_(pa.string())),
+            ("languages", pa.list_(pa.string())),
+            ("partition", pa.string()),
+            (
+                "commits",
+                pa.list_(
+                    pa.struct(
+                        [
+                            ("commit", pa.string()),
+                            ("base", pa.string()),
+                            ("score", pa.float64()),
+                            ("position", pa.int64()),
+                            ("time", pa.timestamp("us", tz="UTC")),
+                        ]
+                    )
+                ),
+            ),
+            (
+                "files",
+                pa.list_(
+                    pa.struct(
+                        [
+                            ("commit", pa.string()),
+                            ("path", pa.string()),
+                            ("added", pa.int64()),
+                            ("deleted", pa.int64()),
+                            ("hunks", pa.int64()),
+                        ]
+                    )
+                ),
+            ),
+            (
+                "entities",
+                pa.list_(
+                    pa.struct(
+                        [
+                            ("commit", pa.string()),
+                            ("path", pa.string()),
+                            ("source", pa.string()),
+                            ("kind", pa.string()),
+                            ("operation", pa.string()),
+                        ]
+                    )
+                ),
+            ),
+        ]
+    )
+
+    with tempfile.TemporaryDirectory() as directory:
+        work = Path(directory)
+
+        try:
+            with tarfile.open(fileobj=ingest_validation_context, mode="r:gz") as tar:
+                tar.extractall(work, filter="data")
+        finally:
+            ingest_validation_context.close()
+
+        for meta_path in sorted(work.glob("*/*/meta.json")):
+            repository = meta_path.parent
+
+            with open(meta_path, "r", encoding="utf-8") as file:
+                meta = json.load(file)
+
+            cases = {item["correction"]: item for item in meta["cases"]}
+            snapshot = VersionControlSnapshot.load(
+                repository / "snapshot",
+                cache=repository / ".git",
+            )
+
+            try:
+                for graph_path in sorted((repository / "context").glob("*.json")):
+                    with open(graph_path, "r", encoding="utf-8") as file:
+                        graph = KnowledgeGraphStore.load(json.load(file))
+
+                    order = list(
+                        nx.topological_sort(
+                            nx.DiGraph(
+                                (source, target)
+                                for source, target, data in graph.graph.edges(data=True)
+                                if data.get("edge") == "PRECEDES"
+                            )
+                        )
+                    )
+                    position = {commit: index for index, commit in enumerate(order)}
+
+                    correction = graph_path.stem
+                    case = cases.get(correction, {})
+                    commits: list[dict[str, object]] = []
+                    files: list[dict[str, object]] = []
+                    entities: list[dict[str, object]] = []
+
+                    for commit in graph.nodes("commit"):
+                        payload = graph.payload(commit)
+                        sha = str(payload["sha"])
+                        score = payload.get("score")
+                        parents = snapshot.parents(sha)
+
+                        commits.append(
+                            {
+                                "commit": sha,
+                                "base": parents[0] if parents else None,
+                                "score": score,
+                                "position": (
+                                    position[commit] if commit in position else 0
+                                ),
+                                "time": snapshot.meta(sha).time,
+                            }
+                        )
+
+                        if not parents:
+                            continue
+
+                        base = parents[0]
+                        paths: dict[str, str] = {}
+
+                        for node in list(graph.targets(commit, "MODIFIES")):
+                            file_payload = graph.payload(node)
+                            paths[node] = str(file_payload["path"])
+
+                        names = set(paths.values())
+                        patches = {}
+
+                        for patch in snapshot.diff(base, sha):
+                            path = (
+                                patch.delta.new_file.path or patch.delta.old_file.path
+                            )
+                            if path not in names:
+                                continue
+                            patches[path] = patch
+
+                        for node in list(graph.targets(commit, "MODIFIES")):
+                            path = paths[node]
+                            patch = patches.get(path)
+                            added = 0
+                            deleted = 0
+                            hunks = 0
+
+                            if patch is not None:
+                                hunks = len(patch.hunks)
+
+                                for hunk in patch.hunks:
+                                    for line in hunk.lines:
+                                        if line.origin == "+":
+                                            added += 1
+                                        elif line.origin == "-":
+                                            deleted += 1
+
+                            files.append(
+                                {
+                                    "commit": sha,
+                                    "path": path,
+                                    "added": added,
+                                    "deleted": deleted,
+                                    "hunks": hunks,
+                                }
+                            )
+
+                            for operation in ("ADD", "EDIT", "DELETE"):
+                                for entity in graph.targets(commit, operation):
+                                    entity_payload = graph.payload(entity)
+                                    if entity_payload.get("path") != path:
+                                        continue
+
+                                    entities.append(
+                                        {
+                                            "commit": sha,
+                                            "path": path,
+                                            "source": entity_payload.get("source"),
+                                            "kind": entity_payload.get("kind"),
+                                            "operation": operation,
+                                        }
+                                    )
+
+                    rows.append(
+                        {
+                            "repository": meta["repository"],
+                            "correction": correction,
+                            "defects": list(case.get("defects", [])),
+                            "languages": list(case.get("languages", [])),
+                            "partition": str(
+                                case.get("partition", context.partition_key)
+                            ),
+                            "commits": commits,
+                            "files": files,
+                            "entities": entities,
+                        }
+                    )
+            finally:
+                snapshot.close()
+
+    table = pa.Table.from_pylist(rows, schema=schema)
+
+    context.log.info("Indexed %d validation context cases.", table.num_rows)
+
+    return table
