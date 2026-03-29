@@ -4,7 +4,7 @@ import contextvars
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Iterator
+from typing import Callable, Iterator
 
 import pyarrow as pa
 
@@ -17,9 +17,11 @@ class Trace:
         self,
         seed: str | None = None,
         metadata: dict[str, object] | None = None,
+        hook: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self.id = seed or uuid.uuid4().hex
         self.metadata = dict(metadata or {})
+        self._hook = hook
         self._events: list[dict[str, object]] = []
         self._sequence = 0
 
@@ -34,18 +36,23 @@ class Trace:
         payload: object = None,
     ) -> None:
         self._sequence += 1
-        self._events.append(
-            {
-                "trace": self.id,
-                "sequence": self._sequence,
-                "timestamp": timestamp or datetime.now(timezone.utc),
-                "node": node,
-                "span": span,
-                "parent": parent,
-                "event": event,
-                "payload": self._encode_payload(payload),
-            }
-        )
+        current = {
+            "trace": self.id,
+            "sequence": self._sequence,
+            "timestamp": timestamp or datetime.now(timezone.utc),
+            "node": node,
+            "span": span,
+            "parent": parent,
+            "event": event,
+            "payload": self._encode_payload(payload),
+        }
+        self._events.append(current)
+        if self._hook is None:
+            return
+        try:
+            self._hook(dict(current))
+        except Exception:
+            pass
 
     def events(self) -> Iterator[dict[str, object]]:
         for event in self._events:
@@ -298,8 +305,7 @@ class TracingCallbackHandler(BaseCallbackHandler):
             payload={
                 "serialized": serialized,
                 "messages": [
-                    [self._message(message) for message in batch]
-                    for batch in messages
+                    [self._message(message) for message in batch] for batch in messages
                 ],
                 "invocation_params": kwargs.get("invocation_params"),
             },
@@ -361,9 +367,7 @@ class TracingCallbackHandler(BaseCallbackHandler):
                     else None
                 ),
                 "generation_batches": len(response.generations),
-                "generation_count": sum(
-                    len(batch) for batch in response.generations
-                ),
+                "generation_count": sum(len(batch) for batch in response.generations),
                 "generations": [
                     [self._generation(item) for item in batch]
                     for batch in response.generations

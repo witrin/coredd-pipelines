@@ -177,6 +177,39 @@ class TestValidationExecutor(unittest.TestCase):
         self.assertIsNone(result[0].output)
         self.assertIsInstance(result[0].trace, Trace)
 
+    def test_trace_hook(self) -> None:
+        events: list[dict[str, object]] = []
+        trace = Trace(seed="hook", hook=events.append)
+
+        trace.append(
+            node="search",
+            span="span-1",
+            parent=None,
+            event="node_start",
+            payload={"phase": "start"},
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["trace"], "hook")
+        self.assertEqual(events[0]["event"], "node_start")
+        self.assertEqual(len(list(trace.events())), 1)
+
+    def test_trace_hook_ignored(self) -> None:
+        trace = Trace(
+            seed="hook-error",
+            hook=Mock(side_effect=RuntimeError("boom")),
+        )
+
+        trace.append(
+            node="search",
+            span="span-1",
+            parent=None,
+            event="node_start",
+            payload={"phase": "start"},
+        )
+
+        self.assertEqual(len(list(trace.events())), 1)
+
     def test_run_repository_error(self) -> None:
         candidate = Mock(spec_set=["create"])
         cache = Mock(spec_set=["resolve"])
@@ -194,6 +227,51 @@ class TestValidationExecutor(unittest.TestCase):
         self.assertIsNone(result[0].output)
         self.assertIsInstance(result[0].trace, Trace)
         candidate.create.assert_not_called()
+
+    def test_run_hook(self) -> None:
+        repository = Mock(spec_set=["parents", "meta"])
+        graph = Mock(spec_set=["invoke"])
+
+        def invoke(change: Change, *, trace: Trace) -> dict[str, object]:
+            trace.append(
+                node="search",
+                span="span-1",
+                parent=None,
+                event="node_start",
+                payload={"phase": "start"},
+            )
+            return {"introducer": "abc123"}
+
+        graph.invoke.side_effect = invoke
+        candidate = Mock(spec_set=["create"])
+        candidate.create.return_value = graph
+        cache = Mock(spec_set=["resolve"])
+        cache.resolve.return_value = Change(
+            number=1,
+            description="Fix bug",
+            base="base-sha",
+            after="after-sha",
+        )
+        builder = Mock(return_value=repository)
+        hook = Mock()
+        executor = ValidationExecutor(
+            candidate=candidate,
+            cache=cache,
+            repository=builder,
+            hook=hook,
+        )
+
+        executor.run(
+            [ValidationCase(repository="repo/a", correction="after-sha", partition="p1")]
+        )
+
+        hook.assert_called_once()
+        payload = hook.call_args.args[0]
+        self.assertEqual(payload["repository"], "repo/a")
+        self.assertEqual(payload["correction"], "after-sha")
+        self.assertEqual(payload["partition"], "p1")
+        self.assertIsInstance(payload["trace"], str)
+        self.assertEqual(payload["event"]["event"], "node_start")
 
 
 if __name__ == "__main__":

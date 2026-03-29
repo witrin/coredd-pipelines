@@ -31,16 +31,20 @@ class ValidationExecutor:
         candidate: AttributionGraphBuilder,
         cache: PlatformCache,
         repository: Callable[[ValidationCase], VersionControl],
+        hook: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self._candidate = candidate
         self._cache = cache
         self._repository = repository
+        self._hook = hook
 
     def run(self, cases: Sequence[ValidationCase]) -> list[ValidationRun]:
         result: list[ValidationRun] = []
 
         for case in cases:
-            trace = Trace(metadata={"repository": case.repository})
+            trace: Trace | None = None
+            hook = None if self._hook is None else self._wrap(case, lambda: trace)
+            trace = Trace(metadata={"repository": case.repository}, hook=hook)
             try:
                 repository = self._repository(case)
                 change = self._change(repository, case)
@@ -65,6 +69,29 @@ class ValidationExecutor:
             )
 
         return result
+
+    def _wrap(
+        self,
+        case: ValidationCase,
+        trace: Callable[[], Trace | None],
+    ) -> Callable[[dict[str, object]], None]:
+        hook = self._hook
+        if hook is None:
+            raise ValueError("ValidationExecutor hook wrapper requires a hook.")
+
+        def current(event: dict[str, object]) -> None:
+            value = trace()
+            hook(
+                {
+                    "repository": case.repository,
+                    "correction": case.correction,
+                    "partition": case.partition,
+                    "trace": None if value is None else value.id,
+                    "event": event,
+                }
+            )
+
+        return current
 
     def _change(
         self,
