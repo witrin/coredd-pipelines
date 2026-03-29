@@ -438,8 +438,6 @@ class TestKnowledgeFileGit(unittest.TestCase):
     ) -> KnowledgeCommit:
         return KnowledgeCommit(
             sha=sha,
-            kind="correction",
-            score=0.0,
             timestamp=datetime.fromisoformat("2024-01-01T00:00:00+00:00"),
             message=sha,
             parents=("base",),
@@ -451,8 +449,6 @@ class TestKnowledgeFileGit(unittest.TestCase):
     def test_build_root_add(self) -> None:
         commit = KnowledgeCommit(
             sha="root",
-            kind="correction",
-            score=0.0,
             timestamp=datetime.fromisoformat("2024-01-01T00:00:00+00:00"),
             message="root",
             parents=(),
@@ -838,13 +834,13 @@ class TestKnowledgeCommitGit(unittest.TestCase):
     def test_build_blame(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"a.py": "x = 1\n"})
-            init = fixture.commit(tree, [], "init")
+            foo = fixture.commit(tree, [], "foo")
 
             tree = fixture.tree({"a.py": "x = 2\n"})
-            foo = fixture.commit(tree, [init], "foo")
+            bar = fixture.commit(tree, [foo], "bar")
 
             tree = fixture.tree({"a.py": "x = 2\ny = 1\n"})
-            base = fixture.commit(tree, [foo], "base")
+            base = fixture.commit(tree, [bar], "base")
 
             tree = fixture.tree({"a.py": "x = 3\ny = 1\n"})
             after = fixture.commit(tree, [base], "after")
@@ -853,33 +849,29 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             commits = KnowledgeCommitGit(repository, cap=200).build(base, after)
             shas = {c.sha for c in commits}
 
-            self.assertIn(foo, shas)
+            self.assertIn(bar, shas)
             self.assertIn(after, shas)
 
-            blame = self._commit(commits, foo)
+            blame = self._commit(commits, bar)
             self.assertEqual(blame.category, "blame")
-            self.assertEqual(blame.kind, "blame")
             self.assertIn(self._mark(OperationType.EDIT, "a.py", "a.py"), blame.files)
-            self.assertEqual(blame.score, 1.0)
 
             correction = self._commit(commits, after)
             self.assertEqual(correction.category, "correction")
-            self.assertEqual(correction.kind, "correction")
-            self.assertEqual(correction.score, 0.0)
 
     def test_build_blame_mixed_hunk(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"a.py": "head\n"})
-            init = fixture.commit(tree, [], "init")
+            foo = fixture.commit(tree, [], "foo")
 
             tree = fixture.tree({"a.py": "head\none\n"})
-            foo = fixture.commit(tree, [init], "foo")
-
-            tree = fixture.tree({"a.py": "head\none\ntwo\n"})
             bar = fixture.commit(tree, [foo], "bar")
 
+            tree = fixture.tree({"a.py": "head\none\ntwo\n"})
+            baz = fixture.commit(tree, [bar], "baz")
+
             tree = fixture.tree({"a.py": "head\none\ntwo\nkeep\n"})
-            base = fixture.commit(tree, [bar], "base")
+            base = fixture.commit(tree, [baz], "base")
 
             tree = fixture.tree({"a.py": "head\nkeep\n"})
             after = fixture.commit(tree, [base], "after")
@@ -887,20 +879,18 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             repository = VersionControl(fixture.repository)
             commits = KnowledgeCommitGit(repository, cap=200).build(base, after)
 
-            blame_foo = self._commit(commits, foo)
             blame_bar = self._commit(commits, bar)
+            blame_baz = self._commit(commits, baz)
 
-            self.assertEqual(blame_foo.category, "blame")
             self.assertEqual(blame_bar.category, "blame")
-            self.assertEqual(blame_foo.score, 1.0)
-            self.assertEqual(blame_bar.score, 1.0)
-            self.assertIn(
-                self._mark(OperationType.EDIT, "a.py", "a.py"),
-                blame_foo.files,
-            )
+            self.assertEqual(blame_baz.category, "blame")
             self.assertIn(
                 self._mark(OperationType.EDIT, "a.py", "a.py"),
                 blame_bar.files,
+            )
+            self.assertIn(
+                self._mark(OperationType.EDIT, "a.py", "a.py"),
+                blame_baz.files,
             )
 
     def test_build_add_only_seed(self) -> None:
@@ -920,7 +910,6 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             self.assertEqual([commit.sha for commit in commits], [after])
             correction = self._commit(commits, after)
             self.assertEqual(correction.category, "correction")
-            self.assertEqual(correction.kind, "correction")
             self.assertEqual(
                 correction.files,
                 frozenset({self._mark(OperationType.ADD, None, "a.py")}),
@@ -929,18 +918,18 @@ class TestKnowledgeCommitGit(unittest.TestCase):
     def test_build_rename_normalizes_to_move(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"old.py": "value = 1\n"})
-            init = fixture.commit(tree, [], "init")
+            foo = fixture.commit(tree, [], "foo")
 
             tree = fixture.tree({"new.py": "value = 1\n"})
-            moved = fixture.commit(tree, [init], "moved")
+            bar = fixture.commit(tree, [foo], "bar")
 
             tree = fixture.tree({"new.py": "value = 2\n"})
-            after = fixture.commit(tree, [moved], "after")
+            after = fixture.commit(tree, [bar], "after")
 
             repository = VersionControl(fixture.repository)
-            commits = KnowledgeCommitGit(repository, cap=200).build(moved, after)
+            commits = KnowledgeCommitGit(repository, cap=200).build(bar, after)
 
-            renamed = self._commit(commits, moved)
+            renamed = self._commit(commits, bar)
             self.assertIn(
                 self._mark(OperationType.MOVE, "old.py", "new.py"),
                 renamed.files,
@@ -949,24 +938,24 @@ class TestKnowledgeCommitGit(unittest.TestCase):
     def test_build_copy_normalizes_to_add(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"foo.py": "value = 1\n"})
-            init = fixture.commit(tree, [], "init")
+            foo = fixture.commit(tree, [], "foo")
 
             tree = fixture.tree({
                 "foo.py": "value = 1\n",
                 "baz.py": "value = 1\n",
             })
-            copied = fixture.commit(tree, [init], "copied")
+            bar = fixture.commit(tree, [foo], "bar")
 
             tree = fixture.tree({
                 "foo.py": "value = 1\n",
                 "baz.py": "value = 2\n",
             })
-            after = fixture.commit(tree, [copied], "after")
+            after = fixture.commit(tree, [bar], "after")
 
             repository = VersionControl(fixture.repository)
-            commits = KnowledgeCommitGit(repository, cap=200).build(copied, after)
+            commits = KnowledgeCommitGit(repository, cap=200).build(bar, after)
 
-            copied_commit = self._commit(commits, copied)
+            copied_commit = self._commit(commits, bar)
             self.assertIn(
                 self._mark(OperationType.ADD, None, "baz.py"),
                 copied_commit.files,
@@ -975,91 +964,91 @@ class TestKnowledgeCommitGit(unittest.TestCase):
     def test_build_merge_hides_merge_commit(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"a.py": "base\n"})
-            init = fixture.commit(tree, [], "init")
+            foo = fixture.commit(tree, [], "foo")
 
             tree = fixture.tree({"a.py": "left\n"})
-            left = fixture.commit(tree, [init], "left")
+            bar = fixture.commit(tree, [foo], "bar")
 
             tree = fixture.tree({
                 "a.py": "base\n",
                 "b.py": "right\n",
             })
-            right = fixture.commit(tree, [init], "right", ref=None)
+            baz = fixture.commit(tree, [foo], "baz", ref=None)
 
             tree = fixture.tree({
                 "a.py": "left\n",
                 "b.py": "right\n",
             })
-            merge = fixture.commit(tree, [left, right], "merge")
+            qux = fixture.commit(tree, [bar, baz], "qux")
 
             tree = fixture.tree({
                 "a.py": "after\n",
                 "b.py": "right\n",
             })
-            after = fixture.commit(tree, [merge], "after")
+            after = fixture.commit(tree, [qux], "after")
 
             repository = VersionControl(fixture.repository)
-            commits = KnowledgeCommitGit(repository, cap=200).build(merge, after)
+            commits = KnowledgeCommitGit(repository, cap=200).build(qux, after)
 
-            self.assertNotIn(merge, {commit.sha for commit in commits})
-            self.assertIn(left, {commit.sha for commit in commits})
+            self.assertNotIn(qux, {commit.sha for commit in commits})
+            self.assertIn(bar, {commit.sha for commit in commits})
             self.assertIn(
                 self._mark(OperationType.EDIT, "a.py", "a.py"),
-                self._commit(commits, left).files,
+                self._commit(commits, bar).files,
             )
 
     def test_build_merge_follows_second_parent(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"a.py": "base\n"})
-            init = fixture.commit(tree, [], "init")
+            foo = fixture.commit(tree, [], "foo")
 
             tree = fixture.tree({
                 "a.py": "base\n",
                 "b.py": "left\n",
             })
-            left = fixture.commit(tree, [init], "left")
+            bar = fixture.commit(tree, [foo], "bar")
 
             tree = fixture.tree({"a.py": "right\n"})
-            right = fixture.commit(tree, [init], "right", ref=None)
+            baz = fixture.commit(tree, [foo], "baz", ref=None)
 
             tree = fixture.tree({
                 "a.py": "right\n",
                 "b.py": "left\n",
             })
-            merge = fixture.commit(tree, [left, right], "merge")
+            qux = fixture.commit(tree, [bar, baz], "qux")
 
             tree = fixture.tree({
                 "a.py": "after\n",
                 "b.py": "left\n",
             })
-            after = fixture.commit(tree, [merge], "after")
+            after = fixture.commit(tree, [qux], "after")
 
             repository = VersionControl(fixture.repository)
-            commits = KnowledgeCommitGit(repository, cap=200).build(merge, after)
+            commits = KnowledgeCommitGit(repository, cap=200).build(qux, after)
 
-            self.assertNotIn(merge, {commit.sha for commit in commits})
-            self.assertIn(right, {commit.sha for commit in commits})
+            self.assertNotIn(qux, {commit.sha for commit in commits})
+            self.assertIn(baz, {commit.sha for commit in commits})
             self.assertIn(
                 self._mark(OperationType.EDIT, "a.py", "a.py"),
-                self._commit(commits, right).files,
+                self._commit(commits, baz).files,
             )
 
-    def test_build_score(self) -> None:
+    def test_build_category(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"a.py": "x = 1\n"})
-            init = fixture.commit(tree, [], "init")
+            foo = fixture.commit(tree, [], "foo")
 
             tree = fixture.tree({"a.py": "x = 2\n"})
-            foo = fixture.commit(tree, [init], "foo")
-
-            tree = fixture.tree({"a.py": "x = 3\n"})
             bar = fixture.commit(tree, [foo], "bar")
 
-            tree = fixture.tree({"a.py": "x = 3\ny = 1\n"})
+            tree = fixture.tree({"a.py": "x = 3\n"})
             baz = fixture.commit(tree, [bar], "baz")
 
+            tree = fixture.tree({"a.py": "x = 3\ny = 1\n"})
+            qux = fixture.commit(tree, [baz], "qux")
+
             tree = fixture.tree({"a.py": "x = 3\ny = 1\nz = 1\n"})
-            base = fixture.commit(tree, [baz], "base")
+            base = fixture.commit(tree, [qux], "base")
 
             tree = fixture.tree({"a.py": "x = 4\ny = 1\nz = 1\n"})
             after = fixture.commit(tree, [base], "after")
@@ -1067,10 +1056,13 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             repository = VersionControl(fixture.repository)
             commits = KnowledgeCommitGit(repository, cap=200).build(base, after)
 
-            self.assertEqual(self._commit(commits, after).score, 0.0)
-            self.assertEqual(self._commit(commits, bar).score, 1.0)
-            self.assertEqual(self._commit(commits, foo).score, 0.6)
-            self.assertEqual(self._commit(commits, baz).score, 0.3)
+            self.assertEqual(self._commit(commits, after).category, "correction")
+            self.assertEqual(self._commit(commits, baz).category, "blame")
+            self.assertEqual(self._commit(commits, bar).category, "blame-ancestor")
+            self.assertEqual(
+                self._commit(commits, qux).category,
+                "correction-ancestor",
+            )
 
     def test_build_parents(self) -> None:
         with HistoryFixture() as fixture:
@@ -1112,13 +1104,13 @@ class TestKnowledgeCommitGit(unittest.TestCase):
     def test_build_edges(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"a.py": "x = 1\n"})
-            init = fixture.commit(tree, [], "init")
+            foo = fixture.commit(tree, [], "foo")
 
             tree = fixture.tree({"a.py": "x = 2\n"})
-            foo = fixture.commit(tree, [init], "foo")
+            bar = fixture.commit(tree, [foo], "bar")
 
             tree = fixture.tree({"a.py": "x = 2\ny = 1\n"})
-            base = fixture.commit(tree, [foo], "base")
+            base = fixture.commit(tree, [bar], "base")
 
             tree = fixture.tree({"a.py": "x = 3\ny = 1\n"})
             after = fixture.commit(tree, [base], "after")
@@ -1138,57 +1130,56 @@ class TestKnowledgeCommitGit(unittest.TestCase):
                 (s, t) for s, t, e in edges if e == "BLAME"
             ]
             self.assertTrue(
-                any(s == f"commit:{foo}" for s, _ in precedes),
-                "foo should have a PRECEDES edge",
+                any(s == f"commit:{bar}" for s, _ in precedes),
+                "bar should have a PRECEDES edge",
             )
-            self.assertIn((f"commit:{after}", f"commit:{foo}"), blame)
+            self.assertIn((f"commit:{after}", f"commit:{bar}"), blame)
 
     def test_build_payload_parents_follow_git(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"a.py": "base\n"})
-            init = fixture.commit(tree, [], "init")
+            foo = fixture.commit(tree, [], "foo")
 
             tree = fixture.tree({"a.py": "left\n"})
-            left = fixture.commit(tree, [init], "left")
+            bar = fixture.commit(tree, [foo], "bar")
 
             tree = fixture.tree({"a.py": "right\n"})
-            right = fixture.commit(tree, [init], "right", ref=None)
+            baz = fixture.commit(tree, [foo], "baz", ref=None)
 
             tree = fixture.tree({"a.py": "merge\n"})
-            merge = fixture.commit(tree, [left, right], "merge")
+            qux = fixture.commit(tree, [bar, baz], "qux")
 
             store = KnowledgeGraphBuilder(
                 repository=VersionControl(fixture.repository)
-            ).build(left, merge)
+            ).build(bar, qux)
 
             self.assertEqual(
-                store.payload(f"commit:{merge}")["parents"],
-                (left, right),
+                store.payload(f"commit:{qux}")["parents"],
+                (bar, baz),
             )
 
     def test_fragment(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"a.py": "base\n"})
-            init = fixture.commit(tree, [], "init")
+            foo = fixture.commit(tree, [], "foo")
 
             tree = fixture.tree({"a.py": "left\n"})
-            left = fixture.commit(tree, [init], "left")
+            bar = fixture.commit(tree, [foo], "bar")
 
             tree = fixture.tree({"a.py": "right\n"})
-            right = fixture.commit(tree, [init], "right", ref=None)
+            baz = fixture.commit(tree, [foo], "baz", ref=None)
 
             tree = fixture.tree({"a.py": "merge\n"})
-            merge = fixture.commit(tree, [left, right], "merge")
+            qux = fixture.commit(tree, [bar, baz], "qux")
 
             store = KnowledgeGraphStore()
             store.add(
                 "commit",
                 {
-                    "sha": init,
-                    "type": "candidate",
-                    "score": 0.0,
+                    "sha": foo,
+                    "type": "correction",
                     "timestamp": datetime.fromtimestamp(0),
-                    "message": "init",
+                    "message": "foo",
                     "parents": (),
                     "files": (),
                 },
@@ -1196,36 +1187,33 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             store.add(
                 "commit",
                 {
-                    "sha": left,
-                    "type": "candidate",
-                    "score": 0.0,
+                    "sha": bar,
+                    "type": "correction",
                     "timestamp": datetime.fromtimestamp(1),
-                    "message": "left",
-                    "parents": (init,),
+                    "message": "bar",
+                    "parents": (foo,),
                     "files": (),
                 },
             )
             store.add(
                 "commit",
                 {
-                    "sha": right,
-                    "type": "candidate",
-                    "score": 0.0,
+                    "sha": baz,
+                    "type": "correction",
                     "timestamp": datetime.fromtimestamp(2),
-                    "message": "right",
-                    "parents": (init,),
+                    "message": "baz",
+                    "parents": (foo,),
                     "files": (),
                 },
             )
             store.add(
                 "commit",
                 {
-                    "sha": merge,
-                    "type": "candidate",
-                    "score": 0.0,
+                    "sha": qux,
+                    "type": "correction",
                     "timestamp": datetime.fromtimestamp(3),
-                    "message": "merge",
-                    "parents": (left, right),
+                    "message": "qux",
+                    "parents": (bar, baz),
                     "files": (),
                 },
             )
@@ -1233,37 +1221,36 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             self.assertEqual(
                 store.fragment(),
                 {
-                    init: [],
-                    left: [init],
-                    right: [init],
-                    merge: [left, right],
+                    foo: [],
+                    bar: [foo],
+                    baz: [foo],
+                    qux: [bar, baz],
                 },
             )
 
     def test_fragment_adds_missing_parent_stub(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"a.py": "base\n"})
-            init = fixture.commit(tree, [], "init")
+            foo = fixture.commit(tree, [], "foo")
 
             tree = fixture.tree({"a.py": "child\n"})
-            child = fixture.commit(tree, [init], "child")
+            bar = fixture.commit(tree, [foo], "bar")
 
             store = KnowledgeGraphStore()
             store.add(
                 "commit",
                 {
-                    "sha": child,
-                    "type": "candidate",
-                    "score": 0.0,
+                    "sha": bar,
+                    "type": "correction",
                     "timestamp": datetime.fromtimestamp(1),
-                    "message": "child",
-                    "parents": (init,),
+                    "message": "bar",
+                    "parents": (foo,),
                     "files": (),
                 },
             )
 
-            self.assertEqual(store.payload(f"commit:{child}")["parents"], (init,))
-            self.assertEqual(store.fragment(), {child: [init], init: []})
+            self.assertEqual(store.payload(f"commit:{bar}")["parents"], (foo,))
+            self.assertEqual(store.fragment(), {bar: [foo], foo: []})
 
     def test_build_limit(self) -> None:
         with HistoryFixture() as fixture:

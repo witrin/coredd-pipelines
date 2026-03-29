@@ -52,6 +52,7 @@ from benchmark.attribution.tracing import (
 )
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
+from langchain_core.tools import tool
 from unidiff import PatchSet
 
 
@@ -2580,15 +2581,26 @@ class TestLLM4SZZGraph(unittest.TestCase):
             SearchNode().run({})
 
     def test_search_steps(self) -> None:
-        tool = Mock(spec_set=["tools"])
-        tool.tools.return_value = ["tool-a", "tool-b"]
+        tools = Mock(spec_set=["tools"])
+
+        @tool
+        def foo() -> str:
+            """Return a placeholder value."""
+            return "foo"
+
+        @tool
+        def bar() -> str:
+            """Return another placeholder value."""
+            return "bar"
+
+        tools.tools.return_value = [foo, bar]
         agent = Mock(spec_set=["invoke"])
         agent.invoke.return_value = {
             "structured_response": {"introducer": "deadbeef"},
         }
 
         with patch("benchmark.attribution.search.create_react_agent", return_value=agent):
-            SearchNode(tool=tool, llm=object()).run(
+            SearchNode(tool=tools, llm=object()).run(
                 {
                     "base": "base-sha",
                     "after": "after-sha",

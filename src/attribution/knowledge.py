@@ -24,14 +24,12 @@ class KnowledgeFileMark:
 @dataclass(frozen=True)
 class KnowledgeCommit:
     sha: str
-    kind: str
-    score: float
     timestamp: datetime
     message: str
     parents: tuple[str, ...]
     predecessors: tuple[str, ...]
     files: frozenset[KnowledgeFileMark]
-    category: str | None
+    category: str
 
 
 @dataclass(frozen=True)
@@ -501,19 +499,15 @@ class KnowledgeCommitGit:
         trace: dict[str, set[KnowledgeFileMark]],
         predecessors: dict[str, tuple[str, ...]],
     ) -> list[KnowledgeCommit]:
-        scores = self._score(after, order, blame)
+        categories = self._category(after, order, blame)
         result: list[KnowledgeCommit] = []
         for sha in order:
             meta = self._commit(sha)
             parents = tuple(self._repository.parents(sha))
-            category: str | None = (
-                "correction" if sha == after else "blame" if sha in blame else None
-            )
+            category = categories[sha]
             result.append(
                 KnowledgeCommit(
                     sha=sha,
-                    kind=category or "candidate",
-                    score=scores[sha],
                     timestamp=cast(datetime, meta["timestamp"]),
                     message=cast(str, meta["message"]),
                     parents=parents,
@@ -550,25 +544,36 @@ class KnowledgeCommitGit:
             }
         return self._meta[sha]
 
-    def _score(
+    def _category(
         self,
         after: str,
         order: list[str],
         blame: set[str],
-    ) -> dict[str, float]:
-        result: dict[str, float] = {}
+    ) -> dict[str, str]:
+        result: dict[str, str] = {}
         reachable = False
         for sha in reversed(order):
             if sha == after:
-                result[sha] = 0.0
+                result[sha] = "correction"
             elif sha in blame:
-                result[sha] = 1.0
+                result[sha] = "blame"
                 reachable = True
             elif reachable:
-                result[sha] = 0.6
+                result[sha] = "blame-ancestor"
             else:
-                result[sha] = 0.3
+                result[sha] = "correction-ancestor"
         return result
+
+    def _priority(self, category: str) -> int:
+        if category == "blame":
+            return 2
+        if category == "blame-ancestor":
+            return 1
+        if category == "correction-ancestor":
+            return 0
+        if category == "correction":
+            return -1
+        raise ValueError(f"Unsupported commit category {category}.")
 
     def _limit(
         self,
@@ -580,7 +585,13 @@ class KnowledgeCommitGit:
 
         direct = [c for c in commits if c.sha != after and c.category == "blame"]
         others = [c for c in commits if c.sha != after and c.category != "blame"]
-        others.sort(key=lambda c: (-c.score, -c.timestamp.timestamp(), c.sha))
+        others.sort(
+            key=lambda c: (
+                -self._priority(c.category),
+                -c.timestamp.timestamp(),
+                c.sha,
+            )
+        )
         remaining = max(self._cap - len(direct), 0)
         keep = {after, *(c.sha for c in direct), *(c.sha for c in others[:remaining])}
         return [c for c in commits if c.sha in keep]
@@ -920,8 +931,7 @@ class KnowledgeGraphMaterializer:
                 "commit",
                 {
                     "sha": commit.sha,
-                    "type": commit.kind,
-                    "score": commit.score,
+                    "type": commit.category,
                     "timestamp": commit.timestamp,
                     "message": commit.message,
                     "parents": commit.parents,

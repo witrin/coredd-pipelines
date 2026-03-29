@@ -44,11 +44,12 @@ class KnowledgeGraphTool:
             payload = self.store.payload(node)
             if payload["type"] == "correction":
                 continue
+            category = self._category(payload)
             result.append(
                 {
                     "sha": payload["sha"],
-                    "type": self._type(payload),
-                    "score": payload["score"],
+                    "type": category,
+                    "score": self._score(category),
                 }
             )
 
@@ -73,12 +74,13 @@ class KnowledgeGraphTool:
                 payload = self.store.payload(node)
                 if payload["type"] == "correction":
                     continue
+                category = self._category(payload)
                 item = result.setdefault(
                     payload["sha"],
                     {
                         "sha": payload["sha"],
-                        "type": self._type(payload),
-                        "score": payload["score"],
+                        "type": category,
+                        "score": self._score(category),
                     },
                 )
 
@@ -134,8 +136,8 @@ class KnowledgeGraphTool:
                 )
         return {
             "sha": payload["sha"],
-            "type": self._type(payload),
-            "score": payload["score"],
+            "type": self._category(payload),
+            "score": self._score(self._category(payload)),
             "message": payload["message"],
             "path": path,
             "patch": patch,
@@ -178,7 +180,7 @@ class KnowledgeGraphTool:
                 name: payload[name]
                 for name in ("sha", "message", "timestamp", "files")
                 if name in payload
-            } | {"type": self._type(payload)}
+            } | {"type": self._category(payload)}
 
         if kind == "file":
             return {
@@ -193,22 +195,22 @@ class KnowledgeGraphTool:
             if name in payload
         }
 
-    def _type(self, payload: dict[str, Any]) -> str:
+    def _category(self, payload: dict[str, Any]) -> str:
         current = payload.get("type")
-        if current == "correction":
-            return "correction"
-
-        score = payload.get("score")
-        if score == 1.0:
-            return "blame"
-        if score == 0.6:
-            return "blame-ancestor"
-        if score == 0.3:
-            return "correction-ancestor"
-
         if isinstance(current, str):
             return current.replace("_", "-")
         raise ValueError("Commit payload requires type.")
+
+    def _score(self, category: str) -> float:
+        if category == "blame":
+            return 1.0
+        if category == "blame-ancestor":
+            return 0.6
+        if category == "correction-ancestor":
+            return 0.3
+        if category == "correction":
+            return 0.0
+        raise ValueError(f"Unsupported commit category {category}.")
 
     def _targets(self, node: str) -> list[str]:
         current = self._target.get(node)

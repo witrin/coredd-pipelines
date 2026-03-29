@@ -6,6 +6,12 @@
 
 This cheat sheet summarizes the main artifacts and hand-offs in the LLM4SZZ pipeline.
 
+#### Replication Package
+
+The public replication package for LLM4SZZ is available at:
+
+<https://doi.org/10.6084/m9.figshare.27418236.v1>
+
 #### Notation
 
 Let $c_b$ be the pre-fix commit and $c_a$ the post-fix commit.
@@ -142,6 +148,12 @@ The current implementation still has several unresolved high-level problems in t
 
 Constructive passages normalized from the paper into Markdown.
 
+#### Replication Package
+
+The public replication package for AgenticSZZ is available at:
+
+<https://anonymous.4open.science/r/AgenticSZZ-Replication>
+
 #### High-Level
 
 > “We present AgenticSZZ, the first approach to apply Temporal Knowledge Graphs (TKGs) to software evolution analysis. AgenticSZZ reframes BIC identification from a ranking problem over blame commits into a graph search problem, where temporal ordering is fundamental to causal reasoning about bug introduction. The approach operates in two phases: (1) constructing a TKG that encodes commits with temporal and structural relationships, expanding the search space by traversing file history backward from two reference points (blame commits and the BFC); and (2) leveraging an LLM agent to navigate the graph using specialized tools for candidate exploration and causal analysis.”
@@ -182,7 +194,6 @@ $$
 $$
 
 In the current prototype, direct blame is represented as a `BLAME` edge from `correction` to each directly blamed commit.
-Non-direct candidates are no longer labeled globally; instead the builder stores a numeric `score` plus the derived `older` and `newer` counts that justify that score.
 For edge naming, the paper distinguishes `MODIFIES_FILE` and `MODIFIES_FUNCTION`, while the in-memory prototype currently uses a generic `MODIFIES` edge and lets the target node kind carry the file-versus-function distinction; `PRECEDES`, `BLAME`, and later `DEFINED_IN` keep the graph structure explicit.
 
 > “The TKG construction phase transforms raw repository data into a structured search space that captures both temporal commit relationships and code entity connections.”
@@ -251,9 +262,8 @@ Ensure: BIC prediction with reasoning
 
 #### Open Points
 
-- The current attribution stack treats pull requests as integration events over a `base -> after` interval. This mainline-oriented view affects both the older LLM4SZZ path in [graph.py](/Users/user/Documents/studies/bug-request/src/attribution/graph.py) and the new AgenticSZZ path in [agent.py](/Users/user/Documents/studies/bug-request/src/attribution/agent.py). It matches merge and squash reasonably well, but rebase merges remain more granular unless they are later normalized with extra PR metadata.
-- The fallback path for blameless cases is still missing in the LLM4SZZ implementation in [graph.py](/Users/user/Documents/studies/bug-request/src/attribution/graph.py). The paper-level discussion in this repository now distinguishes ordinary deleted-line blame from context-based fallback, but the older pipeline still does not implement that extra candidate-seeding path.
-- Naming cleanup is still incomplete. The new TKG path in [agent.py](/Users/user/Documents/studies/bug-request/src/attribution/agent.py) now uses `correction`, `blame`, numeric `score`, and a dedicated `BLAME` edge, but the older LLM4SZZ pipeline still sits under the generic module name [graph.py](/Users/user/Documents/studies/bug-request/src/attribution/graph.py). That module should be renamed or split once the agent path stabilizes so the two graph concepts stop colliding.
+- The current attribution stack treats pull requests as integration events over a `base -> after` interval. This mainline-oriented view affects both the older LLM4SZZ path in [graph.py](src/attribution/graph.py) and the new AgenticSZZ path in [agent.py](src/attribution/agent.py). It matches merge and squash reasonably well, but rebase merges remain more granular unless they are later normalized with extra PR metadata.
+- The fallback path for blameless cases is still missing in the LLM4SZZ implementation in [graph.py](src/attribution/graph.py). The paper-level discussion in this repository now distinguishes ordinary deleted-line blame from context-based fallback, but the older pipeline still does not implement that extra candidate-seeding path.
 
 ## Validation
 

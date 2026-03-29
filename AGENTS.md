@@ -5,6 +5,7 @@
 - **Variable naming**: Prefer atomic names and avoid compound names where possible; treat this as a guideline, not a strict rule.
 - **Forbidden patterns**: Do not add defensive revalidation of already guaranteed upstream contracts; do not encode soft contracts with `| None` unless `None` is part of the explicit contract.
 - **Other rules**: Run tests only through Docker-based pipelines in this repository; do not use host-local test execution.
+- **Test fixtures**: Prefer `foo`, `bar`, `baz` style placeholder names in tests; extend with `qux`, `quux`, etc. only when additional dummy values are required, and keep semantic names only when the meaning is part of the behavior under test.
 - **Markdown formatting**: Keep sentences on a single line; insert blank lines only to separate paragraphs.
 - **Lists**: Do not nest bullets or place CLI examples inside enumerations; keep lists flat and concise.
 - **CLI snippets**: Place multi-line commands in fenced code blocks separated by blank lines; never embed them inside list items.

@@ -275,16 +275,15 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                 "a.py",
             )
 
-    def test_candidates_map_type_from_score(self) -> None:
+    def test_candidates_use_canonical_type(self) -> None:
         repository = Mock(spec_set=["parents"])
         store = KnowledgeGraphStore()
         store.add(
             "commit",
             {
-                "sha": "blame",
-                "type": "candidate",
-                "score": 1.0,
-                "message": "blame",
+                "sha": "foo",
+                "type": "blame",
+                "message": "foo",
                 "timestamp": datetime(2024, 1, 3, tzinfo=timezone.utc),
                 "parents": (),
                 "files": (),
@@ -293,10 +292,9 @@ class TestKnowledgeGraphTool(unittest.TestCase):
         store.add(
             "commit",
             {
-                "sha": "ancestor",
-                "type": "candidate",
-                "score": 0.6,
-                "message": "ancestor",
+                "sha": "bar",
+                "type": "blame-ancestor",
+                "message": "bar",
                 "timestamp": datetime(2024, 1, 2, tzinfo=timezone.utc),
                 "parents": (),
                 "files": (),
@@ -305,10 +303,9 @@ class TestKnowledgeGraphTool(unittest.TestCase):
         store.add(
             "commit",
             {
-                "sha": "correction-ancestor",
-                "type": "candidate",
-                "score": 0.3,
-                "message": "correction-ancestor",
+                "sha": "baz",
+                "type": "correction-ancestor",
+                "message": "baz",
                 "timestamp": datetime(2024, 1, 1, tzinfo=timezone.utc),
                 "parents": (),
                 "files": (),
@@ -324,17 +321,17 @@ class TestKnowledgeGraphTool(unittest.TestCase):
             agent.candidates(),
             [
                 {
-                    "sha": "blame",
+                    "sha": "foo",
                     "type": "blame",
                     "score": 1.0,
                 },
                 {
-                    "sha": "ancestor",
+                    "sha": "bar",
                     "type": "blame-ancestor",
                     "score": 0.6,
                 },
                 {
-                    "sha": "correction-ancestor",
+                    "sha": "baz",
                     "type": "correction-ancestor",
                     "score": 0.3,
                 },
@@ -347,10 +344,9 @@ class TestKnowledgeGraphTool(unittest.TestCase):
         store.add(
             "commit",
             {
-                "sha": "base",
-                "type": "candidate",
-                "score": 0.2,
-                "message": "base",
+                "sha": "foo",
+                "type": "correction-ancestor",
+                "message": "foo",
                 "timestamp": datetime(2024, 1, 1, tzinfo=timezone.utc),
                 "parents": (),
                 "files": ("a.py",),
@@ -359,12 +355,11 @@ class TestKnowledgeGraphTool(unittest.TestCase):
         store.add(
             "commit",
             {
-                "sha": "merge",
-                "type": "candidate",
-                "score": 0.6,
-                "message": "merge",
+                "sha": "bar",
+                "type": "blame-ancestor",
+                "message": "bar",
                 "timestamp": datetime(2024, 1, 2, tzinfo=timezone.utc),
-                "parents": ("base", "side"),
+                "parents": ("foo", "baz"),
                 "files": ("a.py",),
             },
         )
@@ -374,14 +369,14 @@ class TestKnowledgeGraphTool(unittest.TestCase):
             store=store,
         )
 
-        payload = agent.meta("merge")["payload"]
+        payload = agent.meta("bar")["payload"]
 
         self.assertEqual(
             payload,
             {
-                "sha": "merge",
+                "sha": "bar",
                 "type": "blame-ancestor",
-                "message": "merge",
+                "message": "bar",
                 "timestamp": datetime(2024, 1, 2, tzinfo=timezone.utc),
                 "files": ("a.py",),
             },
@@ -404,22 +399,21 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                 "source": "gumtree",
             },
         )
-        for sha, score in (
-            ("source", 1.0),
-            ("entity", 0.6),
-            ("file", 0.3),
+        for sha, category, day in (
+            ("foo", "blame", 11),
+            ("bar", "blame-ancestor", 7),
+            ("baz", "correction-ancestor", 4),
         ):
             store.add(
                 "commit",
                 {
                     "sha": sha,
-                    "type": "candidate",
-                    "score": score,
+                    "type": category,
                     "message": sha,
                     "timestamp": datetime(
                         2024,
                         1,
-                        1 + int(score * 10),
+                        day,
                         tzinfo=timezone.utc,
                     ),
                     "parents": (),
@@ -427,11 +421,11 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                 },
             )
 
-        store.link("MODIFIES", "commit:source", "file:a.py")
-        store.link("EDIT", "commit:source", "entity:a.py:function=foo")
-        store.link("MODIFIES", "commit:entity", "file:a.py")
-        store.link("EDIT", "commit:entity", "entity:a.py:function=foo")
-        store.link("MODIFIES", "commit:file", "file:a.py")
+        store.link("MODIFIES", "commit:foo", "file:a.py")
+        store.link("EDIT", "commit:foo", "entity:a.py:function=foo")
+        store.link("MODIFIES", "commit:bar", "file:a.py")
+        store.link("EDIT", "commit:bar", "entity:a.py:function=foo")
+        store.link("MODIFIES", "commit:baz", "file:a.py")
 
         agent = KnowledgeGraphTool(
             repository=repository,
@@ -439,16 +433,16 @@ class TestKnowledgeGraphTool(unittest.TestCase):
         )
 
         self.assertEqual(
-            agent.neighbors("source"),
+            agent.neighbors("foo"),
             [
                 {
-                    "sha": "entity",
+                    "sha": "bar",
                     "type": "blame-ancestor",
                     "score": 0.6,
                     "entities": ["file=a.py:function=foo"],
                 },
                 {
-                    "sha": "file",
+                    "sha": "baz",
                     "type": "correction-ancestor",
                     "score": 0.3,
                     "entities": ["file=a.py"],
@@ -480,21 +474,20 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                 "source": "gumtree",
             },
         )
-        for sha, score in (
-            ("source", 1.0),
-            ("class", 0.6),
+        for sha, category, day in (
+            ("foo", "blame", 11),
+            ("bar", "blame-ancestor", 7),
         ):
             store.add(
                 "commit",
                 {
                     "sha": sha,
-                    "type": "candidate",
-                    "score": score,
+                    "type": category,
                     "message": sha,
                     "timestamp": datetime(
                         2024,
                         1,
-                        1 + int(score * 10),
+                        day,
                         tzinfo=timezone.utc,
                     ),
                     "parents": (),
@@ -502,10 +495,10 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                 },
             )
 
-        store.link("MODIFIES", "commit:source", "file:a.py")
-        store.link("EDIT", "commit:source", "entity:a.py:class=Outer:method=bar")
-        store.link("MODIFIES", "commit:class", "file:a.py")
-        store.link("EDIT", "commit:class", "entity:a.py:class=Outer")
+        store.link("MODIFIES", "commit:foo", "file:a.py")
+        store.link("EDIT", "commit:foo", "entity:a.py:class=Outer:method=bar")
+        store.link("MODIFIES", "commit:bar", "file:a.py")
+        store.link("EDIT", "commit:bar", "entity:a.py:class=Outer")
 
         agent = KnowledgeGraphTool(
             repository=repository,
@@ -513,10 +506,10 @@ class TestKnowledgeGraphTool(unittest.TestCase):
         )
 
         self.assertEqual(
-            agent.neighbors("source"),
+            agent.neighbors("foo"),
             [
                 {
-                    "sha": "class",
+                    "sha": "bar",
                     "type": "blame-ancestor",
                     "score": 0.6,
                     "entities": ["file=a.py:class=Outer"],
@@ -586,10 +579,9 @@ class TestKnowledgeGraphTool(unittest.TestCase):
         store.add(
             "commit",
             {
-                "sha": "sha",
-                "type": "candidate",
-                "score": 0.5,
-                "message": "msg",
+                "sha": "foo",
+                "type": "correction-ancestor",
+                "message": "foo",
                 "timestamp": 0,
                 "files": [],
             },
@@ -600,10 +592,10 @@ class TestKnowledgeGraphTool(unittest.TestCase):
         )
 
         for _ in range(30):
-            agent.content("sha")
+            agent.content("foo")
 
         with self.assertRaises(ValueError):
-            agent.content("sha")
+            agent.content("foo")
 
 
 if __name__ == "__main__":
