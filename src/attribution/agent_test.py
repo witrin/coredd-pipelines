@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import Mock
 from unittest.mock import patch
 
 from langchain_core.tools import BaseTool
@@ -327,11 +328,27 @@ class TestKnowledgeGraphTool(unittest.TestCase):
         self.assertIn("top-ranked commit candidates", tools[0].description)
 
     def test_budget(self) -> None:
-        agent = KnowledgeGraphTool(
-            repository=object.__new__(VersionControl),
-            store=KnowledgeGraphStore(),
+        repository = Mock(spec_set=["parents"])
+        repository.parents.return_value = []
+        store = KnowledgeGraphStore()
+        store.add(
+            "commit",
+            {
+                "sha": "sha",
+                "type": "candidate",
+                "score": 0.5,
+                "message": "msg",
+                "timestamp": 0,
+                "files": [],
+            },
         )
-        agent._reads = 30
+        agent = KnowledgeGraphTool(
+            repository=repository,
+            store=store,
+        )
+
+        for _ in range(30):
+            agent.content("sha")
 
         with self.assertRaises(ValueError):
             agent.content("sha")

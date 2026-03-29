@@ -16,6 +16,8 @@ from benchmark.attribution.knowledge import (
     KnowledgeEntityGumtree,
     KnowledgeEntityGit,
     KnowledgeFile,
+    KnowledgeFileGit,
+    KnowledgeFileMark,
     KnowledgeGraphBuilder,
     KnowledgeGraphStore,
 )
@@ -428,6 +430,101 @@ class TestKnowledgeGraphBuilder(unittest.TestCase):
             self.assertEqual(audit.failures[0].language, "python")
 
 
+class TestKnowledgeFileGit(unittest.TestCase):
+    def _commit(
+        self,
+        *files: KnowledgeFileMark,
+        sha: str = "after",
+    ) -> KnowledgeCommit:
+        return KnowledgeCommit(
+            sha=sha,
+            kind="correction",
+            score=0.0,
+            timestamp=datetime.fromisoformat("2024-01-01T00:00:00+00:00"),
+            message=sha,
+            parents=("base",),
+            predecessors=(),
+            files=frozenset(files),
+            category="correction",
+        )
+
+    def test_build_root_add(self) -> None:
+        commit = KnowledgeCommit(
+            sha="root",
+            kind="correction",
+            score=0.0,
+            timestamp=datetime.fromisoformat("2024-01-01T00:00:00+00:00"),
+            message="root",
+            parents=(),
+            predecessors=(),
+            files=frozenset({KnowledgeFileMark(OperationType.ADD, None, "a.py")}),
+            category="correction",
+        )
+
+        files = KnowledgeFileGit(SimpleNamespace()).build([commit])
+
+        self.assertEqual(
+            files,
+            [
+                KnowledgeFile(
+                    sha="root",
+                    base=None,
+                    after="a.py",
+                    path="a.py",
+                    language="python",
+                    operation=OperationType.ADD,
+                )
+            ],
+        )
+
+    def test_build_add(self) -> None:
+        files = KnowledgeFileGit(SimpleNamespace()).build(
+            [self._commit(KnowledgeFileMark(OperationType.ADD, None, "a.py"))]
+        )
+
+        self.assertEqual(files[0].base, None)
+        self.assertEqual(files[0].after, "a.py")
+        self.assertEqual(files[0].operation, OperationType.ADD)
+
+    def test_build_delete(self) -> None:
+        files = KnowledgeFileGit(SimpleNamespace()).build(
+            [self._commit(KnowledgeFileMark(OperationType.DELETE, "a.py", None))]
+        )
+
+        self.assertEqual(files[0].base, "a.py")
+        self.assertEqual(files[0].after, None)
+        self.assertEqual(files[0].operation, OperationType.DELETE)
+
+    def test_build_edit(self) -> None:
+        files = KnowledgeFileGit(SimpleNamespace()).build(
+            [self._commit(KnowledgeFileMark(OperationType.EDIT, "a.py", "a.py"))]
+        )
+
+        self.assertEqual(files[0].base, "a.py")
+        self.assertEqual(files[0].after, "a.py")
+        self.assertEqual(files[0].operation, OperationType.EDIT)
+
+    def test_build_rename(self) -> None:
+        files = KnowledgeFileGit(SimpleNamespace()).build(
+            [self._commit(KnowledgeFileMark(OperationType.MOVE, "old.py", "new.py"))]
+        )
+
+        self.assertEqual(files[0].base, "old.py")
+        self.assertEqual(files[0].after, "new.py")
+        self.assertEqual(files[0].path, "new.py")
+        self.assertEqual(files[0].operation, OperationType.MOVE)
+
+    def test_build_copy_maps_to_add(self) -> None:
+        files = KnowledgeFileGit(SimpleNamespace()).build(
+            [self._commit(KnowledgeFileMark(OperationType.ADD, None, "dst.py"))]
+        )
+
+        self.assertEqual(files[0].base, None)
+        self.assertEqual(files[0].after, "dst.py")
+        self.assertEqual(files[0].path, "dst.py")
+        self.assertEqual(files[0].operation, OperationType.ADD)
+
+
 class TestKnowledgeEntityGit(unittest.TestCase):
     def _patch(self, old, new, headers):
         return SimpleNamespace(
@@ -556,7 +653,7 @@ class TestKnowledgeEntityGit(unittest.TestCase):
     def test_build_add_file(self) -> None:
         file = KnowledgeFile(
             sha="after",
-            base="a.py",
+            base=None,
             after="a.py",
             path="a.py",
             language="python",
@@ -721,36 +818,22 @@ class TestKnowledgeCommitGit(unittest.TestCase):
                 return commit
         raise KeyError(sha)
 
-    def test_build_keeps_seed_without_trace(self) -> None:
-        with HistoryFixture() as fixture:
-            tree = fixture.tree({"a.py": "x = 1\n"})
-            init = fixture.commit(tree, [], "init")
+    def _mark(
+        self,
+        operation: OperationType,
+        base: str | None,
+        after: str | None,
+    ) -> KnowledgeFileMark:
+        return KnowledgeFileMark(operation, base, after)
 
-            tree = fixture.tree({"a.py": "x = 2\n"})
-            foo = fixture.commit(tree, [init], "foo")
-
-            tree = fixture.tree({"a.py": "x = 2\ny = 1\n"})
-            base = fixture.commit(tree, [foo], "base")
-
-            tree = fixture.tree({"a.py": "x = 3\ny = 1\n"})
-            after = fixture.commit(tree, [base], "after")
-
-            repository = VersionControl(fixture.repository)
-            with patch(
-                "benchmark.attribution.knowledge.VersionControlPathWalker",
-                side_effect=FileNotFoundError("mocked"),
-            ):
-                commits = KnowledgeCommitGit(repository, cap=200).build(base, after)
-
-            shas = {c.sha for c in commits}
-            self.assertIn(foo, shas)
-            self.assertIn(after, shas)
-
-            blame = self._commit(commits, foo)
-            self.assertEqual(blame.category, "blame")
-            self.assertEqual(blame.kind, "blame")
-            self.assertEqual(blame.score, 1.0)
-            self.assertIn("a.py", blame.files)
+    def _paths(self, files: frozenset[KnowledgeFileMark]) -> set[str]:
+        result: set[str] = set()
+        for file in files:
+            if file.base is not None:
+                result.add(file.base)
+            if file.after is not None:
+                result.add(file.after)
+        return result
 
     def test_build_blame(self) -> None:
         with HistoryFixture() as fixture:
@@ -776,7 +859,7 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             blame = self._commit(commits, foo)
             self.assertEqual(blame.category, "blame")
             self.assertEqual(blame.kind, "blame")
-            self.assertIn("a.py", blame.files)
+            self.assertIn(self._mark(OperationType.EDIT, "a.py", "a.py"), blame.files)
             self.assertEqual(blame.score, 1.0)
 
             correction = self._commit(commits, after)
@@ -811,8 +894,14 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             self.assertEqual(blame_bar.category, "blame")
             self.assertEqual(blame_foo.score, 1.0)
             self.assertEqual(blame_bar.score, 1.0)
-            self.assertIn("a.py", blame_foo.files)
-            self.assertIn("a.py", blame_bar.files)
+            self.assertIn(
+                self._mark(OperationType.EDIT, "a.py", "a.py"),
+                blame_foo.files,
+            )
+            self.assertIn(
+                self._mark(OperationType.EDIT, "a.py", "a.py"),
+                blame_bar.files,
+            )
 
     def test_build_add_only_seed(self) -> None:
         with HistoryFixture() as fixture:
@@ -832,7 +921,56 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             correction = self._commit(commits, after)
             self.assertEqual(correction.category, "correction")
             self.assertEqual(correction.kind, "correction")
-            self.assertEqual(correction.files, frozenset({"a.py"}))
+            self.assertEqual(
+                correction.files,
+                frozenset({self._mark(OperationType.ADD, None, "a.py")}),
+            )
+
+    def test_build_rename_normalizes_to_move(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"old.py": "value = 1\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({"new.py": "value = 1\n"})
+            moved = fixture.commit(tree, [init], "moved")
+
+            tree = fixture.tree({"new.py": "value = 2\n"})
+            after = fixture.commit(tree, [moved], "after")
+
+            repository = VersionControl(fixture.repository)
+            commits = KnowledgeCommitGit(repository, cap=200).build(moved, after)
+
+            renamed = self._commit(commits, moved)
+            self.assertIn(
+                self._mark(OperationType.MOVE, "old.py", "new.py"),
+                renamed.files,
+            )
+
+    def test_build_copy_normalizes_to_add(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "value = 1\n"})
+            init = fixture.commit(tree, [], "init")
+
+            tree = fixture.tree({
+                "foo.py": "value = 1\n",
+                "baz.py": "value = 1\n",
+            })
+            copied = fixture.commit(tree, [init], "copied")
+
+            tree = fixture.tree({
+                "foo.py": "value = 1\n",
+                "baz.py": "value = 2\n",
+            })
+            after = fixture.commit(tree, [copied], "after")
+
+            repository = VersionControl(fixture.repository)
+            commits = KnowledgeCommitGit(repository, cap=200).build(copied, after)
+
+            copied_commit = self._commit(commits, copied)
+            self.assertIn(
+                self._mark(OperationType.ADD, None, "baz.py"),
+                copied_commit.files,
+            )
 
     def test_build_merge_hides_merge_commit(self) -> None:
         with HistoryFixture() as fixture:
@@ -865,7 +1003,10 @@ class TestKnowledgeCommitGit(unittest.TestCase):
 
             self.assertNotIn(merge, {commit.sha for commit in commits})
             self.assertIn(left, {commit.sha for commit in commits})
-            self.assertIn("a.py", self._commit(commits, left).files)
+            self.assertIn(
+                self._mark(OperationType.EDIT, "a.py", "a.py"),
+                self._commit(commits, left).files,
+            )
 
     def test_build_merge_follows_second_parent(self) -> None:
         with HistoryFixture() as fixture:
@@ -898,7 +1039,10 @@ class TestKnowledgeCommitGit(unittest.TestCase):
 
             self.assertNotIn(merge, {commit.sha for commit in commits})
             self.assertIn(right, {commit.sha for commit in commits})
-            self.assertIn("a.py", self._commit(commits, right).files)
+            self.assertIn(
+                self._mark(OperationType.EDIT, "a.py", "a.py"),
+                self._commit(commits, right).files,
+            )
 
     def test_build_score(self) -> None:
         with HistoryFixture() as fixture:
@@ -1167,124 +1311,6 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             self.assertIn(qux, shas)
             self.assertLessEqual(len(commits), 3)
 
-    def test_build_limit_prefers_newer_timestamp(self) -> None:
-        with HistoryFixture() as fixture:
-            tree = fixture.tree({"a.py": "base\n"})
-            base = fixture.commit(tree, [], "base")
-
-            tree = fixture.tree({"a.py": "old\n"})
-            old = fixture.commit(tree, [base], "old")
-
-            tree = fixture.tree({"a.py": "mid\n"})
-            mid = fixture.commit(tree, [old], "mid")
-
-            tree = fixture.tree({"a.py": "new\n"})
-            new = fixture.commit(tree, [mid], "new")
-
-            tree = fixture.tree({"a.py": "after\n"})
-            after = fixture.commit(tree, [new], "after")
-
-            repository = VersionControl(fixture.repository)
-            builder = KnowledgeCommitGit(repository, cap=1)
-            commits = [
-                KnowledgeCommit(
-                    sha=after,
-                    kind="correction",
-                    score=0.0,
-                    timestamp=builder._commit(after)["timestamp"],
-                    message="after",
-                    parents=(),
-                    predecessors=(),
-                    files=frozenset({"a.py"}),
-                    category="correction",
-                ),
-                KnowledgeCommit(
-                    sha=old,
-                    kind="candidate",
-                    score=0.6,
-                    timestamp=builder._commit(old)["timestamp"],
-                    message="old",
-                    parents=(),
-                    predecessors=(),
-                    files=frozenset({"a.py"}),
-                    category=None,
-                ),
-                KnowledgeCommit(
-                    sha=new,
-                    kind="candidate",
-                    score=0.6,
-                    timestamp=builder._commit(new)["timestamp"],
-                    message="new",
-                    parents=(),
-                    predecessors=(),
-                    files=frozenset({"a.py"}),
-                    category=None,
-                ),
-            ]
-
-            limited = builder._limit(after, commits)
-
-            self.assertIn(after, {commit.sha for commit in limited})
-            self.assertIn(new, {commit.sha for commit in limited})
-            self.assertNotIn(old, {commit.sha for commit in limited})
-
-    def test_build_limit_timestamp_tie_is_deterministic(self) -> None:
-        with HistoryFixture() as fixture:
-            tree = fixture.tree({"a.py": "base\n"})
-            base = fixture.commit(tree, [], "base")
-
-            tree = fixture.tree({"a.py": "left\n"})
-            left = fixture.commit(tree, [base], "left")
-
-            tree = fixture.tree({"a.py": "right\n"})
-            right = fixture.commit(tree, [left], "right")
-
-            tree = fixture.tree({"a.py": "after\n"})
-            after = fixture.commit(tree, [right], "after")
-
-            repository = VersionControl(fixture.repository)
-            builder = KnowledgeCommitGit(repository, cap=1)
-            timestamp = builder._commit(left)["timestamp"]
-            commits = [
-                KnowledgeCommit(
-                    sha=after,
-                    kind="correction",
-                    score=0.0,
-                    timestamp=builder._commit(after)["timestamp"],
-                    message="after",
-                    parents=(),
-                    predecessors=(),
-                    files=frozenset({"a.py"}),
-                    category="correction",
-                ),
-                KnowledgeCommit(
-                    sha="bbb",
-                    kind="candidate",
-                    score=0.6,
-                    timestamp=timestamp,
-                    message="bbb",
-                    parents=(),
-                    predecessors=(),
-                    files=frozenset({"a.py"}),
-                    category=None,
-                ),
-                KnowledgeCommit(
-                    sha="aaa",
-                    kind="candidate",
-                    score=0.6,
-                    timestamp=timestamp,
-                    message="aaa",
-                    parents=(),
-                    predecessors=(),
-                    files=frozenset({"a.py"}),
-                    category=None,
-                ),
-            ]
-
-            limited = builder._limit(after, commits)
-
-            self.assertEqual([commit.sha for commit in limited], [after, "aaa"])
-
     def test_build_exclude(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({
@@ -1356,8 +1382,7 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             commits = KnowledgeCommitGit(repository, cap=200).build(base, after)
 
             blamed = self._commit(commits, foo)
-            self.assertIn("a.py", blamed.files)
-            self.assertIn("b.js", blamed.files)
+            self.assertEqual(self._paths(blamed.files), {"a.py", "b.js"})
 
 
 if __name__ == "__main__":

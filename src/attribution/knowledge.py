@@ -15,6 +15,13 @@ from benchmark.attribution.history import VersionControl, VersionControlPathWalk
 
 
 @dataclass(frozen=True)
+class KnowledgeFileMark:
+    operation: OperationType
+    base: str | None
+    after: str | None
+
+
+@dataclass(frozen=True)
 class KnowledgeCommit:
     sha: str
     kind: str
@@ -23,7 +30,7 @@ class KnowledgeCommit:
     message: str
     parents: tuple[str, ...]
     predecessors: tuple[str, ...]
-    files: frozenset[str]
+    files: frozenset[KnowledgeFileMark]
     category: str | None
 
 
@@ -282,7 +289,7 @@ class KnowledgeCommitGit:
         seeds = self._seed(base, after)
         blame = {sha for sha in seeds if sha != after}
 
-        trace: dict[str, set[str]] = {}
+        trace: dict[str, set[KnowledgeFileMark]] = {}
         for sha, paths in seeds.items():
             for name in sorted(f for f in paths if f):
                 try:
@@ -295,15 +302,45 @@ class KnowledgeCommitGit:
                 except (TypeError, FileNotFoundError):
                     continue
                 for entry in walker.entries():
-                    if entry.type in ("renamed", "copied"):
-                        trace.setdefault(entry.commit, set()).update(entry.path)
-                    else:
-                        trace.setdefault(entry.commit, set()).add(entry.path)
+                    trace.setdefault(entry.commit, set()).add(
+                        KnowledgeFileMark(
+                            (
+                                OperationType.ADD
+                                if entry.operation == OperationType.COPY
+                                else entry.operation
+                            ),
+                            None if entry.operation == OperationType.COPY else entry.base,
+                            entry.after,
+                        )
+                    )
         trace = {sha: files for sha, files in trace.items() if files}
 
-        files: dict[str, set[str]] = {sha: set(values) for sha, values in trace.items()}
-        for sha, values in seeds.items():
-            files.setdefault(sha, set()).update(values)
+        files: dict[str, set[KnowledgeFileMark]] = {
+            sha: set(values) for sha, values in trace.items()
+        }
+        for sha in seeds:
+            if sha in files:
+                continue
+            parents = self._repository.parents(sha)
+            if not parents:
+                files[sha] = set()
+                continue
+            files[sha] = {
+                KnowledgeFileMark(
+                    (
+                        OperationType.ADD
+                        if operation.operation == OperationType.COPY
+                        else operation.operation
+                    ),
+                    (
+                        None
+                        if operation.operation == OperationType.COPY
+                        else operation.base
+                    ),
+                    operation.after,
+                )
+                for operation in self._repository.manifest(parents[0], sha)
+            }
 
         predecessors, order = self._parents(set(files))
         commits = self._commits(after, order, blame, files, predecessors)
@@ -320,9 +357,9 @@ class KnowledgeCommitGit:
         files: set[str] = set()
 
         for patch in diff:
-            path = patch.delta.old_file.path
+            path = patch.delta.new_file.path
             if path is None:
-                path = patch.delta.new_file.path
+                path = patch.delta.old_file.path
             if not path:
                 continue
             files.add(path)
@@ -461,7 +498,7 @@ class KnowledgeCommitGit:
         after: str,
         order: list[str],
         blame: set[str],
-        trace: dict[str, set[str]],
+        trace: dict[str, set[KnowledgeFileMark]],
         predecessors: dict[str, tuple[str, ...]],
     ) -> list[KnowledgeCommit]:
         scores = self._score(after, order, blame)
@@ -481,7 +518,24 @@ class KnowledgeCommitGit:
                     message=cast(str, meta["message"]),
                     parents=parents,
                     predecessors=predecessors.get(sha, ()),
-                    files=frozenset(trace.get(sha, set())),
+                    files=frozenset(
+                        sorted(
+                            trace.get(sha, set()),
+                            key=lambda mark: (
+                                (
+                                    mark.after
+                                    if mark.after is not None
+                                    else mark.base
+                                ),
+                                mark.operation.name,
+                                (
+                                    mark.base
+                                    if mark.base is not None
+                                    else mark.after
+                                ),
+                            ),
+                        )
+                    ),
                     category=category,
                 )
             )
@@ -544,88 +598,32 @@ class KnowledgeFileGit:
         seen: set[tuple[str, str]] = set()
 
         for commit in commits:
-            parent = self._parent(commit.sha)
-            paths = commit.files
-
-            if parent is None:
-                for path in sorted(paths):
-                    if (commit.sha, path) in seen:
-                        continue
-                    seen.add((commit.sha, path))
-                    result.append(
-                        KnowledgeFile(
-                            sha=commit.sha,
-                            base=path,
-                            after=path,
-                            path=path,
-                            language=self._language(path),
-                            operation=OperationType.ADD,
-                        )
-                    )
-                continue
-
-            diff = self._repository.diff(parent, commit.sha)
-            matched: set[str] = set()
-
-            for patch in diff:
-                old = patch.delta.old_file.path
-                new = patch.delta.new_file.path
-                if old not in paths and new not in paths:
-                    continue
-
-                path = cast(str, new if new is not None else old)
-                matched.add(path)
+            for mark in sorted(
+                commit.files,
+                key=lambda value: (
+                    value.after if value.after is not None else value.base,
+                    value.operation.name,
+                    value.base if value.base is not None else value.after,
+                ),
+            ):
+                path = mark.after or mark.base
                 if (commit.sha, path) in seen:
                     continue
                 seen.add((commit.sha, path))
                 result.append(
                     KnowledgeFile(
                         sha=commit.sha,
-                        base=old,
-                        after=new,
+                        base=mark.base,
+                        after=mark.after,
                         path=path,
                         language=self._language(path),
-                        operation=self._operation(old, new),
-                    )
-                )
-
-            for path in sorted(paths - matched):
-                if (commit.sha, path) in seen:
-                    continue
-                seen.add((commit.sha, path))
-                result.append(
-                    KnowledgeFile(
-                        sha=commit.sha,
-                        base=path,
-                        after=path,
-                        path=path,
-                        language=self._language(path),
-                        operation=OperationType.EDIT,
+                        operation=mark.operation,
                     )
                 )
 
         return result
 
-    def _parent(self, sha: str) -> str | None:
-        parents = self._repository.parents(sha)
-        return parents[0] if parents else None
-
-    def _operation(
-        self,
-        base: str | None,
-        after: str | None,
-    ) -> OperationType:
-        if base is None:
-            return OperationType.ADD
-        if after is None:
-            return OperationType.DELETE
-        if base != after:
-            return OperationType.MOVE
-        return OperationType.EDIT
-
-    def _language(self, path: str | None) -> str | None:
-        if not path:
-            return None
+    def _language(self, path: str) -> str | None:
         if path.endswith(".py"):
             return "python"
         if path.endswith(".ts"):

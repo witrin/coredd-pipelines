@@ -7,6 +7,7 @@ from datetime import datetime
 
 class OperationType(enum.Enum):
     ADD = "add"
+    COPY = "copy"
     DELETE = "delete"
     MOVE = "move"
     EDIT = "edit"

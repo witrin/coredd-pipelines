@@ -145,42 +145,57 @@ class TestLLM4SZZGraph(unittest.TestCase):
         select = object()
         abort = object()
         finalize = object()
+        summarize_builder = Mock(return_value=summarize)
+        explain_builder = Mock(return_value=explain)
+        aggregate_builder = Mock(return_value=aggregate)
+        expand_builder = Mock(return_value=expand)
+        hint_builder = Mock(return_value=hint)
+        refine_builder = Mock(return_value=refine)
+        verify_builder = Mock(return_value=verify)
+        blame_builder = Mock(return_value=blame)
+        compare_builder = Mock(return_value=compare)
+        select_builder = Mock(return_value=select)
+        abort_builder = Mock(return_value=abort)
+        finalize_builder = Mock(return_value=finalize)
         builder = LLM4SZZGraphBuilder(
-            summarize=Mock(return_value=summarize),
-            explain=Mock(return_value=explain),
-            aggregate=Mock(return_value=aggregate),
-            expand=Mock(return_value=expand),
-            hint=Mock(return_value=hint),
-            refine=Mock(return_value=refine),
-            verify=Mock(return_value=verify),
-            blame=Mock(return_value=blame),
-            compare=Mock(return_value=compare),
-            select=Mock(return_value=select),
-            abort=Mock(return_value=abort),
-            finalize=Mock(return_value=finalize),
+            summarize=summarize_builder,
+            explain=explain_builder,
+            aggregate=aggregate_builder,
+            expand=expand_builder,
+            hint=hint_builder,
+            refine=refine_builder,
+            verify=verify_builder,
+            blame=blame_builder,
+            compare=compare_builder,
+            select=select_builder,
+            abort=abort_builder,
+            finalize=finalize_builder,
         )
 
         graph = builder.create(repository)
 
         self.assertIsInstance(graph, LLM4SZZGraph)
-        self.assertIs(graph._summarize, summarize)
-        self.assertIs(graph._explain, explain)
-        self.assertIs(graph._aggregate, aggregate)
-        self.assertIs(graph._expand, expand)
-        self.assertIs(graph._hint, hint)
-        self.assertIs(graph._refine, refine)
-        self.assertIs(graph._verify, verify)
-        self.assertIs(graph._blame, blame)
-        self.assertIs(graph._compare, compare)
-        self.assertIs(graph._select, select)
-        self.assertIs(graph._abort, abort)
-        self.assertIs(graph._finalize, finalize)
+        for factory in (
+            summarize_builder,
+            explain_builder,
+            aggregate_builder,
+            expand_builder,
+            hint_builder,
+            refine_builder,
+            verify_builder,
+            blame_builder,
+            compare_builder,
+            select_builder,
+            abort_builder,
+            finalize_builder,
+        ):
+            factory.assert_called_once_with(repository)
 
     def test_invoke(self) -> None:
         graph = self._graph()
         compiled = Mock(spec_set=["invoke"])
         compiled.invoke.return_value = {"introducer": "abc123", "aborted": True}
-        graph._graph = compiled
+        graph.build = Mock(return_value=compiled)
 
         result = graph.invoke(self._correction())
 
@@ -2359,47 +2374,6 @@ class TestLLM4SZZGraph(unittest.TestCase):
         ).build()
         self.assertIsNotNone(graph)
 
-    def test_agentic_seed(self) -> None:
-        search = Mock(spec_set=["run"])
-        search.run.return_value = {"introducer": "abc123"}
-        graph = AgenticSZZGraph(seed=Mock(spec_set=["run"]), search=search)
-
-        result = graph._run_search(
-            {
-                "base": "base-sha",
-                "after": "after-sha",
-                "seed": [
-                    {
-                        "title": "Commit Message",
-                        "body": "prompt seed",
-                    }
-                ],
-                "nodes": {},
-            }
-        )
-
-        search.run.assert_called_once_with(
-            {
-                "base": "base-sha",
-                "after": "after-sha",
-                "seed": [
-                    {
-                        "title": "Commit Message",
-                        "body": "prompt seed",
-                    }
-                ],
-            }
-        )
-        self.assertEqual(
-            result,
-            {
-                "introducer": "abc123",
-                "nodes": {
-                    "search": {"introducer": "abc123"},
-                },
-            },
-        )
-
     def test_agentic_interface(self) -> None:
         self.assertIsInstance(
             AgenticSZZGraph(
@@ -2425,16 +2399,18 @@ class TestLLM4SZZGraph(unittest.TestCase):
         repository = object.__new__(VersionControl)
         seed = object()
         search = object()
+        seed_builder = Mock(return_value=seed)
+        search_builder = Mock(return_value=search)
         builder = AgenticSZZGraphBuilder(
-            seed=Mock(return_value=seed),
-            search=Mock(return_value=search),
+            seed=seed_builder,
+            search=search_builder,
         )
 
         graph = builder.create(repository)
 
         self.assertIsInstance(graph, AgenticSZZGraph)
-        self.assertIs(graph._seed, seed)
-        self.assertIs(graph._search, search)
+        seed_builder.assert_called_once_with(repository)
+        search_builder.assert_called_once_with(repository)
 
     def test_agentic_invoke(self) -> None:
         graph = AgenticSZZGraph(
@@ -2443,7 +2419,7 @@ class TestLLM4SZZGraph(unittest.TestCase):
         )
         compiled = Mock(spec_set=["invoke"])
         compiled.invoke.return_value = {"introducer": "abc123", "aborted": False}
-        graph._graph = compiled
+        graph.build = Mock(return_value=compiled)
         correction = Change(
             number=1,
             base="base-sha",
@@ -2463,40 +2439,6 @@ class TestLLM4SZZGraph(unittest.TestCase):
         self.assertEqual(
             result,
             {"introducer": "abc123", "aborted": False},
-        )
-
-    def test_agentic_state(self) -> None:
-        seed = Mock(spec_set=["run"])
-        seed.run.return_value = {
-            "base": "base-sha",
-            "after": "after-sha",
-            "seed": [{"title": "Commit Message", "body": "Fix parser"}],
-        }
-        graph = AgenticSZZGraph(seed=seed, search=Mock(spec_set=["run"]))
-        correction = Change(
-            number=1,
-            base="base-sha",
-            after="after-sha",
-            description="Fix parser",
-        )
-
-        result = graph._run_seed({"correction": correction, "nodes": {}})
-
-        seed.run.assert_called_once_with({"correction": correction})
-        self.assertEqual(
-            result,
-            {
-                "base": "base-sha",
-                "after": "after-sha",
-                "seed": [{"title": "Commit Message", "body": "Fix parser"}],
-                "nodes": {
-                    "seed": {
-                        "base": "base-sha",
-                        "after": "after-sha",
-                        "seed": [{"title": "Commit Message", "body": "Fix parser"}],
-                    }
-                },
-            },
         )
 
     @patch("benchmark.attribution.search.EntityPath.resolve")
@@ -2558,33 +2500,28 @@ class TestLLM4SZZGraph(unittest.TestCase):
             SearchNode().run({})
 
     def test_search(self) -> None:
-        tool = Mock(spec_set=[])
-        node = SearchNode(tool=tool, llm=object())
-        node._invoke = Mock(
-            return_value={"structured_response": {"introducer": "deadbeef"}}
-        )
+        tool = Mock(spec_set=["tools"])
+        tool.tools.return_value = []
+        agent = Mock(spec_set=["invoke"])
+        agent.invoke.return_value = {
+            "structured_response": {"introducer": "deadbeef"},
+        }
 
-        result = node.run(
-            {
-                "base": "base-sha",
-                "after": "after-sha",
-                "seed": [
-                    {
-                        "title": "Commit Message",
-                        "body": "prompt seed",
-                    }
-                ],
-            }
-        )
-
-        node._invoke.assert_called_once_with(
-            [
+        with patch("benchmark.attribution.search.create_react_agent", return_value=agent):
+            result = SearchNode(tool=tool, llm=object()).run(
                 {
-                    "title": "Commit Message",
-                    "body": "prompt seed",
+                    "base": "base-sha",
+                    "after": "after-sha",
+                    "seed": [
+                        {
+                            "title": "Commit Message",
+                            "body": "prompt seed",
+                        }
+                    ],
                 }
-            ]
-        )
+            )
+
+        tool.tools.assert_called_once_with()
         self.assertEqual(result, {"introducer": "deadbeef"})
 
     @patch("benchmark.attribution.search.create_react_agent")
@@ -2597,7 +2534,8 @@ class TestLLM4SZZGraph(unittest.TestCase):
         }
         factory.return_value = agent
 
-        node = SearchNode(tool=tool, llm=object())
+        llm = object()
+        node = SearchNode(tool=tool, llm=llm)
 
         result = node.run(
             {
@@ -2618,7 +2556,7 @@ class TestLLM4SZZGraph(unittest.TestCase):
 
         tool.tools.assert_called_once_with()
         factory.assert_called_once_with(
-            node._llm,
+            llm,
             tools=["tool-a", "tool-b"],
             prompt=inspect.cleandoc(
                 """

@@ -52,8 +52,9 @@ class TestVersionControlPathWalkerSubmodule(unittest.TestCase):
         result = list(walker.entries())
 
         self.assertEqual(len(result), 1)
-        self.assertEqual(result[0].type, "added")
-        self.assertEqual(result[0].path, "baz.py")
+        self.assertEqual(result[0].operation, OperationType.ADD)
+        self.assertEqual(result[0].base, None)
+        self.assertEqual(result[0].after, "baz.py")
 
 
 class TestVersionControlParents(unittest.TestCase):
@@ -253,6 +254,16 @@ class TestVersionControlManifest(unittest.TestCase):
         tree = self._fixture.tree({"foo.txt": "bar", "bar.txt": "baz"})
         self.sha_baz = self._fixture.commit(tree, [self.sha_bar], "baz")
 
+        tree = self._fixture.tree({"qux.txt": "bar", "bar.txt": "baz"})
+        self.sha_qux = self._fixture.commit(tree, [self.sha_baz], "qux")
+
+        tree = self._fixture.tree({
+            "qux.txt": "bar",
+            "bar.txt": "baz",
+            "copy.txt": "bar",
+        })
+        self.sha_quux = self._fixture.commit(tree, [self.sha_qux], "quux")
+
         self._candidate = VersionControl(self._fixture.repository)
 
     def tearDown(self) -> None:
@@ -272,6 +283,43 @@ class TestVersionControlManifest(unittest.TestCase):
             self.sha_bar, self.sha_bar, self._outdir.name
         )
         self.assertEqual(ops, [])
+
+    def test_manifest_rename(self) -> None:
+        statuses = {
+            delta.status
+            for delta in self._candidate.diff(self.sha_baz, self.sha_qux).deltas
+        }
+        self.assertIn(pygit2.GIT_DELTA_RENAMED, statuses)
+        self.assertEqual(
+            self._candidate.manifest(self.sha_baz, self.sha_qux),
+            [
+                FileOperation(
+                    base="foo.txt",
+                    after="qux.txt",
+                    operation=OperationType.MOVE,
+                )
+            ],
+        )
+
+    def test_manifest_copy_uses_similarity(self) -> None:
+        statuses = {
+            delta.status
+            for delta in self._candidate.diff(self.sha_qux, self.sha_quux).deltas
+        }
+        self.assertTrue(
+            statuses <= {
+                pygit2.GIT_DELTA_ADDED,
+                pygit2.GIT_DELTA_COPIED,
+            }
+        )
+        operation = self._candidate.manifest(self.sha_qux, self.sha_quux)[0]
+        self.assertEqual(operation.after, "copy.txt")
+        if pygit2.GIT_DELTA_COPIED in statuses:
+            self.assertEqual(operation.base, "qux.txt")
+            self.assertEqual(operation.operation, OperationType.COPY)
+            return
+        self.assertEqual(operation.base, None)
+        self.assertEqual(operation.operation, OperationType.ADD)
 
 
 class TestVersionControlMeta(unittest.TestCase):
@@ -953,8 +1001,9 @@ class TestVersionControlPathWalker(unittest.TestCase):
     ) -> types.SimpleNamespace:
         return types.SimpleNamespace(
             commit=str(getattr(item, "commit")),
-            path=getattr(item, "path"),
-            type=str(getattr(item, "type")),
+            operation=getattr(item, "operation"),
+            base=getattr(item, "base"),
+            after=getattr(item, "after"),
         )
 
     def test_linear_modify_matches_git(self) -> None:
@@ -991,11 +1040,11 @@ class TestVersionControlPathWalker(unittest.TestCase):
 
             entries = [self._entry(item) for item in self._entries(fixture, baz, "bar.py")]
             self.assertEqual(
-                [(item.type, item.path) for item in entries],
+                [(item.operation, item.base, item.after) for item in entries],
                 [
-                    ("modified", "bar.py"),
-                    ("renamed", ("foo.py", "bar.py")),
-                    ("root", "foo.py"),
+                    (OperationType.EDIT, "bar.py", "bar.py"),
+                    (OperationType.MOVE, "foo.py", "bar.py"),
+                    (OperationType.ADD, None, "foo.py"),
                 ],
             )
 
@@ -1026,12 +1075,12 @@ class TestVersionControlPathWalker(unittest.TestCase):
 
             entries = [self._entry(item) for item in self._entries(fixture, qux, "baz.py")]
             self.assertEqual(
-                [(item.type, item.path) for item in entries],
+                [(item.operation, item.base, item.after) for item in entries],
                 [
-                    ("modified", "baz.py"),
-                    ("copied", ("foo.py", "baz.py")),
-                    ("modified", "foo.py"),
-                    ("root", "foo.py"),
+                    (OperationType.EDIT, "baz.py", "baz.py"),
+                    (OperationType.COPY, "foo.py", "baz.py"),
+                    (OperationType.EDIT, "foo.py", "foo.py"),
+                    (OperationType.ADD, None, "foo.py"),
                 ],
             )
 
@@ -1138,11 +1187,11 @@ class TestVersionControlPathWalker(unittest.TestCase):
 
             entries = [self._entry(item) for item in self._entries(fixture, baz, "a.py")]
             self.assertEqual(
-                [(item.type, item.path) for item in entries],
+                [(item.operation, item.base, item.after) for item in entries],
                 [
-                    ("added", "a.py"),
-                    ("deleted", "a.py"),
-                    ("root", "a.py"),
+                    (OperationType.ADD, None, "a.py"),
+                    (OperationType.DELETE, "a.py", None),
+                    (OperationType.ADD, None, "a.py"),
                 ],
             )
 

@@ -27,10 +27,8 @@ class PathState:
 
 
 @dataclass(frozen=True)
-class FileChange:
+class FileChange(FileOperation):
     commit: str
-    path: str | tuple[str, str]
-    type: str
 
 
 class VersionControlPathIterator(Iterator[pygit2.Commit]):
@@ -150,7 +148,12 @@ class VersionControlPathWalker:
         if parent is None:
             if self._entry(self._repository, node.tree, path) is None:
                 return None, path
-            return FileChange(str(node.id), path, "root"), path
+            return FileChange(
+                base=None,
+                after=path,
+                operation=OperationType.ADD,
+                commit=str(node.id),
+            ), path
 
         old = self._entry(self._repository, parent.tree, path)
         new = self._entry(self._repository, node.tree, path)
@@ -158,7 +161,12 @@ class VersionControlPathWalker:
         if old is not None and new is not None:
             if old.id == new.id and old.filemode == new.filemode:
                 return None, path
-            return FileChange(str(node.id), path, "modified"), path
+            return FileChange(
+                base=path,
+                after=path,
+                operation=OperationType.EDIT,
+                commit=str(node.id),
+            ), path
 
         if old is None and new is None:
             return None, path
@@ -186,8 +194,8 @@ class VersionControlPathWalker:
         )
 
         for delta in diff.deltas:
-            old = delta.old_file.path or ""
-            new = delta.new_file.path or ""
+            old = delta.old_file.path
+            new = delta.new_file.path
 
             if old != path and new != path:
                 continue
@@ -199,17 +207,18 @@ class VersionControlPathWalker:
                     pygit2.GIT_DELTA_COPIED,
                 }
                 and new == path
-                and old
+                and old is not None
             ):
                 return (
                     FileChange(
-                        str(node.id),
-                        (old, path),
-                        (
-                            "copied"
+                        base=old,
+                        after=path,
+                        operation=(
+                            OperationType.COPY
                             if delta.status == pygit2.GIT_DELTA_COPIED
-                            else "renamed"
+                            else OperationType.MOVE
                         ),
+                        commit=str(node.id),
                     ),
                     old,
                 )
@@ -219,22 +228,38 @@ class VersionControlPathWalker:
                 if previous is not None:
                     return (
                         FileChange(
-                            str(node.id),
-                            (previous, path),
-                            "copied",
+                            base=previous,
+                            after=path,
+                            operation=OperationType.COPY,
+                            commit=str(node.id),
                         ),
                         previous,
                     )
-                return FileChange(str(node.id), path, "added"), path
+                return FileChange(
+                    base=None,
+                    after=path,
+                    operation=OperationType.ADD,
+                    commit=str(node.id),
+                ), path
 
             if delta.status == pygit2.GIT_DELTA_DELETED and old == path:
-                return FileChange(str(node.id), path, "deleted"), path
+                return FileChange(
+                    base=path,
+                    after=None,
+                    operation=OperationType.DELETE,
+                    commit=str(node.id),
+                ), path
 
             if delta.status in {
                 pygit2.GIT_DELTA_MODIFIED,
                 pygit2.GIT_DELTA_TYPECHANGE,
             }:
-                return FileChange(str(node.id), path, "modified"), path
+                return FileChange(
+                    base=path,
+                    after=path,
+                    operation=OperationType.EDIT,
+                    commit=str(node.id),
+                ), path
 
             if (
                 delta.status
@@ -246,13 +271,10 @@ class VersionControlPathWalker:
             ):
                 return (
                     FileChange(
-                        str(node.id),
-                        path,
-                        (
-                            "copied"
-                            if delta.status == pygit2.GIT_DELTA_COPIED
-                            else "renamed"
-                        ),
+                        base=path,
+                        after=path,
+                        operation=OperationType.EDIT,
+                        commit=str(node.id),
                     ),
                     path,
                 )
@@ -652,40 +674,67 @@ class VersionControl:
         self._write_tree(c.tree, target)
 
     def _build_manifest(self, base: str, after: str) -> list[FileOperation]:
-        _STATUS_MAP = {
-            1: OperationType.ADD,
-            2: OperationType.DELETE,
-            3: OperationType.EDIT,
-            4: OperationType.MOVE,
-        }
-
         base_commit = self._repository.get(base).peel(pygit2.Commit)
         after_commit = self._repository.get(after).peel(pygit2.Commit)
         diff = self._repository.diff(base_commit.tree, after_commit.tree)
+        diff.find_similar(
+            flags=(
+                pygit2.enums.DiffFind.FIND_COPIES
+                | pygit2.enums.DiffFind.FIND_COPIES_FROM_UNMODIFIED
+                | pygit2.enums.DiffFind.FIND_RENAMES
+                | pygit2.enums.DiffFind.FIND_RENAMES_FROM_REWRITES
+            ),
+            copy_threshold=50,
+            rename_threshold=50,
+            rename_from_rewrite_threshold=50,
+            rename_limit=1000,
+        )
 
         ops: list[FileOperation] = []
         for delta in diff.deltas:
-            op_type = _STATUS_MAP.get(delta.status)
-            if op_type is None:
-                continue
-            if op_type == OperationType.ADD:
+            if delta.status in {
+                pygit2.GIT_DELTA_ADDED,
+            }:
                 ops.append(
                     FileOperation(
-                        base=None, after=delta.new_file.path, operation=op_type
+                        base=None,
+                        after=delta.new_file.path,
+                        operation=OperationType.ADD,
                     )
                 )
-            elif op_type == OperationType.DELETE:
+            elif delta.status == pygit2.GIT_DELTA_DELETED:
                 ops.append(
                     FileOperation(
-                        base=delta.old_file.path, after=None, operation=op_type
+                        base=delta.old_file.path,
+                        after=None,
+                        operation=OperationType.DELETE,
                     )
                 )
-            else:
+            elif delta.status in {
+                pygit2.GIT_DELTA_MODIFIED,
+                pygit2.GIT_DELTA_TYPECHANGE,
+            }:
                 ops.append(
                     FileOperation(
                         base=delta.old_file.path,
                         after=delta.new_file.path,
-                        operation=op_type,
+                        operation=OperationType.EDIT,
+                    )
+                )
+            elif delta.status == pygit2.GIT_DELTA_RENAMED:
+                ops.append(
+                    FileOperation(
+                        base=delta.old_file.path,
+                        after=delta.new_file.path,
+                        operation=OperationType.MOVE,
+                    )
+                )
+            elif delta.status == pygit2.GIT_DELTA_COPIED:
+                ops.append(
+                    FileOperation(
+                        base=delta.old_file.path,
+                        after=delta.new_file.path,
+                        operation=OperationType.COPY,
                     )
                 )
 
@@ -823,7 +872,18 @@ class VersionControl:
             interhunk_lines=0,
         )
 
-        diff.find_similar()  # enables rename detection
+        diff.find_similar(
+            flags=(
+                pygit2.enums.DiffFind.FIND_COPIES
+                | pygit2.enums.DiffFind.FIND_COPIES_FROM_UNMODIFIED
+                | pygit2.enums.DiffFind.FIND_RENAMES
+                | pygit2.enums.DiffFind.FIND_RENAMES_FROM_REWRITES
+            ),
+            copy_threshold=50,
+            rename_threshold=50,
+            rename_from_rewrite_threshold=50,
+            rename_limit=1000,
+        )
 
         return diff
 
