@@ -38,7 +38,12 @@ class KnowledgeGraphTool:
         ]
 
     def candidates(self, limit: int = 20) -> list[dict[str, Any]]:
-        """List the top-ranked commit candidates for the prepared correction graph."""
+        """List the top-ranked commit candidates for the prepared correction graph.
+
+        Use this first to inspect the ranked search space. Each item returns one
+        candidate commit with its ordinal score, commit metadata, and the entities
+        touched by that commit.
+        """
         result: list[dict[str, Any]] = []
         for node in self.store.nodes("commit"):
             payload = self.store.payload(node)
@@ -56,7 +61,12 @@ class KnowledgeGraphTool:
         return result[:limit]
 
     def neighbors(self, sha: str) -> list[dict[str, Any]]:
-        """Traverse from one commit to structurally related commit candidates."""
+        """Traverse from one commit to structurally related commit candidates.
+
+        Use this to find structurally related candidate commits. Each item returns a
+        related commit together with the shared entities between the queried commit
+        and that neighbor.
+        """
         result: dict[str, dict[str, Any]] = {}
         source = self.store.resolve(sha)
         source_targets = self._targets(source)
@@ -74,9 +84,7 @@ class KnowledgeGraphTool:
         for item in values:
             item["entities"] = self._entities(
                 scope,
-                self._scope(
-                    self._targets(self.store.resolve(cast(str, item["sha"])))
-                ),
+                self._scope(self._targets(self.store.resolve(cast(str, item["sha"])))),
             )
         values.sort(
             key=lambda value: (
@@ -89,17 +97,21 @@ class KnowledgeGraphTool:
         return values
 
     def meta(self, node: str) -> dict[str, Any]:
-        """Return the graph kind and curated payload for one graph node."""
+        """Inspect one commit or code entity.
+
+        For commits, this returns commit metadata, the entities touched by the
+        commit, and the shared entities between the commit and the Correction.
+        """
         key = self.store.resolve(node)
         kind = self.store.kind(key)
-        return {
-            "key": key,
-            "kind": kind,
-            "payload": self._meta(key, kind),
-        }
+        return {"key": key, "kind": kind} | self._meta(key, kind)
 
     def content(self, sha: str, path: str | None = None) -> dict[str, Any]:
-        """Read one commit patch, optionally limited to a single path, for deep inspection."""
+        """Read one commit patch, optionally limited to a single path, for deep inspection.
+
+        Use this for causal verification. It returns the commit diff, optionally
+        limited to one path.
+        """
         if self._reads >= 3:
             raise ValueError("Diff read budget exhausted.")
         self._reads += 1
@@ -172,11 +184,7 @@ class KnowledgeGraphTool:
             }
 
         if kind == "file":
-            return {
-                name: payload[name]
-                for name in ("path",)
-                if name in payload
-            }
+            return {name: payload[name] for name in ("path",) if name in payload}
 
         return {
             name: payload[name]

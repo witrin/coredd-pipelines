@@ -2770,7 +2770,8 @@ class TestLLM4SZZGraph(unittest.TestCase):
                 Identify which commit first introduced the bug fixed by the given correction.
                 Call candidates first.
                 Use the ranking as guidance, but override it if tool evidence supports another commit.
-                Prefer candidates that modified the same files or entities as the Correction when the evidence is otherwise similar.
+                candidates and meta show entities touched by a commit, neighbors shows shared entities, and meta shows shared entities with the Correction.
+                Prefer candidates that modified the same files or entities as the correction when the evidence is otherwise similar.
                 Prefer direct blame candidates before older or broader ancestors unless you find evidence against them.
                 Use content to verify causal evidence between a candidate and the correction.
                 If a candidate looks like refactoring, cleanup, or import churn, inspect related commits instead of selecting it blindly.

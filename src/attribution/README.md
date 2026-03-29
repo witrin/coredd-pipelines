@@ -223,8 +223,11 @@ $$
 
 The current prototype exposes these tools as `candidates`, `neighbors`, `meta`, and `content`.
 `candidates` is the ranked entry point and returns ranked commits together with message, timestamp, files, and touched entities.
+In `candidates`, `entities` means the entities touched by that candidate commit.
 `neighbors` returns direct structural neighbors with the same ranked commit summary plus the shared entity overlap.
-`meta` returns node metadata and, for commits, also reports touched entities together with overlap against the correction.
+In `neighbors`, `entities` means the shared entities between the queried commit and that neighbor.
+`meta` inspects one commit or code entity.
+For commits, `meta` returns commit metadata, touched entities, and shared entities with the correction as flat top-level fields.
 `content(sha, path=None)` loads the candidate patch only when the agent needs a causal comparison, with a three-read budget per case.
 This keeps the graph itself lightweight while still exposing the same functional tool surface described in the paper.
 

@@ -200,6 +200,7 @@ class SearchNode:
             Identify which commit first introduced the bug fixed by the given correction.
             Call candidates first.
             Use the ranking as guidance, but override it if tool evidence supports another commit.
+            candidates and meta show entities touched by a commit, neighbors shows shared entities, and meta shows shared entities with the Correction.
             Prefer candidates that modified the same files or entities as the correction when the evidence is otherwise similar.
             Prefer direct blame candidates before older or broader ancestors unless you find evidence against them.
             Use content to verify causal evidence between a candidate and the correction.
@@ -207,7 +208,7 @@ class SearchNode:
             Do not inspect all candidates exhaustively. Focus on the most plausible ones.
             Make at least one investigation step before deciding unless the single-candidate case is conclusive.
             Return the selected introducer SHA, or null if no justified decision can be made.
-        """
+            """
         )
         graph = create_react_agent(
             self._llm,

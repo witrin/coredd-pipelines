@@ -269,7 +269,7 @@ class TestKnowledgeGraphTool(unittest.TestCase):
 
             agent = KnowledgeGraphTool(repository=repository, store=loaded)
 
-            self.assertEqual(agent.meta(after)["payload"]["sha"], after)
+            self.assertEqual(agent.meta(after)["sha"], after)
             self.assertEqual(
                 agent.content(after, "a.py")["path"],
                 "a.py",
@@ -409,11 +409,11 @@ class TestKnowledgeGraphTool(unittest.TestCase):
             store=store,
         )
 
-        payload = agent.meta("bar")["payload"]
-
         self.assertEqual(
-            payload,
+            agent.meta("bar"),
             {
+                "key": "commit:bar",
+                "kind": "commit",
                 "sha": "bar",
                 "type": "blame-ancestor",
                 "message": "bar",
@@ -423,9 +423,10 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                 "overlap": ["file=a.py:function=foo"],
             },
         )
-        self.assertNotIn("parents", payload)
-        self.assertNotIn("score", payload)
-        self.assertNotIn("predecessors", payload)
+        self.assertNotIn("payload", agent.meta("bar"))
+        self.assertNotIn("parents", agent.meta("bar"))
+        self.assertNotIn("score", agent.meta("bar"))
+        self.assertNotIn("predecessors", agent.meta("bar"))
 
     def test_neighbors_prefer_entity_overlap_and_map_type(self) -> None:
         repository = Mock(spec_set=["parents"])
@@ -678,6 +679,11 @@ class TestKnowledgeGraphTool(unittest.TestCase):
         self.assertEqual([tool.name for tool in tools], ["candidates", "neighbors", "meta", "content"])
         self.assertTrue(all(isinstance(tool, BaseTool) for tool in tools))
         self.assertIn("top-ranked commit candidates", tools[0].description)
+        self.assertIn("touched by that commit", tools[0].description)
+        self.assertIn("shared entities", tools[1].description)
+        self.assertIn("Inspect one commit or code entity", tools[2].description)
+        self.assertIn("shared entities between the commit and the Correction", tools[2].description)
+        self.assertIn("It returns the commit diff", tools[3].description)
 
     def test_budget(self) -> None:
         repository = Mock(spec_set=["parents"])
