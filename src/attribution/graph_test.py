@@ -2412,6 +2412,86 @@ class TestLLM4SZZGraph(unittest.TestCase):
         seed_builder.assert_called_once_with(repository)
         search_builder.assert_called_once_with(repository)
 
+    @unittest.skipUnless(
+        importlib.util.find_spec("langgraph") is not None,
+        "langgraph is not installed",
+    )
+    def test_agentic_graph_forwards_steps(self) -> None:
+        correction = Change(
+            number=1,
+            base="base-sha",
+            after="after-sha",
+            description="Fix parser",
+        )
+        seed = Mock(spec_set=["run"])
+        seed.run.return_value = {
+            "base": "base-sha",
+            "after": "after-sha",
+            "seed": [{"title": "Commit Message", "body": "Fix parser"}],
+        }
+        search = Mock(spec_set=["run"])
+        search.run.return_value = {"introducer": "deadbeef"}
+        graph = AgenticSZZGraph(
+            seed=seed,
+            search=search,
+            steps=7,
+        )
+
+        result = graph.invoke(correction)
+
+        seed.run.assert_called_once_with({"correction": correction})
+        search.run.assert_called_once_with(
+            {
+                "base": "base-sha",
+                "after": "after-sha",
+                "seed": [{"title": "Commit Message", "body": "Fix parser"}],
+            },
+            steps=7,
+        )
+        self.assertEqual(result, {"introducer": "deadbeef", "aborted": False})
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("langgraph") is not None,
+        "langgraph is not installed",
+    )
+    def test_agentic_builder_forwards_steps(self) -> None:
+        repository = object.__new__(VersionControl)
+        correction = Change(
+            number=1,
+            base="base-sha",
+            after="after-sha",
+            description="Fix parser",
+        )
+        seed = Mock(spec_set=["run"])
+        seed.run.return_value = {
+            "base": "base-sha",
+            "after": "after-sha",
+            "seed": [{"title": "Commit Message", "body": "Fix parser"}],
+        }
+        search = Mock(spec_set=["run"])
+        search.run.return_value = {"introducer": "deadbeef"}
+        seed_builder = Mock(return_value=seed)
+        search_builder = Mock(return_value=search)
+        builder = AgenticSZZGraphBuilder(
+            seed=seed_builder,
+            search=search_builder,
+            steps=9,
+        )
+
+        result = builder.create(repository).invoke(correction)
+
+        seed_builder.assert_called_once_with(repository)
+        search_builder.assert_called_once_with(repository)
+        search.run.assert_called_once_with(
+            {
+                "base": "base-sha",
+                "after": "after-sha",
+                "seed": [{"title": "Commit Message", "body": "Fix parser"}],
+            },
+            steps=9,
+        )
+        self.assertEqual(result, {"introducer": "deadbeef", "aborted": False})
+
     def test_agentic_invoke(self) -> None:
         graph = AgenticSZZGraph(
             seed=Mock(spec_set=["run"]),
@@ -2499,6 +2579,52 @@ class TestLLM4SZZGraph(unittest.TestCase):
         with self.assertRaises(ValueError):
             SearchNode().run({})
 
+    def test_search_steps(self) -> None:
+        tool = Mock(spec_set=["tools"])
+        tool.tools.return_value = ["tool-a", "tool-b"]
+        agent = Mock(spec_set=["invoke"])
+        agent.invoke.return_value = {
+            "structured_response": {"introducer": "deadbeef"},
+        }
+
+        with patch("benchmark.attribution.search.create_react_agent", return_value=agent):
+            SearchNode(tool=tool, llm=object()).run(
+                {
+                    "base": "base-sha",
+                    "after": "after-sha",
+                    "seed": [
+                        {
+                            "title": "Commit Message",
+                            "body": "prompt seed",
+                        }
+                    ],
+                },
+                steps=7,
+            )
+
+        args, kwargs = agent.invoke.call_args
+        self.assertEqual(kwargs, {"config": {"recursion_limit": 7}})
+        self.assertEqual(args[0]["remaining_steps"], 7)
+
+    def test_search_steps_invalid(self) -> None:
+        tool = Mock(spec_set=["tools"])
+        tool.tools.return_value = []
+
+        with self.assertRaises(ValueError):
+            SearchNode(tool=tool, llm=object()).run(
+                {
+                    "base": "base-sha",
+                    "after": "after-sha",
+                    "seed": [
+                        {
+                            "title": "Commit Message",
+                            "body": "prompt seed",
+                        }
+                    ],
+                },
+                steps=0,
+            )
+
     def test_search(self) -> None:
         tool = Mock(spec_set=["tools"])
         tool.tools.return_value = []
@@ -2524,8 +2650,9 @@ class TestLLM4SZZGraph(unittest.TestCase):
         tool.tools.assert_called_once_with()
         self.assertEqual(result, {"introducer": "deadbeef"})
 
+    @patch("benchmark.attribution.search.ToolNode")
     @patch("benchmark.attribution.search.create_react_agent")
-    def test_search_agent(self, factory: Mock) -> None:
+    def test_search_agent(self, factory: Mock, node_type: Mock) -> None:
         tool = Mock(spec_set=["tools"])
         tool.tools.return_value = ["tool-a", "tool-b"]
         agent = Mock(spec_set=["invoke"])
@@ -2533,6 +2660,8 @@ class TestLLM4SZZGraph(unittest.TestCase):
             "structured_response": {"introducer": "deadbeef"},
         }
         factory.return_value = agent
+        tool_node = Mock()
+        node_type.return_value = tool_node
 
         llm = object()
         node = SearchNode(tool=tool, llm=llm)
@@ -2555,9 +2684,18 @@ class TestLLM4SZZGraph(unittest.TestCase):
         )
 
         tool.tools.assert_called_once_with()
+        node_type.assert_called_once()
+        args, kwargs = node_type.call_args
+        self.assertEqual(args, (["tool-a", "tool-b"],))
+        self.assertIn("handle_tool_errors", kwargs)
+        self.assertTrue(callable(kwargs["handle_tool_errors"]))
+        self.assertEqual(
+            kwargs["handle_tool_errors"](RuntimeError("boom")),
+            "RuntimeError: boom",
+        )
         factory.assert_called_once_with(
             llm,
-            tools=["tool-a", "tool-b"],
+            tools=tool_node,
             prompt=inspect.cleandoc(
                 """
                 Identify which commit first introduced the bug fixed by the given correction.

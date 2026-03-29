@@ -4,7 +4,7 @@ import inspect
 from typing import Any, TypedDict
 
 from langchain_core.messages import HumanMessage
-from langgraph.prebuilt import create_react_agent
+from langgraph.prebuilt import ToolNode, create_react_agent
 from pydantic import BaseModel
 
 from benchmark.attribution.agent import KnowledgeGraphTool, KnowledgeGraphToolFactory
@@ -161,10 +161,17 @@ class SearchNode:
         self._tool = tool
         self._llm = llm
 
-    def run(self, input: Seed) -> SearchOutput:
+    def run(
+        self,
+        input: Seed,
+        *,
+        steps: int = 50,
+    ) -> SearchOutput:
         base = input.get("base")
         after = input.get("after")
         seed = input.get("seed")
+        if steps < 1:
+            raise ValueError("SearchNode steps must be positive.")
         if (
             base is None
             or after is None
@@ -180,15 +187,21 @@ class SearchNode:
         if isinstance(tool, KnowledgeGraphToolFactory):
             tool = tool.create(base, after)
 
-        result = self._invoke(seed, tool)
+        result = self._invoke(seed, tool, steps=steps)
         return self._normalize(result)
 
     def _invoke(
         self,
         seed: list[SeedItem],
         tool: KnowledgeGraphTool,
+        *,
+        steps: int,
     ) -> object:
         tools = tool.tools()
+        node = ToolNode(
+            tools,
+            handle_tool_errors=lambda error: f"{type(error).__name__}: {error}",
+        )
         prompt = inspect.cleandoc(
             """
             Identify which commit first introduced the bug fixed by the given correction.
@@ -204,16 +217,16 @@ class SearchNode:
         )
         graph = create_react_agent(
             self._llm,
-            tools=tools,
+            tools=node,
             prompt=prompt,
             response_format=SearchResult,
         )
         return graph.invoke(
             {
                 "messages": [HumanMessage(content=self._prompt(seed))],
-                "remaining_steps": 50,
+                "remaining_steps": steps,
             },
-            config={"recursion_limit": 50},
+            config={"recursion_limit": steps},
         )
 
     def _prompt(self, seed: list[SeedItem]) -> str:

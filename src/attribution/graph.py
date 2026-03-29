@@ -410,11 +410,15 @@ class AgenticSZZGraph:
         self,
         seed: Any | None = None,
         search: Any | None = None,
+        steps: int = 50,
     ) -> None:
         if seed is None or search is None:
             raise ValueError("AgenticSZZGraph requires explicit seed and search nodes.")
+        if steps < 1:
+            raise ValueError("AgenticSZZGraph steps must be positive.")
         self._seed = seed
         self._search = search
+        self._steps = steps
         self._graph: AttributionRunnable | None = None
 
     def build(self) -> object:
@@ -478,7 +482,8 @@ class AgenticSZZGraph:
                 "base": state["base"],
                 "after": state["after"],
                 "seed": state["seed"],
-            }
+            },
+            steps=self._steps,
         )
         return {
             "introducer": output["introducer"],
@@ -559,11 +564,15 @@ class AgenticSZZGraphBuilder:
         self,
         seed: Callable[[VersionControl], Any] | None = None,
         search: Callable[[VersionControl], Any] | None = None,
+        steps: int = 50,
     ) -> None:
         if seed is None or search is None:
             raise ValueError("AgenticSZZGraphBuilder requires explicit node builders.")
+        if steps < 1:
+            raise ValueError("AgenticSZZGraphBuilder steps must be positive.")
         self._seed = seed
         self._search = search
+        self._steps = steps
 
     def create(
         self,
@@ -572,4 +581,5 @@ class AgenticSZZGraphBuilder:
         return AgenticSZZGraph(
             seed=self._seed(repository),
             search=self._search(repository),
+            steps=self._steps,
         )
