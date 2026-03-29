@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import Mock
 from unittest.mock import patch
 
@@ -274,6 +275,255 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                 "a.py",
             )
 
+    def test_candidates_map_type_from_score(self) -> None:
+        repository = Mock(spec_set=["parents"])
+        store = KnowledgeGraphStore()
+        store.add(
+            "commit",
+            {
+                "sha": "blame",
+                "type": "candidate",
+                "score": 1.0,
+                "message": "blame",
+                "timestamp": datetime(2024, 1, 3, tzinfo=timezone.utc),
+                "parents": (),
+                "files": (),
+            },
+        )
+        store.add(
+            "commit",
+            {
+                "sha": "ancestor",
+                "type": "candidate",
+                "score": 0.6,
+                "message": "ancestor",
+                "timestamp": datetime(2024, 1, 2, tzinfo=timezone.utc),
+                "parents": (),
+                "files": (),
+            },
+        )
+        store.add(
+            "commit",
+            {
+                "sha": "correction-ancestor",
+                "type": "candidate",
+                "score": 0.3,
+                "message": "correction-ancestor",
+                "timestamp": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                "parents": (),
+                "files": (),
+            },
+        )
+
+        agent = KnowledgeGraphTool(
+            repository=repository,
+            store=store,
+        )
+
+        self.assertEqual(
+            agent.candidates(),
+            [
+                {
+                    "sha": "blame",
+                    "type": "blame",
+                    "score": 1.0,
+                },
+                {
+                    "sha": "ancestor",
+                    "type": "blame-ancestor",
+                    "score": 0.6,
+                },
+                {
+                    "sha": "correction-ancestor",
+                    "type": "correction-ancestor",
+                    "score": 0.3,
+                },
+            ],
+        )
+
+    def test_meta_filters_commit_payload_to_public_contract(self) -> None:
+        repository = Mock(spec_set=["parents"])
+        store = KnowledgeGraphStore()
+        store.add(
+            "commit",
+            {
+                "sha": "base",
+                "type": "candidate",
+                "score": 0.2,
+                "message": "base",
+                "timestamp": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                "parents": (),
+                "files": ("a.py",),
+            },
+        )
+        store.add(
+            "commit",
+            {
+                "sha": "merge",
+                "type": "candidate",
+                "score": 0.6,
+                "message": "merge",
+                "timestamp": datetime(2024, 1, 2, tzinfo=timezone.utc),
+                "parents": ("base", "side"),
+                "files": ("a.py",),
+            },
+        )
+
+        agent = KnowledgeGraphTool(
+            repository=repository,
+            store=store,
+        )
+
+        payload = agent.meta("merge")["payload"]
+
+        self.assertEqual(
+            payload,
+            {
+                "sha": "merge",
+                "type": "blame-ancestor",
+                "message": "merge",
+                "timestamp": datetime(2024, 1, 2, tzinfo=timezone.utc),
+                "files": ("a.py",),
+            },
+        )
+        self.assertNotIn("parents", payload)
+        self.assertNotIn("score", payload)
+        self.assertNotIn("predecessors", payload)
+
+    def test_neighbors_prefer_entity_overlap_and_map_type(self) -> None:
+        repository = Mock(spec_set=["parents"])
+        store = KnowledgeGraphStore()
+        store.add("file", {"path": "a.py"})
+        store.add(
+            "function",
+            {
+                "kind": "function",
+                "path": "a.py",
+                "urn": "entity:function=foo",
+                "name": "foo",
+                "source": "gumtree",
+            },
+        )
+        for sha, score in (
+            ("source", 1.0),
+            ("entity", 0.6),
+            ("file", 0.3),
+        ):
+            store.add(
+                "commit",
+                {
+                    "sha": sha,
+                    "type": "candidate",
+                    "score": score,
+                    "message": sha,
+                    "timestamp": datetime(
+                        2024,
+                        1,
+                        1 + int(score * 10),
+                        tzinfo=timezone.utc,
+                    ),
+                    "parents": (),
+                    "files": (),
+                },
+            )
+
+        store.link("MODIFIES", "commit:source", "file:a.py")
+        store.link("EDIT", "commit:source", "entity:a.py:function=foo")
+        store.link("MODIFIES", "commit:entity", "file:a.py")
+        store.link("EDIT", "commit:entity", "entity:a.py:function=foo")
+        store.link("MODIFIES", "commit:file", "file:a.py")
+
+        agent = KnowledgeGraphTool(
+            repository=repository,
+            store=store,
+        )
+
+        self.assertEqual(
+            agent.neighbors("source"),
+            [
+                {
+                    "sha": "entity",
+                    "type": "blame-ancestor",
+                    "score": 0.6,
+                    "entities": ["file=a.py:function=foo"],
+                },
+                {
+                    "sha": "file",
+                    "type": "correction-ancestor",
+                    "score": 0.3,
+                    "entities": ["file=a.py"],
+                },
+            ],
+        )
+
+    def test_neighbors_collapse_to_longest_shared_prefix(self) -> None:
+        repository = Mock(spec_set=["parents"])
+        store = KnowledgeGraphStore()
+        store.add("file", {"path": "a.py"})
+        store.add(
+            "class",
+            {
+                "kind": "class",
+                "path": "a.py",
+                "urn": "entity:class=Outer",
+                "name": "Outer",
+                "source": "gumtree",
+            },
+        )
+        store.add(
+            "method",
+            {
+                "kind": "method",
+                "path": "a.py",
+                "urn": "entity:class=Outer:method=bar",
+                "name": "bar",
+                "source": "gumtree",
+            },
+        )
+        for sha, score in (
+            ("source", 1.0),
+            ("class", 0.6),
+        ):
+            store.add(
+                "commit",
+                {
+                    "sha": sha,
+                    "type": "candidate",
+                    "score": score,
+                    "message": sha,
+                    "timestamp": datetime(
+                        2024,
+                        1,
+                        1 + int(score * 10),
+                        tzinfo=timezone.utc,
+                    ),
+                    "parents": (),
+                    "files": (),
+                },
+            )
+
+        store.link("MODIFIES", "commit:source", "file:a.py")
+        store.link("EDIT", "commit:source", "entity:a.py:class=Outer:method=bar")
+        store.link("MODIFIES", "commit:class", "file:a.py")
+        store.link("EDIT", "commit:class", "entity:a.py:class=Outer")
+
+        agent = KnowledgeGraphTool(
+            repository=repository,
+            store=store,
+        )
+
+        self.assertEqual(
+            agent.neighbors("source"),
+            [
+                {
+                    "sha": "class",
+                    "type": "blame-ancestor",
+                    "score": 0.6,
+                    "entities": ["file=a.py:class=Outer"],
+                },
+            ],
+        )
+
     def test_snapshot(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree(
@@ -313,7 +563,9 @@ class TestKnowledgeGraphTool(unittest.TestCase):
 
             self.assertEqual(result["sha"], after)
             self.assertEqual(result["path"], "a.py")
+            self.assertIn("diff --git a/a.py b/a.py", result["patch"])
             self.assertIn("@@", result["patch"])
+            self.assertNotIn("index ", result["patch"])
 
     def test_tools(self) -> None:
         agent = KnowledgeGraphTool(
