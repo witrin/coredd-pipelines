@@ -43,7 +43,7 @@ class SearchResult(BaseModel):
 
 
 class SeedNode:
-    """Build the BFC context used by the agentic search flow."""
+    """Build the correction context used by the agentic search flow."""
 
     def __init__(
         self,
@@ -58,7 +58,7 @@ class SeedNode:
 
         base = correction.base
         after = correction.after
-        seed: list[SeedItem] = []
+        seed: list[SeedItem] = [{"title": "Correction Commit", "body": after}]
 
         message = self._repository.meta(after).message.strip()
         if message:
@@ -69,9 +69,9 @@ class SeedNode:
         if files:
             seed.append({"title": "Modified Files", "body": "\n".join(files)})
 
-        functions = self._functions(base, after, operations)
-        if functions:
-            seed.append({"title": "Extracted Functions", "body": "\n".join(functions)})
+        entities = self._entities(base, after, operations)
+        if entities:
+            seed.append({"title": "Modified Entities", "body": "\n".join(entities)})
 
         return {
             "base": base,
@@ -90,7 +90,7 @@ class SeedNode:
             result.append(path)
         return result
 
-    def _functions(
+    def _entities(
         self,
         base: str,
         after: str,
@@ -114,10 +114,10 @@ class SeedNode:
 
             for _, base_urn, after_urn in values:
                 urn = after_urn or base_urn
-                name = self._function(urn)
-                if name is None:
+                entity = self._entity(path, urn)
+                if entity is None:
                     continue
-                result.add(f"{path}: {name}")
+                result.add(entity)
 
         return sorted(result)
 
@@ -139,15 +139,10 @@ class SeedNode:
             return "java"
         return None
 
-    def _function(self, urn: str) -> str | None:
+    def _entity(self, path: str, urn: str) -> str | None:
         if urn == "entity:program":
             return None
-
-        current = urn.removeprefix("entity:").rsplit(":", 1)[-1]
-        kind, _, name = current.partition("=")
-        if kind not in {"function", "method"} or not name:
-            return None
-        return name
+        return f"file={path}:{urn.removeprefix('entity:')}"
 
 
 class SearchNode:
@@ -179,9 +174,7 @@ class SearchNode:
             or self._tool is None
             or self._llm is None
         ):
-            raise ValueError(
-                "SearchNode requires base, after, seed, tool, and llm."
-            )
+            raise ValueError("SearchNode requires base, after, seed, tool, and llm.")
 
         tool = self._tool
         if isinstance(tool, KnowledgeGraphToolFactory):
@@ -207,6 +200,7 @@ class SearchNode:
             Identify which commit first introduced the bug fixed by the given correction.
             Call candidates first.
             Use the ranking as guidance, but override it if tool evidence supports another commit.
+            Prefer candidates that modified the same files or entities as the correction when the evidence is otherwise similar.
             Prefer direct blame candidates before older or broader ancestors unless you find evidence against them.
             Use content to verify causal evidence between a candidate and the correction.
             If a candidate looks like refactoring, cleanup, or import churn, inspect related commits instead of selecting it blindly.

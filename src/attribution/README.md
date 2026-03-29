@@ -170,10 +170,10 @@ The public replication package for AgenticSZZ is available at:
 
 #### Category Glossary
 
-- `Blame`: The ground-truth BIC is directly included in the set returned by `git blame` on the relevant BFC lines.
+- `Blame`: The ground-truth BIC is directly included in the set returned by `git blame` on the relevant correction lines.
 - `Blame Ancestor`: The ground-truth BIC is older than a blame commit and is found by traversing backward from blame.
-- `BFC Ancestor`: The ground-truth BIC is newer than a blame commit but still older than the BFC, so it lies between blame and fix in time.
-- `Blameless`: The BFC has no deleted or modified old lines, so ordinary `git blame` has no direct starting point.
+- `Correction Ancestor`: The ground-truth BIC is newer than a blame commit but still older than the correction, so it lies between blame and fix in time.
+- `Blameless`: The correction has no deleted or modified old lines, so ordinary `git blame` has no direct starting point.
 - `Unreachable`: The ground-truth BIC is on a different branch history and cannot be reached by simple backward traversal from blame commits.
 
 #### Search Space Characterization
@@ -222,7 +222,10 @@ $$
 $$
 
 The current prototype exposes these tools as `candidates`, `neighbors`, `meta`, and `content`.
-`candidates` is the ranked entry point, `neighbors` returns direct structural neighbors, `meta` returns node metadata including the available files, and `content(sha, path=None)` loads the candidate patch only when the agent needs a causal comparison.
+`candidates` is the ranked entry point and returns ranked commits together with message, timestamp, files, and touched entities.
+`neighbors` returns direct structural neighbors with the same ranked commit summary plus the shared entity overlap.
+`meta` returns node metadata and, for commits, also reports touched entities together with overlap against the correction.
+`content(sha, path=None)` loads the candidate patch only when the agent needs a causal comparison, with a three-read budget per case.
 This keeps the graph itself lightweight while still exposing the same functional tool surface described in the paper.
 
 > “The Agentic BIC Search phase navigates the TKG to identify the most likely BIC through structural reasoning and causality verification. The search agent receives context about the BFC (modified files, extracted functions, commit message) and produces a prediction identifying the BIC commit with a reasoning chain.”
@@ -236,7 +239,7 @@ This keeps the graph itself lightweight while still exposing the same functional
 > “The agent then iteratively investigates the ranked candidates using the available tools. At each step, the LLM receives the full ranked candidate list along with outputs accumulated from previous tool calls, and may choose any candidate to investigate: querying its properties, reading its code diff to verify causal relationships, or traversing the graph to find related commits. In other words, the LLM could override the initial ranking returned by `list_candidates` based on its reasoning process. The loop continues until the agent reaches a decision or exhausts the maximum step limit (50 steps). To control API costs, we empirically limit diff reads to 3 per case. The agent outputs a structured prediction containing the predicted BIC SHA and reasoning chain.”
 
 ```text
-Require: TKG, BFC, top-K limit
+Require: TKG, Correction, top-K limit
 Ensure: BIC prediction with reasoning
 
 1. Retrieve `items = candidates(TKG)`.

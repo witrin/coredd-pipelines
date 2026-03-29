@@ -2556,7 +2556,7 @@ class TestLLM4SZZGraph(unittest.TestCase):
         ]
         blob.return_value = b"def parse():\n    return 1\n"
         resolve.return_value = {
-            ("EDIT", "entity:file.py:function=parse", "entity:file.py:function=parse")
+            ("EDIT", "entity:function=parse", "entity:function=parse")
         }
 
         result = node.run({"correction": correction})
@@ -2569,11 +2569,68 @@ class TestLLM4SZZGraph(unittest.TestCase):
                 "base": "base-sha",
                 "after": "after-sha",
                 "seed": [
+                    {"title": "Correction Commit", "body": "after-sha"},
                     {"title": "Commit Message", "body": "Fix parser"},
                     {"title": "Modified Files", "body": "a.py"},
-                    {"title": "Extracted Functions", "body": "a.py: parse"},
+                    {"title": "Modified Entities", "body": "file=a.py:function=parse"},
                 ],
             },
+        )
+
+    @patch("benchmark.attribution.search.EntityPath.resolve")
+    @patch.object(VersionControl, "blob", autospec=True)
+    @patch.object(VersionControl, "manifest", autospec=True)
+    @patch.object(VersionControl, "meta", autospec=True)
+    def test_seed_keeps_nested_entity_scope(
+        self,
+        meta: Mock,
+        manifest: Mock,
+        blob: Mock,
+        resolve: Mock,
+    ) -> None:
+        repository = object.__new__(VersionControl)
+        node = SeedNode(repository=repository)
+        correction = Change(
+            number=1,
+            base="base-sha",
+            after="after-sha",
+            description="Fix parser",
+        )
+        meta.return_value = Commit(
+            sha="after-sha",
+            message="Fix parser",
+            time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            author="a",
+        )
+        manifest.return_value = [
+            FileOperation(
+                base="a.py",
+                after="a.py",
+                operation=OperationType.EDIT,
+            )
+        ]
+        blob.return_value = b"class Outer:\n    def parse(self):\n        return 1\n"
+        resolve.return_value = {
+            (
+                "EDIT",
+                "entity:class=Outer:method=parse",
+                "entity:class=Outer:method=parse",
+            )
+        }
+
+        result = node.run({"correction": correction})
+
+        self.assertEqual(
+            result["seed"],
+            [
+                {"title": "Correction Commit", "body": "after-sha"},
+                {"title": "Commit Message", "body": "Fix parser"},
+                {"title": "Modified Files", "body": "a.py"},
+                {
+                    "title": "Modified Entities",
+                    "body": "file=a.py:class=Outer:method=parse",
+                },
+            ],
         )
 
     def test_search_inputs(self) -> None:
@@ -2713,6 +2770,7 @@ class TestLLM4SZZGraph(unittest.TestCase):
                 Identify which commit first introduced the bug fixed by the given correction.
                 Call candidates first.
                 Use the ranking as guidance, but override it if tool evidence supports another commit.
+                Prefer candidates that modified the same files or entities as the Correction when the evidence is otherwise similar.
                 Prefer direct blame candidates before older or broader ancestors unless you find evidence against them.
                 Use content to verify causal evidence between a candidate and the correction.
                 If a candidate looks like refactoring, cleanup, or import churn, inspect related commits instead of selecting it blindly.

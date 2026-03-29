@@ -44,14 +44,7 @@ class KnowledgeGraphTool:
             payload = self.store.payload(node)
             if payload["type"] == "correction":
                 continue
-            category = self._category(payload)
-            result.append(
-                {
-                    "sha": payload["sha"],
-                    "type": category,
-                    "score": self._score(category),
-                }
-            )
+            result.append(self._commit(node))
 
         result.sort(
             key=lambda value: (
@@ -74,15 +67,7 @@ class KnowledgeGraphTool:
                 payload = self.store.payload(node)
                 if payload["type"] == "correction":
                     continue
-                category = self._category(payload)
-                item = result.setdefault(
-                    payload["sha"],
-                    {
-                        "sha": payload["sha"],
-                        "type": category,
-                        "score": self._score(category),
-                    },
-                )
+                item = result.setdefault(payload["sha"], self._commit(node))
 
         values = list(result.values())
         scope = self._scope(source_targets)
@@ -115,7 +100,7 @@ class KnowledgeGraphTool:
 
     def content(self, sha: str, path: str | None = None) -> dict[str, Any]:
         """Read one commit patch, optionally limited to a single path, for deep inspection."""
-        if self._reads >= 30:
+        if self._reads >= 3:
             raise ValueError("Diff read budget exhausted.")
         self._reads += 1
         key = self.store.resolve(sha)
@@ -177,10 +162,14 @@ class KnowledgeGraphTool:
 
         if kind == "commit":
             return {
-                name: payload[name]
-                for name in ("sha", "message", "timestamp", "files")
-                if name in payload
-            } | {"type": self._category(payload)}
+                "sha": payload["sha"],
+                "type": self._category(payload),
+                "message": payload["message"],
+                "timestamp": payload["timestamp"],
+                "files": self._files(payload),
+                "entities": self._touched(key),
+                "overlap": self._overlap(key),
+            }
 
         if kind == "file":
             return {
@@ -195,11 +184,50 @@ class KnowledgeGraphTool:
             if name in payload
         }
 
+    def _commit(self, key: str) -> dict[str, Any]:
+        payload = self.store.payload(key)
+        category = self._category(payload)
+        return {
+            "sha": payload["sha"],
+            "type": category,
+            "score": self._score(category),
+            "message": payload["message"],
+            "timestamp": payload["timestamp"],
+            "files": self._files(payload),
+            "entities": self._touched(key),
+        }
+
     def _category(self, payload: dict[str, Any]) -> str:
         current = payload.get("type")
         if isinstance(current, str):
             return current.replace("_", "-")
         raise ValueError("Commit payload requires type.")
+
+    def _files(self, payload: dict[str, Any]) -> list[str]:
+        return list(cast(tuple[str, ...] | list[str], payload.get("files", ())))
+
+    def _touched(self, key: str) -> list[str]:
+        result: set[str] = set()
+        for edge in ("ADD", "EDIT", "DELETE"):
+            for target in self.store.targets(key, edge):
+                if target.startswith("file:"):
+                    continue
+                value = self.store.payload(target)
+                if value.get("urn") == "entity:program":
+                    continue
+                result.add(":".join(self._path(target)))
+        return sorted(result)
+
+    def _overlap(self, key: str) -> list[str]:
+        if self.store.after is None:
+            return []
+        correction = self.store.resolve(self.store.after)
+        if key == correction:
+            return []
+        return self._entities(
+            self._scope(self._targets(correction)),
+            self._scope(self._targets(key)),
+        )
 
     def _score(self, category: str) -> float:
         if category == "blame":
