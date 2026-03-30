@@ -208,6 +208,7 @@ class TestKnowledgeGraphBuilder(unittest.TestCase):
             self.assertIn("entity:a.py:function=foo", store.graph.nodes)
             self.assertIn("entity:b.py:function=bar", store.graph.nodes)
 
+
     def test_build_deduplicate(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"a.py": """
@@ -1421,6 +1422,95 @@ class TestKnowledgeCommitGit(unittest.TestCase):
 
             blamed = self._commit(commits, foo)
             self.assertEqual(self._paths(blamed.files), {"a.py", "b.js"})
+
+
+class TestKnowledgeGraphStore(unittest.TestCase):
+    def test_resolve_commit_prefix(self) -> None:
+        store = KnowledgeGraphStore()
+        foo = "a89664f0d1d70000000000000000000000000000"
+        bar = "b123450000000000000000000000000000000000"
+
+        store.add(
+            "commit",
+            {
+                "sha": foo,
+                "timestamp": datetime.now(),
+                "message": "foo",
+                "parents": (),
+                "predecessors": (),
+                "files": (),
+                "type": "blame",
+            },
+        )
+        store.add(
+            "commit",
+            {
+                "sha": bar,
+                "timestamp": datetime.now(),
+                "message": "bar",
+                "parents": (),
+                "predecessors": (),
+                "files": (),
+                "type": "blame",
+            },
+        )
+
+        self.assertEqual(store.resolve("a89664"), f"commit:{foo}")
+
+    def test_resolve_commit_prefix_ignore_case(self) -> None:
+        store = KnowledgeGraphStore()
+        foo = "a89664f0d1d70000000000000000000000000000"
+
+        store.add(
+            "commit",
+            {
+                "sha": foo,
+                "timestamp": datetime.now(),
+                "message": "foo",
+                "parents": (),
+                "predecessors": (),
+                "files": (),
+                "type": "blame",
+            },
+        )
+
+        self.assertEqual(store.resolve("A89664"), f"commit:{foo}")
+
+    def test_resolve_commit_prefix_ambiguous(self) -> None:
+        store = KnowledgeGraphStore()
+        foo = "a896640000000000000000000000000000000000"
+        bar = "a89664ffffffffffffffffffffffffffffffffff"
+
+        store.add(
+            "commit",
+            {
+                "sha": foo,
+                "timestamp": datetime.now(),
+                "message": "foo",
+                "parents": (),
+                "predecessors": (),
+                "files": (),
+                "type": "blame",
+            },
+        )
+        store.add(
+            "commit",
+            {
+                "sha": bar,
+                "timestamp": datetime.now(),
+                "message": "bar",
+                "parents": (),
+                "predecessors": (),
+                "files": (),
+                "type": "blame",
+            },
+        )
+
+        with self.assertRaisesRegex(
+            KeyError,
+            f"Commit prefix a89664 matches {foo}, {bar}",
+        ):
+            store.resolve("a89664")
 
 
 if __name__ == "__main__":

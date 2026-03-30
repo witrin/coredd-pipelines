@@ -228,13 +228,30 @@ class KnowledgeGraphStore:
     def resolve(self, node: str) -> str:
         if self._graph.has_node(node):
             return node
-        commit = f"commit:{node}"
-        if self._graph.has_node(commit):
+        commit = self._commit(node)
+        if commit is not None:
             return commit
         file = f"file:{node}"
         if self._graph.has_node(file):
             return file
         raise KeyError(f"Unknown node {node}")
+
+    def _commit(self, node: str) -> str | None:
+        current = f"commit:{node}"
+        if self._graph.has_node(current):
+            return current
+        prefix = node.lower()
+        result: list[str] = []
+        for key in self.nodes("commit"):
+            if key.removeprefix("commit:").lower().startswith(prefix):
+                result.append(key)
+        if len(result) == 1:
+            return result[0]
+        if len(result) > 1:
+            raise KeyError(
+                f"Commit prefix {node} matches {', '.join(value.removeprefix('commit:') for value in result)}"
+            )
+        return None
 
     def _key(self, kind: str, payload: dict[str, Any]) -> str:
         if kind == "commit":
