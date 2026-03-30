@@ -307,7 +307,11 @@ class KnowledgeCommitGit:
                                 if entry.operation == OperationType.COPY
                                 else entry.operation
                             ),
-                            None if entry.operation == OperationType.COPY else entry.base,
+                            (
+                                None
+                                if entry.operation == OperationType.COPY
+                                else entry.base
+                            ),
                             entry.after,
                         )
                     )
@@ -355,28 +359,18 @@ class KnowledgeCommitGit:
         files: set[str] = set()
 
         for patch in diff:
-            path = patch.delta.new_file.path
-            if path is None:
-                path = patch.delta.old_file.path
-            if not path:
-                continue
-            files.add(path)
+            old = patch.delta.old_file.path
+            new = patch.delta.new_file.path
+            files.add(new or old)
 
-            changes = self._changes(patch)
-            if changes:
-                for sha in self._blame(path, base, changes):
-                    seeds.setdefault(sha, set()).add(path)
+            if patch.delta.status == pygit2.GIT_DELTA_ADDED or not old:
                 continue
 
-            contexts = self._contexts(patch)
-            if not contexts:
-                continue
-            try:
-                values = self._blame(path, base, contexts)
-            except KeyError:
-                continue
+            values = self._blame(old, base, self._changes(patch))
+            if not values:
+                values = self._blame(old, base, self._contexts(patch))
             for sha in values:
-                seeds.setdefault(sha, set()).add(path)
+                seeds.setdefault(sha, set()).add(old)
 
         seeds[after] = files
         return seeds
@@ -440,8 +434,15 @@ class KnowledgeCommitGit:
         commit: str,
         ranges: list[tuple[int, int]],
     ) -> set[str]:
+        if not ranges:
+            return set()
+
         values: set[str] = set()
-        for sha, _ in self._repository.blame(path, commit, ranges):
+        try:
+            entries = self._repository.blame(path, commit, ranges)
+        except (KeyError, ValueError):
+            return set()
+        for sha, _ in entries:
             if sha is None:
                 continue
             values.add(sha)
@@ -516,17 +517,9 @@ class KnowledgeCommitGit:
                         sorted(
                             trace.get(sha, set()),
                             key=lambda mark: (
-                                (
-                                    mark.after
-                                    if mark.after is not None
-                                    else mark.base
-                                ),
+                                (mark.after if mark.after is not None else mark.base),
                                 mark.operation.name,
-                                (
-                                    mark.base
-                                    if mark.base is not None
-                                    else mark.after
-                                ),
+                                (mark.base if mark.base is not None else mark.after),
                             ),
                         )
                     ),

@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+import pygit2
 
 from benchmark.attribution.domain import OperationType
 from benchmark.attribution.history import VersionControl
@@ -808,6 +809,11 @@ class TestKnowledgeEntityGumtree(unittest.TestCase):
 
 
 class TestKnowledgeCommitGit(unittest.TestCase):
+    def _gitlink(self, fixture: HistoryFixture, sha: str) -> pygit2.Oid:
+        root = fixture.repository.TreeBuilder()
+        root.insert("qux", pygit2.Oid(hex=sha), 0o160000)
+        return root.write()
+
     def _commit(self, commits, sha):
         for commit in commits:
             if commit.sha == sha:
@@ -933,6 +939,51 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             self.assertIn(
                 self._mark(OperationType.MOVE, "old.py", "new.py"),
                 renamed.files,
+            )
+
+    def test_build_rename_with_edit_uses_old_path_for_blame(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"old.py": "x = 1\ny = 1\n"})
+            foo = fixture.commit(tree, [], "foo")
+
+            tree = fixture.tree({"old.py": "x = 2\ny = 1\n"})
+            bar = fixture.commit(tree, [foo], "bar")
+
+            tree = fixture.tree({"new.py": "x = 3\ny = 1\n"})
+            baz = fixture.commit(tree, [bar], "baz")
+
+            repository = VersionControl(fixture.repository)
+            commits = KnowledgeCommitGit(repository, cap=200).build(bar, baz)
+
+            blamed = self._commit(commits, bar)
+            self.assertEqual(blamed.category, "blame")
+
+            correction = self._commit(commits, baz)
+            self.assertEqual(correction.category, "correction")
+            self.assertIn(
+                self._mark(OperationType.MOVE, "old.py", "new.py"),
+                correction.files,
+            )
+
+    def test_build_gitlink_blame_error_is_ignored(self) -> None:
+        with HistoryFixture() as fixture:
+            foo = fixture.commit(self._gitlink(fixture, "1" * 40), [], "foo")
+            bar = fixture.commit(self._gitlink(fixture, "2" * 40), [foo], "bar")
+
+            repository = VersionControl(fixture.repository)
+            with patch.object(
+                KnowledgeCommitGit,
+                "_contexts",
+                autospec=True,
+                return_value=[(1, 1)],
+            ):
+                commits = KnowledgeCommitGit(repository, cap=200).build(foo, bar)
+
+            correction = self._commit(commits, bar)
+            self.assertEqual(correction.category, "correction")
+            self.assertIn(
+                self._mark(OperationType.EDIT, "qux", "qux"),
+                correction.files,
             )
 
     def test_build_copy_normalizes_to_add(self) -> None:
