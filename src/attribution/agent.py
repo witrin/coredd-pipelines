@@ -18,10 +18,12 @@ class KnowledgeGraphTool:
         self,
         repository: VersionControl,
         store: KnowledgeGraphStore,
+        budget: int = 3,
     ) -> None:
         self._repository = repository
         self._store = store
         self._reads = 0
+        self._budget = budget
         self._target: dict[str, list[str]] = {}
         self._scopes: dict[str, set[tuple[str, ...]]] = {}
 
@@ -112,7 +114,7 @@ class KnowledgeGraphTool:
         Use this for causal verification. It returns the commit diff, optionally
         limited to one path.
         """
-        if self._reads >= 3:
+        if self._reads >= self._budget:
             raise ValueError("Diff read budget exhausted.")
         self._reads += 1
         key = self.store.resolve(sha)
