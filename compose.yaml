@@ -119,6 +119,17 @@ services:
             - ./.cloud:/workspace
             - ~/.config/gcloud:/root/.config/gcloud
 
+    annotation:
+        build:
+            context: .
+            target: annotation
+        ports:
+            - "5173:5173"
+        volumes:
+            - ./.argilla/annotation/src:/app/src
+            - ./.argilla/annotation/public:/app/public
+        profiles: [ annotation ]
+
     notebooks:
         build:
             context: .
