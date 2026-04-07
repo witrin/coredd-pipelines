@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import monacoEditorPlugin from "vite-plugin-monaco-editor";
 
@@ -7,9 +7,6 @@ export default defineConfig({
     react(),
     (monacoEditorPlugin as unknown as typeof monacoEditorPlugin.default).default({
       languageWorkers: ["typescript", "editorWorkerService"],
-      customWorkers: [
-        { label: "python", entry: "monaco-editor/esm/vs/basic-languages/python/python.js" },
-      ],
     }),
   ],
   test: {
@@ -24,6 +21,7 @@ export default defineConfig({
       fileName: () => "code-annotation.bundle.js",
     },
     rollupOptions: {
+      moduleTypes: { ".ttf": "dataurl" },
       output: {
         inlineDynamicImports: true,
       },

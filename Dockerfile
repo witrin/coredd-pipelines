@@ -68,11 +68,17 @@ COPY .cloud/ /workspace/
 ENTRYPOINT ["/bin/bash"]
 
 FROM node:22-slim AS annotation
-WORKDIR /app
+
+WORKDIR /usr/local/annotation/
+
 COPY .argilla/annotation/package.json .argilla/annotation/package-lock.json* ./
-RUN npm ci && npx playwright install --with-deps chromium
+
+RUN npm install && npx playwright install --with-deps chromium
+
 COPY .argilla/annotation/ .
+
 EXPOSE 5173
+
 CMD ["npx", "vite", "--host", "0.0.0.0"]
 
 FROM argilla/argilla-server:v2.8.0 AS evaluation

@@ -126,9 +126,7 @@ services:
         ports:
             - "5173:5173"
         volumes:
-            - ./.argilla/annotation/src:/app/src
-            - ./.argilla/annotation/public:/app/public
-        profiles: [ annotation ]
+            - ./.argilla/annotation/:/usr/local/annotation
 
     notebooks:
         build:
