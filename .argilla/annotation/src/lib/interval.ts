@@ -9,7 +9,9 @@ export class Intervals {
    */
   static merge(list: Interval[]): Interval[] {
     if (list.length === 0) return [];
-    const sorted = [...list].sort((first, second) => first[0] - second[0] || first[1] - second[1]);
+    const sorted = [...list].sort(
+      (first, second) => first[0] - second[0] || first[1] - second[1],
+    );
     const result: Interval[] = [[sorted[0][0], sorted[0][1]]];
     for (let index = 1; index < sorted.length; index++) {
       const last = result[result.length - 1];
@@ -39,7 +41,10 @@ export class Intervals {
    */
   static overlaps(list: Interval[], target: Interval): boolean;
   static overlaps(a: Interval | Interval[], b: Interval): boolean {
-    if (Array.isArray(a[0])) return (a as Interval[]).some((interval) => Intervals.overlaps(interval, b));
+    if (Array.isArray(a[0]))
+      return (a as Interval[]).some((interval) =>
+        Intervals.overlaps(interval, b),
+      );
     const interval = a as Interval;
     return interval[0] < b[1] && b[0] < interval[1];
   }
@@ -53,7 +58,10 @@ export class Intervals {
    */
   static contains(list: Interval[], target: Interval): boolean;
   static contains(outer: Interval | Interval[], inner: Interval): boolean {
-    if (Array.isArray(outer[0])) return (outer as Interval[]).some((interval) => Intervals.contains(interval, inner));
+    if (Array.isArray(outer[0]))
+      return (outer as Interval[]).some((interval) =>
+        Intervals.contains(interval, inner),
+      );
     const interval = outer as Interval;
     return interval[0] <= inner[0] && interval[1] >= inner[1];
   }

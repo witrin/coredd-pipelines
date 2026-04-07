@@ -77,9 +77,16 @@ docker compose --profile production --env-file .env.production up --build interf
 
 Shut the service down with `docker compose stop interface` or remove containers entirely using `docker compose down`.
 
-## Cloud Workspace
+## Project Layout
 
-Cloud infrastructure, Terraform usage, and secret management are documented under [`.cloud/README.md`](.cloud/README.md).
+- [`src/definitions/`](src/definitions/) — Dagster orchestration layer (assets, jobs, sensors, partitions)
+- [`src/scope/`](src/scope/) — Repository selection, GitHub ingestion, and cohort filtering
+- [`src/attribution/`](src/attribution/README.md) — Bug-inducing commit attribution (knowledge graphs, LLM agents, tracing)
+- [`src/evaluation/`](src/evaluation/) — Annotation projection for result validation
+- [`.dagster/`](.dagster/README.md) — Dagster runtime configuration, workspace files, and custom infrastructure components
+- [`.cloud/`](.cloud/README.md) — Cloud infrastructure, Terraform stacks, and secret management
+- [`.jupyter/`](.jupyter/README.md) — Helper package for loading Parquet assets from GCS in notebooks
+- [`.argilla/`](.argilla/README.md) — Annotation tooling and Argilla integration
 
 
 ## Asset Naming Convention

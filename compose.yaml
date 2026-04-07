@@ -77,8 +77,9 @@ services:
                 hard: 671088640
 
     evaluation:
-        build: .
-        platform: linux/amd64
+        build:
+            context: .
+            target: evaluation
         depends_on:
             - redis
             - elasticsearch
@@ -87,12 +88,13 @@ services:
         environment:
             USERNAME: argilla
             PASSWORD: 12345678
-            ARGILLA_DATABASE_URL: sqlite+aiosqlite:///./argilla.db
+            ARGILLA_DATABASE_URL: sqlite+aiosqlite:////var/lib/argilla/argilla.db
             ARGILLA_REDIS_URL: redis://redis:6379/0
             ARGILLA_ELASTICSEARCH: http://elasticsearch:9200
         ports:
             - "6900:6900"
         volumes:
+            - argilla:/var/lib/argilla
             - ./.argilla/oauth.yml:/opt/venv/lib/python3.13/site-packages/argilla_server/.oauth.yml
 
     lock:
@@ -110,7 +112,6 @@ services:
     console:
         build:
             context: .
-            dockerfile: Dockerfile
             target: console
         stdin_open: true
         tty: true
@@ -141,3 +142,7 @@ services:
             - ~/.config/gcloud:/root/.config/gcloud:ro
         tty: true
         stdin_open: true
+
+volumes:
+    argilla:
+        name: ${COMPOSE_PROJECT_NAME}-argilla

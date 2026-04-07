@@ -18,152 +18,84 @@ export interface Change {
 }
 
 /**
- * A model-generated annotation suggestion attached to a target commit.
- */
-export interface Annotation {
-  /**
-   * Repository-relative file path.
-   */
-  path: string;
-  /**
-   * Half-open line intervals the annotation covers.
-   */
-  lines: Interval[];
-  /**
-   * Human-readable description from the model.
-   */
-  description: string;
-}
-
-/**
  * A commit as represented in the input JSON.
  */
 export interface Commit {
-  /**
-   * Full commit SHA.
-   */
   sha: string;
-  /**
-   * Commit author name.
-   */
   author: string;
-  /**
-   * Commit message.
-   */
   message: string;
-  /**
-   * ISO 8601 timestamp.
-   */
   time: string;
-  /**
-   * Classifier labels attached to the commit.
-   */
   labels: string[];
-  /**
-   * File changes keyed by repository-relative path. A plain string value is an unchanged blob SHA.
-   */
   changes: Record<string, string | Change>;
 }
 
 /**
- * A target commit that carries model-generated annotations.
+ * A target commit as represented in the input JSON.
+ * `annotations` is optional — when absent or empty the target has no suggestions.
  */
 export interface Target extends Commit {
-  /**
-   * Model-generated annotation suggestions for this commit.
-   */
-  annotations: Annotation[];
+  annotations?: { path: string; lines: Interval[]; description: string }[];
 }
 
 /**
  * The top-level data structure loaded from the JSON URL.
+ * `targets` is optional — when absent or empty the component becomes a read-only commit viewer.
  */
 export interface Data {
-  /**
-   * Identifier of the model that produced the annotations.
-   */
+  repository: string;
   model: string;
-  /**
-   * The context (base) commit shown read-only.
-   */
   context: Commit;
-  /**
-   * Target commits the annotator reviews.
-   */
-  targets: Target[];
+  targets?: Target[];
 }
 
 /**
- * The lifecycle status of a suggestion.
+ * The origin of an annotation: model-generated suggestion or annotator-created.
  */
-export type Status = "pending" | "accepted" | "rejected";
+export type Origin = "suggestion" | "manual";
 
 /**
- * A model-generated suggestion in the selection state.
+ * The lifecycle status of an annotation.
+ * blocked: suggestion suppressed by an overlapping manual (actions hidden, no output contribution).
  */
-export interface Suggestion {
-  /**
-   * Unique stable identifier for this suggestion.
-   */
-  identifier: string;
-  /**
-   * SHA of the commit this suggestion belongs to.
-   */
-  sha: string;
-  /**
-   * Repository-relative file path.
-   */
-  path: string;
-  /**
-   * Half-open line intervals covered by the suggestion.
-   */
-  lines: Interval[];
-  /**
-   * Human-readable description from the model.
-   */
-  description: string;
-  /**
-   * Current lifecycle status.
-   */
-  status: Status;
-}
+export type Status =
+  | "pending"
+  | "accepted"
+  | "rejected"
+  | "blocked"
+  | "absorbed";
 
 /**
- * An annotator-created manual selection.
- */
-export interface Manual {
-  /**
-   * Unique stable identifier for this manual selection.
-   */
-  identifier: string;
-  /**
-   * SHA of the commit this selection belongs to.
-   */
-  sha: string;
-  /**
-   * Repository-relative file path.
-   */
-  path: string;
-  /**
-   * Half-open line intervals covered by the selection.
-   */
-  lines: Interval[];
-}
-
-/**
- * A single entry in the exported selection state (Section 10.1).
+ * A single entry in the change event output.
  */
 export interface Entry {
-  /**
-   * SHA of the commit this entry belongs to.
-   */
   sha: string;
-  /**
-   * Repository-relative file path.
-   */
   path: string;
-  /**
-   * Merged half-open line intervals for this entry.
-   */
   lines: Interval[];
+}
+
+/**
+ * A single annotation in the runtime state.
+ */
+export interface Annotation {
+  identifier: string;
+  sha: string;
+  path: string;
+  lines: Interval[];
+  origin: Origin;
+  status: Status;
+  description: string;
+}
+
+/**
+ * Severity of a status notification.
+ */
+export type Level = "info" | "warning" | "error";
+
+/**
+ * A single status notification shown to the user.
+ */
+export interface Notice {
+  identifier: string;
+  level: Level;
+  message: string;
 }

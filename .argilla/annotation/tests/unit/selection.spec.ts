@@ -1,299 +1,879 @@
 import { describe, it, expect } from "vitest";
 import { Selection } from "../../src/lib/selection.js";
 
-describe("Selection.create()", () => {
+describe("Selection constructor", () => {
   it("initialises all suggestions as pending", () => {
-    const s = Selection.create([
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
       { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
     ]);
-    expect(s.suggestions).toHaveLength(2);
-    s.suggestions.forEach((sg) => expect(sg.status).toBe("pending"));
-    expect(s.manuals).toHaveLength(0);
+    expect(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "suggestion"),
+    ).toHaveLength(2);
+    s.project("foo", "bar.ts")
+      .filter((a) => a.origin === "suggestion")
+      .forEach((a) => expect(a.status).toBe("pending"));
+    expect(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "manual"),
+    ).toHaveLength(0);
+  });
+
+  it("works with empty suggestions array (no suggestions)", () => {
+    const s = new Selection([]);
+    expect(s.project()).toHaveLength(0);
+    expect(s.project("foo", "bar.ts")).toHaveLength(0);
+  });
+
+  it("supports manual annotations when created with no suggestions", () => {
+    const s = new Selection([]);
+    s.add("foo", "bar.ts", [[3, 6]]);
+    const annotations = s.project("foo", "bar.ts");
+    expect(annotations).toHaveLength(1);
+    expect(annotations[0].origin).toBe("manual");
+    expect(annotations[0].lines).toEqual([[3, 6]]);
   });
 });
 
-describe("Selection.accept()", () => {
+describe("Selection#accept()", () => {
   it("marks suggestion as accepted", () => {
-    const s = Selection.create([
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
       { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
     ]);
-    const identifier = s.suggestions[0].identifier;
-    expect(Selection.accept(s, identifier).suggestions.find((sg) => sg.identifier === identifier)?.status).toBe("accepted");
+    const identifier = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "suggestion")[0].identifier;
+    s.accept(identifier);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "suggestion")
+        .find((a) => a.identifier === identifier)?.status,
+    ).toBe("accepted");
   });
 
-  it("accepted suggestion appears in export", () => {
-    const s = Selection.create([
+  it("accepted suggestion appears in project output", () => {
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
       { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
     ]);
-    const identifier = s.suggestions[0].identifier;
-    const exported = Selection.export(Selection.accept(s, identifier));
-    const entry = exported.find((e) => e.sha === "foo" && e.path === "bar.ts");
-    expect(entry?.lines).toContainEqual([10, 15]);
+    const identifier = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "suggestion")[0].identifier;
+    s.accept(identifier);
+    expect(
+      s.project("foo", "bar.ts").find((a) => a.identifier === identifier)
+        ?.lines,
+    ).toEqual([[10, 15]]);
   });
 });
 
-describe("Selection.reject()", () => {
+describe("Selection#reject()", () => {
   it("marks suggestion as rejected", () => {
-    const s = Selection.create([
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
       { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
     ]);
-    const identifier = s.suggestions[0].identifier;
-    expect(Selection.reject(s, identifier).suggestions.find((sg) => sg.identifier === identifier)?.status).toBe("rejected");
+    const identifier = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "suggestion")[0].identifier;
+    s.reject(identifier);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "suggestion")
+        .find((a) => a.identifier === identifier)?.status,
+    ).toBe("rejected");
   });
 
-  it("rejected suggestion absent from export", () => {
-    const s = Selection.create([
+  it("rejected suggestion is not accepted in project output", () => {
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
       { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
     ]);
-    const identifier = s.suggestions[0].identifier;
-    expect(Selection.export(Selection.reject(s, identifier))).toHaveLength(0);
+    const identifier = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "suggestion")[0].identifier;
+    s.reject(identifier);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.status === "accepted" || a.origin === "manual"),
+    ).toHaveLength(0);
   });
 });
 
-describe("Selection.reset()", () => {
+describe("Selection#reset()", () => {
   it("returns accepted suggestion to pending", () => {
-    let s = Selection.create([
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
       { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
     ]);
-    const identifier = s.suggestions[0].identifier;
-    s = Selection.accept(s, identifier);
-    expect(Selection.reset(s, identifier).suggestions.find((sg) => sg.identifier === identifier)?.status).toBe("pending");
+    const identifier = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "suggestion")[0].identifier;
+    s.accept(identifier);
+    s.reset(identifier);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "suggestion")
+        .find((a) => a.identifier === identifier)?.status,
+    ).toBe("pending");
   });
 
   it("returns rejected suggestion to pending", () => {
-    let s = Selection.create([
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
       { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
     ]);
-    const identifier = s.suggestions[0].identifier;
-    s = Selection.reject(s, identifier);
-    expect(Selection.reset(s, identifier).suggestions.find((sg) => sg.identifier === identifier)?.status).toBe("pending");
+    const identifier = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "suggestion")[0].identifier;
+    s.reject(identifier);
+    s.reset(identifier);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "suggestion")
+        .find((a) => a.identifier === identifier)?.status,
+    ).toBe("pending");
   });
 });
 
-describe("Selection.add()", () => {
-  it("adds a manual selection", () => {
-    const s = Selection.create([
+describe("Selection#add()", () => {
+  it("adds a manual annotation", () => {
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
       { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
     ]);
-    const result = Selection.add(s, "foo", "bar.ts", [[30, 35]]);
-    expect(result.manuals).toHaveLength(1);
-    expect(result.manuals[0].lines).toEqual([[30, 35]]);
+    s.add("foo", "bar.ts", [[30, 35]]);
+    expect(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "manual"),
+    ).toHaveLength(1);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[30, 35]]);
   });
 
-  it("manual appears in export", () => {
-    const s = Selection.create([
-      { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
-      { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
-    ]);
-    const result = Selection.add(s, "foo", "bar.ts", [[30, 35]]);
-    const entry = Selection.export(result).find((e) => e.sha === "foo" && e.path === "bar.ts");
-    expect(entry?.lines).toContainEqual([30, 35]);
-  });
-
-  it("unions adjacent manual selections added in separate calls", () => {
-    const s0 = Selection.create([]);
-    const s1 = Selection.add(s0, "foo", "bar.ts", [[3, 6]]);
-    const s2 = Selection.add(s1, "foo", "bar.ts", [[6, 9]]);
-    expect(s2.manuals).toHaveLength(1);
-    expect(s2.manuals[0].lines).toEqual([[3, 9]]);
+  it("unions adjacent manual annotations added in separate calls", () => {
+    const s = new Selection([]);
+    s.add("foo", "bar.ts", [[3, 6]]);
+    s.add("foo", "bar.ts", [[6, 9]]);
+    expect(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "manual"),
+    ).toHaveLength(1);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[3, 9]]);
   });
 
   it("merges adjacent intervals on add", () => {
-    const s = Selection.create([
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
       { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
     ]);
-    const result = Selection.add(s, "foo", "bar.ts", [[1, 5], [5, 10]]);
-    expect(result.manuals[0].lines).toEqual([[1, 10]]);
+    s.add("foo", "bar.ts", [
+      [1, 5],
+      [5, 10],
+    ]);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[1, 10]]);
   });
 
-  it("rejects rejected suggestion on full coverage with extension", () => {
-    let s = Selection.create([
+  it("overridden rejected suggestion not output, manual takes over", () => {
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
       { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
     ]);
-    const identifier = s.suggestions[0].identifier;
-    s = Selection.reject(s, identifier);
-    s = Selection.add(s, "foo", "bar.ts", [[8, 18]]);
-    expect(s.suggestions.find((sg) => sg.identifier === identifier)?.status).toBe("rejected");
+    const identifier = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "suggestion")[0].identifier;
+    s.reject(identifier);
+    s.add("foo", "bar.ts", [[12, 17]]);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[12, 17]]);
   });
 
-  it("rejects rejected suggestion on partial overlap", () => {
-    let s = Selection.create([
+  it("accepted suggestion stays accepted and forms union on overlap", () => {
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
-      { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
     ]);
-    const identifier = s.suggestions[0].identifier;
-    s = Selection.reject(s, identifier);
-    s = Selection.add(s, "foo", "bar.ts", [[12, 17]]);
-    expect(s.suggestions.find((sg) => sg.identifier === identifier)?.status).toBe("rejected");
+    s.accept(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    s.add("foo", "bar.ts", [[12, 17]]);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[10, 17]]);
   });
 
-  it("rejects accepted suggestion on full coverage with extension", () => {
-    let s = Selection.create([
+  it("accepted suggestion stays accepted on touch (adjacent)", () => {
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
     ]);
-    const identifier = s.suggestions[0].identifier;
-    s = Selection.accept(s, identifier);
-    s = Selection.add(s, "foo", "bar.ts", [[8, 18]]);
-    expect(s.suggestions.find((sg) => sg.identifier === identifier)?.status).toBe("rejected");
-    expect(s.manuals).toHaveLength(1);
+    s.accept(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    s.add("foo", "bar.ts", [[15, 20]]);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[10, 20]]);
   });
 
   it("keeps accepted suggestion accepted on exact match re-mark", () => {
-    let s = Selection.create([
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
     ]);
-    const identifier = s.suggestions[0].identifier;
-    s = Selection.accept(s, identifier);
-    s = Selection.add(s, "foo", "bar.ts", [[10, 15]]);
-    expect(s.suggestions.find((sg) => sg.identifier === identifier)?.status).toBe("accepted");
-    expect(s.manuals).toHaveLength(0);
+    const identifier = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "suggestion")[0].identifier;
+    s.accept(identifier);
+    s.add("foo", "bar.ts", [[10, 15]]);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "suggestion")
+        .find((a) => a.identifier === identifier)?.status,
+    ).toBe("accepted");
+    expect(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "manual"),
+    ).toHaveLength(0);
   });
 
-  it("rejects pending suggestion when manual fully covers it (non-exact)", () => {
-    let s = Selection.create([
+  it("overridden pending suggestion not output, manual takes over", () => {
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
     ]);
-    const identifier = s.suggestions[0].identifier;
-    s = Selection.add(s, "foo", "bar.ts", [[8, 18]]);
-    expect(s.suggestions.find((sg) => sg.identifier === identifier)?.status).toBe("rejected");
-  });
-
-  it("rejects pending suggestion on partial overlap", () => {
-    let s = Selection.create([
-      { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
-    ]);
-    const identifier = s.suggestions[0].identifier;
-    s = Selection.add(s, "foo", "bar.ts", [[12, 17]]);
-    expect(s.suggestions.find((sg) => sg.identifier === identifier)?.status).toBe("rejected");
+    s.add("foo", "bar.ts", [[12, 17]]);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[12, 17]]);
   });
 
   it("accepts pending suggestion on exact match and records no manual", () => {
-    let s = Selection.create([
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
     ]);
-    const identifier = s.suggestions[0].identifier;
-    s = Selection.add(s, "foo", "bar.ts", [[10, 15]]);
-    expect(s.suggestions.find((sg) => sg.identifier === identifier)?.status).toBe("accepted");
-    expect(s.manuals).toHaveLength(0);
+    const identifier = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "suggestion")[0].identifier;
+    s.add("foo", "bar.ts", [[10, 15]]);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "suggestion")
+        .find((a) => a.identifier === identifier)?.status,
+    ).toBe("accepted");
+    expect(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "manual"),
+    ).toHaveLength(0);
   });
 
   it("unions intervals when new manual overlaps existing manual", () => {
-    let s = Selection.create([]);
-    s = Selection.add(s, "foo", "bar.ts", [[5, 10]]);
-    s = Selection.add(s, "foo", "bar.ts", [[8, 15]]);
-    expect(s.manuals).toHaveLength(1);
-    expect(s.manuals[0].lines).toEqual([[5, 15]]);
+    const s = new Selection([]);
+    s.add("foo", "bar.ts", [[5, 10]]);
+    s.add("foo", "bar.ts", [[8, 15]]);
+    expect(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "manual"),
+    ).toHaveLength(1);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[5, 15]]);
   });
 
   it("does not add duplicate when re-marking identical range", () => {
-    let s = Selection.create([]);
-    s = Selection.add(s, "foo", "bar.ts", [[5, 10]]);
-    s = Selection.add(s, "foo", "bar.ts", [[5, 10]]);
-    expect(s.manuals).toHaveLength(1);
-    expect(s.manuals[0].lines).toEqual([[5, 10]]);
+    const s = new Selection([]);
+    s.add("foo", "bar.ts", [[5, 10]]);
+    s.add("foo", "bar.ts", [[5, 10]]);
+    expect(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "manual"),
+    ).toHaveLength(1);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[5, 10]]);
   });
 
-  it("manual-only export when suggestion is rejected by full coverage", () => {
-    let s = Selection.create([
+  it("manual-only output when pending suggestion is overridden by full coverage", () => {
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
     ]);
-    s = Selection.add(s, "foo", "bar.ts", [[8, 18]]);
-    const entry = Selection.export(s).find((e) => e.sha === "foo" && e.path === "bar.ts");
-    expect(entry).toBeDefined();
-    // suggestion is rejected, only manual [8,18) in export
-    expect(entry!.lines).toEqual([[8, 18]]);
+    s.add("foo", "bar.ts", [[8, 18]]);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[8, 18]]);
+  });
+
+  it("accept + touch + add(overlap on manual) becomes full union in project output", () => {
+    const s = new Selection([
+      { sha: "foo", path: "bar.ts", lines: [[3, 6]], description: "baz" },
+    ]);
+    s.accept(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    s.add("foo", "bar.ts", [[6, 9]]);
+    s.add("foo", "bar.ts", [[5, 8]]);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[3, 9]]);
   });
 });
 
-describe("Selection.remove()", () => {
-  it("removes the manual selection", () => {
-    const s = Selection.create([
+describe("Selection#remove()", () => {
+  it("removes the manual annotation", () => {
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
       { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
     ]);
-    let result = Selection.add(s, "foo", "bar.ts", [[30, 35]]);
-    const identifier = result.manuals[0].identifier;
-    result = Selection.remove(result, identifier);
-    expect(result.manuals).toHaveLength(0);
+    s.add("foo", "bar.ts", [[30, 35]]);
+    const identifier = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "manual")[0].identifier;
+    s.remove(identifier);
+    expect(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "manual"),
+    ).toHaveLength(0);
   });
 
-  it("resets overlapping suggestion to pending on remove", () => {
-    let s = Selection.create([
+  it("overridden pending suggestion reverts to pending after remove", () => {
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
       { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
     ]);
-    const sid = s.suggestions[0].identifier;
-    s = Selection.add(s, "foo", "bar.ts", [[8, 18]]);
-    const mid = s.manuals[0].identifier;
-    s = Selection.remove(s, mid);
-    expect(s.suggestions.find((sg) => sg.identifier === sid)?.status).toBe("pending");
+    const target = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "suggestion")[0].identifier;
+    s.add("foo", "bar.ts", [[8, 18]]);
+    const manual = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "manual")[0].identifier;
+    s.remove(manual);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "suggestion")
+        .find((a) => a.identifier === target)?.status,
+    ).toBe("pending");
+  });
+
+  it("leaves explicitly rejected suggestion unchanged on remove", () => {
+    const s = new Selection([
+      { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
+      { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
+    ]);
+    const target = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "suggestion")[0].identifier;
+    s.reject(target);
+    s.add("foo", "bar.ts", [[50, 60]]);
+    const manual = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "manual")[0].identifier;
+    s.remove(manual);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "suggestion")
+        .find((a) => a.identifier === target)?.status,
+    ).toBe("rejected");
   });
 
   it("does not affect suggestions not covered by removed manual", () => {
-    let s = Selection.create([
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
       { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
     ]);
-    s = Selection.accept(s, s.suggestions[0].identifier);
-    s = Selection.add(s, "foo", "bar.ts", [[50, 60]]);
-    const mid = s.manuals[0].identifier;
-    s = Selection.remove(s, mid);
-    expect(s.suggestions[0].status).toBe("accepted");
+    s.accept(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    s.add("foo", "bar.ts", [[50, 60]]);
+    const manual = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "manual")[0].identifier;
+    s.remove(manual);
+    expect(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "suggestion")[0]
+        .status,
+    ).toBe("accepted");
   });
 });
 
-describe("Selection.export()", () => {
+describe("Selection#project() merged output", () => {
   it("merges adjacent manual (added first) with accepted suggestion", () => {
-    // manual [6,9) added before accepting suggestion [3,6) — export must union to [3,9)
-    let s = Selection.create([
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[3, 6]], description: "baz" },
     ]);
-    s = Selection.add(s, "foo", "bar.ts", [[6, 9]]);
-    s = Selection.accept(s, s.suggestions[0].identifier);
-    const entry = Selection.export(s).find((e) => e.sha === "foo" && e.path === "bar.ts");
-    expect(entry?.lines).toEqual([[3, 9]]);
+    s.add("foo", "bar.ts", [[6, 9]]);
+    s.accept(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[3, 9]]);
   });
 
-
-  it("merges accepted suggestion and non-overlapping manual for same path", () => {
-    let s = Selection.create([
+  it("no accepted or manual annotations when nothing accepted", () => {
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
       { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
     ]);
-    s = Selection.accept(s, s.suggestions[0].identifier);
-    s = Selection.add(s, "foo", "bar.ts", [[15, 20]]);
-    const entry = Selection.export(s).find((e) => e.sha === "foo" && e.path === "bar.ts");
-    expect(entry?.lines).toEqual([[10, 20]]);
+    expect(
+      s
+        .project("foo", "bar.ts")
+        .filter((a) => a.status === "accepted" || a.origin === "manual"),
+    ).toHaveLength(0);
   });
 
-  it("returns empty when nothing accepted or manual", () => {
-    const s = Selection.create([
-      { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
-      { sha: "foo", path: "bar.ts", lines: [[20, 25]], description: "qux" },
-    ]);
-    expect(Selection.export(s)).toHaveLength(0);
-  });
-
-  it("groups by sha and path", () => {
-    let s = Selection.create([
+  it("project() without args returns annotations for multiple sha/path pairs", () => {
+    const s = new Selection([
       { sha: "foo", path: "bar.ts", lines: [[1, 5]], description: "baz" },
       { sha: "bar", path: "baz.ts", lines: [[1, 5]], description: "qux" },
     ]);
-    s = Selection.accept(s, s.suggestions[0].identifier);
-    s = Selection.accept(s, s.suggestions[1].identifier);
-    const exported = Selection.export(s);
-    expect(exported).toHaveLength(2);
-    expect(exported.map((e) => e.sha)).toContain("foo");
-    expect(exported.map((e) => e.sha)).toContain("bar");
+    s.accept(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    s.accept(
+      s.project("bar", "baz.ts").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    expect(
+      s
+        .project()
+        .filter((a) => a.status === "accepted")
+        .map((a) => a.sha),
+    ).toContain("foo");
+    expect(
+      s
+        .project()
+        .filter((a) => a.status === "accepted")
+        .map((a) => a.sha),
+    ).toContain("bar");
+  });
+});
+
+describe("adjacent accept then add (below)", () => {
+  it("absorbs suggestion and expands manual to [3,9)", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    s.accept(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    s.add("x", "f", [[6, 9]]);
+    const p = s.project("x", "f");
+    expect(p.filter((a) => a.origin === "suggestion")).toHaveLength(1);
+    expect(p.filter((a) => a.origin === "suggestion")[0].status).toBe(
+      "absorbed",
+    );
+    expect(p.filter((a) => a.origin === "manual")).toHaveLength(1);
+    expect(
+      p
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[3, 9]]);
+  });
+});
+
+describe("adjacent add (below) then accept", () => {
+  it("absorbs suggestion and expands manual to [3,9)", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    s.add("x", "f", [[6, 9]]);
+    s.accept(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    const p = s.project("x", "f");
+    expect(p.filter((a) => a.origin === "suggestion")).toHaveLength(1);
+    expect(p.filter((a) => a.origin === "suggestion")[0].status).toBe(
+      "absorbed",
+    );
+    expect(p.filter((a) => a.origin === "manual")).toHaveLength(1);
+    expect(
+      p
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[3, 9]]);
+  });
+});
+
+describe("adjacent accept then add (above)", () => {
+  it("absorbs suggestion and expands manual to [1,6)", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    s.accept(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    s.add("x", "f", [[1, 3]]);
+    const p = s.project("x", "f");
+    expect(p.filter((a) => a.origin === "suggestion")).toHaveLength(1);
+    expect(p.filter((a) => a.origin === "suggestion")[0].status).toBe(
+      "absorbed",
+    );
+    expect(p.filter((a) => a.origin === "manual")).toHaveLength(1);
+    expect(
+      p
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[1, 6]]);
+  });
+});
+
+describe("adjacent add (above) then accept", () => {
+  it("absorbs suggestion and expands manual to [1,6)", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    s.add("x", "f", [[1, 3]]);
+    s.accept(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    const p = s.project("x", "f");
+    expect(p.filter((a) => a.origin === "suggestion")).toHaveLength(1);
+    expect(p.filter((a) => a.origin === "suggestion")[0].status).toBe(
+      "absorbed",
+    );
+    expect(p.filter((a) => a.origin === "manual")).toHaveLength(1);
+    expect(
+      p
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[1, 6]]);
+  });
+});
+
+describe("adjacent reject then add (below)", () => {
+  it("keeps suggestion rejected, records manual [6,9), suggestion not blocked", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    s.reject(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    s.add("x", "f", [[6, 9]]);
+    const p = s.project("x", "f");
+    expect(p.find((a) => a.origin === "suggestion")!.status).toBe("rejected");
+    expect(p.find((a) => a.origin === "suggestion")!.status).not.toBe(
+      "blocked",
+    );
+    expect(p.filter((a) => a.origin === "manual")).toHaveLength(1);
+    expect(
+      p
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[6, 9]]);
+  });
+});
+
+describe("adjacent add (below) then reject", () => {
+  it("rejects suggestion, records manual [6,9), suggestion not blocked", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    s.add("x", "f", [[6, 9]]);
+    s.reject(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    const p = s.project("x", "f");
+    expect(p.find((a) => a.origin === "suggestion")!.status).toBe("rejected");
+    expect(p.find((a) => a.origin === "suggestion")!.status).not.toBe(
+      "blocked",
+    );
+    expect(p.filter((a) => a.origin === "manual")).toHaveLength(1);
+    expect(
+      p
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[6, 9]]);
+  });
+});
+
+describe("adjacent pending + add (below)", () => {
+  it("keeps suggestion pending, records manual [6,9), suggestion not blocked", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    s.add("x", "f", [[6, 9]]);
+    const p = s.project("x", "f");
+    expect(p.find((a) => a.origin === "suggestion")!.status).toBe("pending");
+    expect(p.find((a) => a.origin === "suggestion")!.status).not.toBe(
+      "blocked",
+    );
+    expect(p.filter((a) => a.origin === "manual")).toHaveLength(1);
+    expect(
+      p
+        .filter((a) => a.origin === "manual")
+        .map((a) => a.lines)
+        .flat(),
+    ).toEqual([[6, 9]]);
+  });
+});
+
+describe("adjacent reject then add (below) then remove then remove where rejected stays", () => {
+  it("rejected stays rejected after adjacent add + remove (touch does not override)", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    s.reject(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    s.add("x", "f", [[6, 9]]);
+    expect(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0].status,
+    ).toBe("rejected");
+    s.remove(
+      s.project("x", "f").filter((a) => a.origin === "manual")[0].identifier,
+    );
+    expect(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0].status,
+    ).toBe("rejected");
+    expect(
+      s.project("x", "f").filter((a) => a.origin === "manual"),
+    ).toHaveLength(0);
+  });
+  it("rejected + overlapping add becomes blocked while overlap exists", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    s.reject(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    s.add("x", "f", [[4, 9]]);
+    expect(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0].status,
+    ).toBe("blocked");
+  });
+  it("rejected + overlapping add + remove becomes rejected (explicit status restored)", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    s.reject(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    s.add("x", "f", [[4, 9]]);
+    s.remove(
+      s.project("x", "f").filter((a) => a.origin === "manual")[0].identifier,
+    );
+    expect(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0].status,
+    ).toBe("rejected");
+  });
+  it("rejected + touch add + overlapping add merge into one manual becomes remove clears all becomes rejected", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    s.reject(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    s.add("x", "f", [[6, 9]]);
+    s.add("x", "f", [[4, 9]]);
+    expect(
+      s.project("x", "f").filter((a) => a.origin === "manual"),
+    ).toHaveLength(1);
+    s.remove(
+      s.project("x", "f").filter((a) => a.origin === "manual")[0].identifier,
+    );
+    expect(
+      s.project("x", "f").filter((a) => a.origin === "manual"),
+    ).toHaveLength(0);
+    expect(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0].status,
+    ).toBe("rejected");
+  });
+  it("explicitly rejected + no annotation becomes stays rejected after unrelated remove", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+      { sha: "x", path: "f", lines: [[10, 12]], description: "" },
+    ]);
+    const first = s
+      .project("x", "f")
+      .filter((a) => a.origin === "suggestion")[0].identifier;
+    s.reject(first);
+    s.add("x", "f", [[10, 12]]);
+    expect(
+      s
+        .project("x", "f")
+        .filter((a) => a.origin === "suggestion")
+        .find((a) => a.identifier === first)!.status,
+    ).toBe("rejected");
+    s.remove(
+      s.project("x", "f").filter((a) => a.origin === "manual")[0].identifier,
+    );
+    expect(
+      s
+        .project("x", "f")
+        .filter((a) => a.origin === "suggestion")
+        .find((a) => a.identifier === first)!.status,
+    ).toBe("rejected");
+  });
+});
+
+describe("adjacent pending + add (below) then remove", () => {
+  it("suggestion back to pending and not blocked after remove", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    s.add("x", "f", [[6, 9]]);
+    s.remove(
+      s.project("x", "f").filter((a) => a.origin === "manual")[0].identifier,
+    );
+    const p = s.project("x", "f");
+    expect(p.find((a) => a.origin === "suggestion")!.status).toBe("pending");
+    expect(p.find((a) => a.origin === "suggestion")!.status).not.toBe(
+      "blocked",
+    );
+    expect(p.filter((a) => a.origin === "manual")).toHaveLength(0);
+  });
+});
+
+describe("adjacent pending + add (above) then remove", () => {
+  it("suggestion back to pending and not blocked after remove", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    s.add("x", "f", [[1, 3]]);
+    s.remove(
+      s.project("x", "f").filter((a) => a.origin === "manual")[0].identifier,
+    );
+    const p = s.project("x", "f");
+    expect(p.find((a) => a.origin === "suggestion")!.status).toBe("pending");
+    expect(p.find((a) => a.origin === "suggestion")!.status).not.toBe(
+      "blocked",
+    );
+    expect(p.filter((a) => a.origin === "manual")).toHaveLength(0);
+  });
+});
+
+describe("hydrate", () => {
+  it("exact match accepts the suggestion", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    s.hydrate([{ sha: "x", path: "f", lines: [[3, 6]] }]);
+    expect(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0].status,
+    ).toBe("accepted");
+    expect(
+      s.project("x", "f").filter((a) => a.origin === "manual"),
+    ).toHaveLength(0);
+  });
+
+  it("non-matching entry creates a manual annotation", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    s.hydrate([{ sha: "x", path: "f", lines: [[10, 15]] }]);
+    expect(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0].status,
+    ).toBe("pending");
+    expect(
+      s.project("x", "f").filter((a) => a.origin === "manual"),
+    ).toHaveLength(1);
+    expect(
+      s.project("x", "f").filter((a) => a.origin === "manual")[0].lines,
+    ).toEqual([[10, 15]]);
+  });
+
+  it("mix of matching and non-matching entries", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+      { sha: "x", path: "g", lines: [[1, 4]], description: "" },
+    ]);
+    s.hydrate([
+      { sha: "x", path: "f", lines: [[3, 6]] },
+      { sha: "x", path: "g", lines: [[8, 12]] },
+    ]);
+    expect(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0].status,
+    ).toBe("accepted");
+    expect(
+      s.project("x", "g").filter((a) => a.origin === "suggestion")[0].status,
+    ).toBe("pending");
+    expect(
+      s.project("x", "g").filter((a) => a.origin === "manual"),
+    ).toHaveLength(1);
+  });
+
+  it("empty entries array is a no-op", () => {
+    const s = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    s.hydrate([]);
+    expect(
+      s.project("x", "f").filter((a) => a.origin === "suggestion")[0].status,
+    ).toBe("pending");
   });
 });

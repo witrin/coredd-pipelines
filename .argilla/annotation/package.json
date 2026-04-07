@@ -8,13 +8,13 @@
     "build": "vite build",
     "test": "vitest run && playwright test",
     "unit": "vitest run",
-    "acceptance": "playwright test",
+    "acceptance": "playwright test --workers 8",
     "performance": "playwright test tests/acceptance/performance.test.ts"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
-    "@monaco-editor/react": "^4.7.0",
+    "monaco-editor": "^0.55.1",
     "@mui/x-tree-view": "^8.27.2",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
@@ -28,7 +28,6 @@
     "jsdom": "^29.0.1",
     "typescript": "^6.0.2",
     "vite": "^8.0.3",
-    "vite-plugin-monaco-editor": "^1.1.0",
     "vitest": "^4.1.2"
   }
 }

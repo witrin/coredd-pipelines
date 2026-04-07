@@ -77,6 +77,8 @@ RUN npm install && npx playwright install --with-deps chromium
 
 COPY .argilla/annotation/ .
 
+RUN npx vite build
+
 EXPOSE 5173
 
 CMD ["npx", "vite", "--host", "0.0.0.0"]
@@ -84,7 +86,10 @@ CMD ["npx", "vite", "--host", "0.0.0.0"]
 FROM argilla/argilla-server:v2.8.0 AS evaluation
 
 COPY .argilla/oauth.yml /etc/argilla/oauth.yml
-
+COPY --from=annotation /usr/local/annotation/dist/ \
+     /opt/venv/lib/python3.13/site-packages/argilla_server/static/annotation/
+COPY .argilla/annotation.js \
+     /opt/venv/lib/python3.13/site-packages/argilla_server/static/annotation/adapter.js
 FROM pipelines AS notebooks
 
 USER root

@@ -1,4 +1,5 @@
 {
+  "repository": "foo/bar",
   "model": "foo",
   "context": {
     "sha": "bar",

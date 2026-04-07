@@ -1,77 +1,324 @@
 import "@vitejs/plugin-react/preamble";
-import React, { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import createCache from "@emotion/cache";
 import { CacheProvider } from "@emotion/react";
-import type { Entry } from "./types/index.js";
+import type { Entry, Level } from "./types/index.js";
+import type { Selection } from "./lib/selection.js";
+import { Toasts } from "./lib/toasts.js";
 import { useData } from "./hooks/data.js";
-import { useSelection } from "./hooks/selection.js";
+import { useAnnotations } from "./hooks/selection.js";
 import { Sidebar } from "./components/sidebar.js";
 import { Editor } from "./components/editor.js";
+import { ToastStack } from "./components/toasts.js";
 
 interface ActiveFile {
   sha: string;
   path: string;
   context: boolean;
+  line?: number;
 }
 
-function App({ src, notify, shadow }: { src: string; notify: React.RefObject<((detail: Entry[]) => void) | null>; shadow: ShadowRoot }) {
-  const cache = useMemo(() => createCache({ key: "av", container: shadow as unknown as HTMLElement, prepend: true }), [shadow]);
-  const { status, data, error, blobs, load } = useData(src);
-  const sel = useSelection(data, notify);
+function App({
+  src,
+  notify,
+  shadow,
+  selection,
+  drain,
+  toasts,
+}: {
+  src: string;
+  notify: { current: ((detail: Entry[]) => void) | null };
+  shadow: ShadowRoot;
+  selection: { current: Selection | null };
+  drain: () => Entry[] | null;
+  toasts: Toasts;
+}) {
+  const cache = useMemo(
+    () =>
+      createCache({
+        key: "av",
+        container: shadow as unknown as HTMLElement,
+        prepend: true,
+      }),
+    [shadow],
+  );
+  const { status, data, error, blobs, failedBlobs, load } = useData(src);
+  const annotations = useAnnotations(data, notify);
+
+  useEffect(() => {
+    if (data) {
+      selection.current = annotations.selection;
+      const entries = drain();
+      if (entries) {
+        annotations.selection.hydrate(entries);
+      }
+    }
+    return () => {
+      selection.current = null;
+    };
+  }, [annotations.selection, data]);
   const [active, setActive] = useState<ActiveFile | null>(null);
+  const [navigation, setNavigationKey] = useState(0);
   const [collapsed, setCollapsed] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+
+  useEffect(() => {
+    const handler = () => setFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", handler);
+    return () => document.removeEventListener("fullscreenchange", handler);
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      document.documentElement.requestFullscreen();
+    }
+  }, []);
 
   const onFile = useCallback((sha: string, path: string, context: boolean) => {
     setActive({ sha, path, context });
   }, []);
 
-  const onNav = useCallback((sha: string, path: string) => {
-    setActive({ sha, path, context: data?.context.sha === sha });
-  }, [data]);
+  const onNavigate = useCallback(
+    (sha: string, path: string, line?: number) => {
+      setActive({ sha, path, context: data?.context.sha === sha, line });
+      setNavigationKey((k) => k + 1);
+    },
+    [data],
+  );
 
   if (!src) {
-    return <div style={{ fontFamily: "monospace", padding: "1rem", color: "var(--av-subtext)" }}>code-annotation (no src)</div>;
+    return (
+      <div
+        style={{
+          fontFamily: "monospace",
+          padding: "1rem",
+          color: "var(--av-subtext)",
+        }}
+      >
+        code-annotation (no src)
+      </div>
+    );
   }
   if (status === "loading" || status === "idle") {
-    return <div style={{ fontFamily: "monospace", padding: "1rem", color: "var(--av-subtext)" }}>Loading…</div>;
+    return (
+      <div
+        style={{
+          fontFamily: "monospace",
+          padding: "1rem",
+          color: "var(--av-subtext)",
+        }}
+      >
+        Loading…
+      </div>
+    );
   }
   if (status === "error" || !data) {
-    return <div style={{ fontFamily: "monospace", padding: "1rem", color: "var(--av-deleted)" }}>Error: {error ?? "unknown"}</div>;
+    return (
+      <CacheProvider value={cache}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            height: "100%",
+            width: "100%",
+            position: "relative",
+            background: "var(--av-background)",
+            fontFamily: "Inter,'Segoe UI',system-ui,sans-serif",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 16,
+              textAlign: "center",
+              padding: "48px 32px",
+            }}
+          >
+            <svg
+              width="48"
+              height="44"
+              viewBox="0 0 90 82"
+              fill="none"
+              style={{ opacity: 0.6 }}
+            >
+              <path
+                d="M53.32 5.558a9.606 9.606 0 00-16.64 0L1.303 66.836a9.606 9.606 0 008.32 14.41h70.757a9.606 9.606 0 008.319-14.41L53.319 5.558zm30.182 67.884a3.543 3.543 0 01-3.123 1.804H9.62a3.607 3.607 0 01-3.123-5.41L41.876 8.558a3.606 3.606 0 016.248 0l35.378 61.278a3.542 3.542 0 010 3.606z"
+                fill="var(--av-deleted)"
+              />
+              <path
+                d="M45 54.884a3 3 0 003-3V25.43a3 3 0 10-6 0v26.456a3 3 0 003 3zM45 60.917a3.175 3.175 0 100 6.35 3.175 3.175 0 000-6.35z"
+                fill="var(--av-deleted)"
+              />
+            </svg>
+            <div
+              style={{ fontSize: 16, fontWeight: 600, color: "var(--av-text)" }}
+            >
+              Could not load annotation data
+            </div>
+            <div
+              style={{
+                fontFamily: "monospace",
+                fontSize: 12,
+                color: "var(--av-muted)",
+                lineHeight: 1.6,
+                maxWidth: 480,
+                wordBreak: "break-all",
+              }}
+            >
+              {error ?? "unknown error"}
+            </div>
+          </div>
+          <ToastStack toasts={toasts} />
+        </div>
+      </CacheProvider>
+    );
   }
 
-  const commit = active?.context ? data.context : data.targets.find((t) => t.sha === active?.sha);
+  const commit = active?.context
+    ? data.context
+    : (data.targets ?? []).find((t) => t.sha === active?.sha);
   const change = active ? commit?.changes[active.path] : undefined;
 
   return (
     <CacheProvider value={cache}>
-      <div style={{ display: "flex", height: "100%", width: "100%", background: "var(--av-background)", color: "var(--av-text)", fontFamily: "Inter,'Segoe UI',system-ui,sans-serif", overflow: "hidden" }}>
+      <div
+        style={{
+          display: "flex",
+          height: "100%",
+          width: "100%",
+          position: "relative",
+          background: "var(--av-background)",
+          color: "var(--av-text)",
+          fontFamily: "Inter,'Segoe UI',system-ui,sans-serif",
+          overflow: "hidden",
+        }}
+      >
         {!collapsed && (
           <Sidebar
-            data={data} state={sel.state} model={data.model} activeSha={active?.sha ?? null} activePath={active?.path ?? null}
-            onFile={onFile} onSuggestion={onNav} onManual={onNav}
-            collapsed={collapsed} onToggle={() => setCollapsed((v) => !v)}
+            data={data}
+            state={annotations.selection}
+            activeSha={active?.sha ?? null}
+            activePath={active?.path ?? null}
+            navigation={navigation}
+            onFile={onFile}
+            onSuggestion={onNavigate}
+            onAnnotation={onNavigate}
+            collapsed={collapsed}
+            onToggle={() => setCollapsed((v) => !v)}
           />
         )}
         {active && change !== undefined ? (
           <Editor
-            key={`${active.sha}:${active.path}`}
-            sha={active.sha} path={active.path} change={change} context={active.context}
-            blobs={blobs} load={load} state={sel.state}
-            accept={sel.accept} reject={sel.reject} reset={sel.reset}
-            add={sel.add} remove={sel.remove}
-            collapsed={collapsed} onToggle={() => setCollapsed((v) => !v)}
+            sha={active.sha}
+            path={active.path}
+            change={change}
+            context={active.context}
+            reveal={active.line}
+            repository={data.repository}
+            blobs={blobs}
+            failedBlobs={failedBlobs}
+            load={load}
+            state={annotations.selection}
+            accept={annotations.selection.accept.bind(annotations.selection)}
+            reject={annotations.selection.reject.bind(annotations.selection)}
+            reset={annotations.selection.reset.bind(annotations.selection)}
+            add={annotations.selection.add.bind(annotations.selection)}
+            remove={annotations.selection.remove.bind(annotations.selection)}
+            collapsed={collapsed}
+            onToggle={() => setCollapsed((v) => !v)}
+            fullscreen={fullscreen}
+            onFullscreen={toggleFullscreen}
           />
         ) : (
-          <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--av-muted)", fontSize: 14, flexDirection: "column", gap: 8 }}>
+          <div
+            style={{
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "var(--av-muted)",
+              fontSize: 14,
+              flexDirection: "column",
+              gap: 8,
+              position: "relative",
+            }}
+          >
+            <button
+              className="av-collapse-btn"
+              onClick={toggleFullscreen}
+              title={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+              style={{
+                position: "absolute",
+                top: 6,
+                right: 12,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: "0 5px",
+              }}
+            >
+              {fullscreen ? (
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <polyline points="4 14 10 14 10 20" />
+                  <polyline points="20 10 14 10 14 4" />
+                  <line x1="14" y1="10" x2="21" y2="3" />
+                  <line x1="3" y1="21" x2="10" y2="14" />
+                </svg>
+              ) : (
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <polyline points="15 3 21 3 21 9" />
+                  <polyline points="9 21 3 21 3 15" />
+                  <line x1="21" y1="3" x2="14" y2="10" />
+                  <line x1="3" y1="21" x2="10" y2="14" />
+                </svg>
+              )}
+            </button>
             {collapsed && (
-              <button onClick={() => setCollapsed(false)} style={{ background: "transparent", border: "1px solid var(--av-border)", color: "var(--av-subtext)", cursor: "pointer", borderRadius: 4, padding: "4px 10px", fontSize: 13, fontFamily: "inherit", marginBottom: 12 }}>
+              <button
+                onClick={() => setCollapsed(false)}
+                style={{
+                  background: "transparent",
+                  border: "1px solid var(--av-border)",
+                  color: "var(--av-subtext)",
+                  cursor: "pointer",
+                  borderRadius: 4,
+                  padding: "4px 10px",
+                  fontSize: 13,
+                  fontFamily: "inherit",
+                  marginBottom: 12,
+                }}
+              >
                 ☰ Open sidebar
               </button>
             )}
             <span>Select a file from the sidebar</span>
           </div>
         )}
+        <ToastStack toasts={toasts} />
       </div>
     </CacheProvider>
   );
@@ -79,9 +326,14 @@ function App({ src, notify, shadow }: { src: string; notify: React.RefObject<((d
 
 class AnnotationView extends HTMLElement {
   #root: ReturnType<typeof createRoot> | null = null;
-  #notify: React.RefObject<((detail: Entry[]) => void) | null> = { current: null };
+  #notify: { current: ((detail: Entry[]) => void) | null } = {
+    current: null,
+  };
+  #selection: { current: Selection | null } = { current: null };
+  #pending: Entry[] | null = null;
   #shadow: ShadowRoot | null = null;
   #observer: MutationObserver | null = null;
+  #toasts = new Toasts();
 
   connectedCallback(): void {
     const shadow = this.attachShadow({ mode: "open" });
@@ -105,9 +357,9 @@ class AnnotationView extends HTMLElement {
   --av-accepted:    hsl(227, 56%, 52%);
   --av-rejected:    hsla(0, 0%, 100%, 0.37);
   --av-annotator:   hsl(227, 56%, 52%);
-  --av-changed:     hsl(88, 74%, 36%);
-  --av-added:       hsl(88, 74%, 36%);
-  --av-deleted:     hsl(3, 100%, 69%);
+  --av-changed:     hsl(37, 80%, 56%);
+  --av-added:       hsl(142, 56%, 46%);
+  --av-deleted:     hsl(3, 80%, 62%);
   font-size: 14px;
   font-family: Inter, Helvetica, Arial, sans-serif;
 }
@@ -127,7 +379,8 @@ button { font-family: inherit; font-size: inherit; }
 .av-changed-count:hover { color: var(--av-text) !important; }
 .av-collapse-btn { height: 24px; padding: 0 8px; border-radius: 5px; border: 1px solid var(--av-border); background: transparent; color: var(--av-subtext); cursor: pointer; font-size: 12px; font-weight: 500; line-height: 1; transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease; }
 .av-collapse-btn:hover { background: hsla(0,0%,100%,0.06); color: var(--av-text); border-color: var(--av-subtext); }
-.av-file-active .MuiTreeItem-content:hover { background: hsla(227,56%,52%,0.18) !important; }`;
+.av-file-active .MuiTreeItem-content:hover { background: hsla(227,56%,52%,0.18) !important; }
+`;
     shadow.appendChild(style);
     const container = document.createElement("div");
     container.style.cssText = "width:100%;height:100%;display:flex;";
@@ -142,11 +395,16 @@ button { font-family: inherit; font-size: inherit; }
     this.#root = null;
     this.#observer?.disconnect();
     this.#observer = null;
+    this.#toasts.dispose();
   }
 
   #mirrorHeadStyles(shadow: ShadowRoot): void {
     const adopt = (node: Node) => {
-      if (!(node instanceof HTMLStyleElement) && !(node instanceof HTMLLinkElement)) return;
+      if (
+        !(node instanceof HTMLStyleElement) &&
+        !(node instanceof HTMLLinkElement)
+      )
+        return;
       const clone = node.cloneNode(true) as HTMLElement;
       clone.setAttribute("data-mirrored", "");
       shadow.appendChild(clone);
@@ -160,9 +418,13 @@ button { font-family: inherit; font-size: inherit; }
     this.#observer.observe(document.head, { childList: true });
   }
 
-  static get observedAttributes() { return ["src"]; }
+  static get observedAttributes() {
+    return ["src"];
+  }
 
-  attributeChangedCallback(): void { this.#paint(); }
+  attributeChangedCallback(): void {
+    this.#paint();
+  }
 
   #paint(): void {
     if (!this.#root || !this.#shadow) return;
@@ -170,7 +432,56 @@ button { font-family: inherit; font-size: inherit; }
     this.#notify.current = (detail: Entry[]) => {
       this.dispatchEvent(new CustomEvent("change", { detail, bubbles: false }));
     };
-    this.#root.render(<App src={src} notify={this.#notify} shadow={this.#shadow} />);
+    this.#root.render(
+      <App
+        src={src}
+        notify={this.#notify}
+        shadow={this.#shadow}
+        selection={this.#selection}
+        drain={() => {
+          const entries = this.#pending;
+          this.#pending = null;
+          return entries;
+        }}
+        toasts={this.#toasts}
+      />,
+    );
+  }
+
+  get value(): Entry[] {
+    const selection = this.#selection.current;
+    if (!selection) return [];
+    const map = new Map<string, Entry>();
+    for (const a of selection.project()) {
+      if (a.origin === "suggestion" && a.status !== "accepted") continue;
+      const key = `${a.sha}\0${a.path}`;
+      const existing = map.get(key);
+      if (existing) {
+        existing.lines = [...existing.lines, ...a.lines].sort(
+          (a, b) => a[0] - b[0],
+        );
+      } else {
+        map.set(key, { sha: a.sha, path: a.path, lines: [...a.lines] });
+      }
+    }
+    return [...map.values()];
+  }
+
+  set value(entries: Entry[]) {
+    const sel = this.#selection.current;
+    if (!sel) {
+      this.#pending = entries;
+      return;
+    }
+    sel.hydrate(entries);
+  }
+
+  /**
+   * Pushes a status notification into the viewer.
+   * Info-level notices auto-dismiss; warning and error require user click.
+   */
+  status(level: Level, message: string): void {
+    this.#toasts.push(level, message);
   }
 }
 

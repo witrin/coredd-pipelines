@@ -1,4 +1,3 @@
-.vite/
 .playwright/
 dist/
 node_modules/

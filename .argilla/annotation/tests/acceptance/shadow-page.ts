@@ -1,6 +1,10 @@
 import type { Page } from "@playwright/test";
 
-export async function shadowText(page: Page, text: string, timeout = 12000): Promise<void> {
+export async function shadowText(
+  page: Page,
+  text: string,
+  timeout = 12000,
+): Promise<void> {
   await page.waitForFunction(
     (t) => {
       const el = document.querySelector("code-annotation");
@@ -8,7 +12,7 @@ export async function shadowText(page: Page, text: string, timeout = 12000): Pro
       return el.shadowRoot.textContent?.includes(t) ?? false;
     },
     text,
-    { timeout }
+    { timeout },
   );
 }
 

@@ -16,31 +16,64 @@ describe("Intervals.merge()", () => {
 
   describe("with adjacent intervals", () => {
     it("merges them", () => {
-      expect(Intervals.merge([[1, 5], [5, 10]])).toEqual([[1, 10]]);
+      expect(
+        Intervals.merge([
+          [1, 5],
+          [5, 10],
+        ]),
+      ).toEqual([[1, 10]]);
     });
   });
 
   describe("with overlapping intervals", () => {
     it("merges them", () => {
-      expect(Intervals.merge([[1, 5], [3, 8]])).toEqual([[1, 8]]);
+      expect(
+        Intervals.merge([
+          [1, 5],
+          [3, 8],
+        ]),
+      ).toEqual([[1, 8]]);
     });
   });
 
   describe("with disjoint intervals", () => {
     it("keeps them separate", () => {
-      expect(Intervals.merge([[1, 5], [6, 10]])).toEqual([[1, 5], [6, 10]]);
+      expect(
+        Intervals.merge([
+          [1, 5],
+          [6, 10],
+        ]),
+      ).toEqual([
+        [1, 5],
+        [6, 10],
+      ]);
     });
   });
 
   describe("with out-of-order input", () => {
     it("sorts and merges", () => {
-      expect(Intervals.merge([[5, 10], [1, 5]])).toEqual([[1, 10]]);
+      expect(
+        Intervals.merge([
+          [5, 10],
+          [1, 5],
+        ]),
+      ).toEqual([[1, 10]]);
     });
   });
 
   describe("with multiple cascading overlaps", () => {
     it("merges all", () => {
-      expect(Intervals.merge([[1, 3], [2, 5], [6, 9], [8, 11]])).toEqual([[1, 5], [6, 11]]);
+      expect(
+        Intervals.merge([
+          [1, 3],
+          [2, 5],
+          [6, 9],
+          [8, 11],
+        ]),
+      ).toEqual([
+        [1, 5],
+        [6, 11],
+      ]);
     });
   });
 });
@@ -48,7 +81,10 @@ describe("Intervals.merge()", () => {
 describe("Intervals.union()", () => {
   describe("with disjoint lists", () => {
     it("returns all intervals", () => {
-      expect(Intervals.union([[1, 5]], [[6, 10]])).toEqual([[1, 5], [6, 10]]);
+      expect(Intervals.union([[1, 5]], [[6, 10]])).toEqual([
+        [1, 5],
+        [6, 10],
+      ]);
     });
   });
 
@@ -76,11 +112,27 @@ describe("Intervals.overlaps()", () => {
 
   describe("with list", () => {
     it("returns true when one interval in list overlaps target", () => {
-      expect(Intervals.overlaps([[1, 3], [8, 12]], [2, 5])).toBe(true);
+      expect(
+        Intervals.overlaps(
+          [
+            [1, 3],
+            [8, 12],
+          ],
+          [2, 5],
+        ),
+      ).toBe(true);
     });
 
     it("returns false when no interval in list overlaps target", () => {
-      expect(Intervals.overlaps([[1, 3], [8, 12]], [4, 7])).toBe(false);
+      expect(
+        Intervals.overlaps(
+          [
+            [1, 3],
+            [8, 12],
+          ],
+          [4, 7],
+        ),
+      ).toBe(false);
     });
   });
 });
@@ -106,11 +158,27 @@ describe("Intervals.contains()", () => {
 
   describe("with list", () => {
     it("returns true when one interval in list covers target", () => {
-      expect(Intervals.contains([[1, 20], [30, 40]], [5, 10])).toBe(true);
+      expect(
+        Intervals.contains(
+          [
+            [1, 20],
+            [30, 40],
+          ],
+          [5, 10],
+        ),
+      ).toBe(true);
     });
 
     it("returns false when no interval in list covers target", () => {
-      expect(Intervals.contains([[1, 5], [10, 15]], [4, 11])).toBe(false);
+      expect(
+        Intervals.contains(
+          [
+            [1, 5],
+            [10, 15],
+          ],
+          [4, 11],
+        ),
+      ).toBe(false);
     });
   });
 });
@@ -118,13 +186,29 @@ describe("Intervals.contains()", () => {
 describe("Intervals.covered()", () => {
   describe("when all targets are covered", () => {
     it("returns true", () => {
-      expect(Intervals.covered([[1, 20]], [[1, 5], [10, 15]])).toBe(true);
+      expect(
+        Intervals.covered(
+          [[1, 20]],
+          [
+            [1, 5],
+            [10, 15],
+          ],
+        ),
+      ).toBe(true);
     });
   });
 
   describe("when one target is not covered", () => {
     it("returns false", () => {
-      expect(Intervals.covered([[1, 5]], [[1, 5], [6, 10]])).toBe(false);
+      expect(
+        Intervals.covered(
+          [[1, 5]],
+          [
+            [1, 5],
+            [6, 10],
+          ],
+        ),
+      ).toBe(false);
     });
   });
 

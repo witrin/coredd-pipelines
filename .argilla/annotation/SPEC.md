@@ -2,7 +2,7 @@
 
 ## Context
 
-This component provides an interface for inspecting and annotating code changes. Each task displays a read-only context commit and one or more annotatable target commits. Model-generated suggestions mark lines as candidates for annotation. The annotator reviews, accepts, rejects, or creates their own line selections on target commits.
+This component provides an interface for inspecting and annotating code changes. Each task displays a read-only context commit and one or more annotatable target commits. Model-generated suggestions mark lines as candidates for annotation. The annotator reviews suggestions and creates annotations — line annotations that form the final output.
 
 The component is developed in isolation and runs standalone.
 
@@ -60,8 +60,8 @@ The component receives a URL pointing to a JSON file as its sole input. Structur
 }
 ```
 
-- **`context`** — The read-only reference commit. The annotator can browse its files and diffs but cannot create selections on it.
-- **`targets`** — List of annotatable commits. Each contains commit metadata, its changes, labels, and model annotations (suggestions).
+- **`context`** — The read-only reference commit. The annotator can browse its files and diffs but cannot create annotations on it.
+- **`targets`** *(optional)* — List of annotatable commits. Each contains commit metadata, its changes, labels, and model suggestions. When absent or empty the component becomes a read-only commit viewer (see Section 1.5).
 - **`model`** — Name of the model that produced the suggestions. Displayed in the UI.
 - **`labels`** — Arbitrary string labels attached to commits. Displayed as badges. No label has a hardcoded semantic role in the component.
 
@@ -71,7 +71,7 @@ Each entry in `changes` describes a file in the commit snapshot:
 
 - **Plain blob** (`"<path>": "<blob>"`): File present in the snapshot but not modified. The blob SHA points to the file content.
 - **Add** (`{ "action": "add", "after": "<blob>" }`): File was added. Only the `after` blob exists. No diff possible.
-- **Delete** (`{ "action": "delete", "base": "<blob>" }`): File was deleted. Only the `base` blob exists. Shown as read-only old content. No annotations or selections allowed on deleted files.
+- **Delete** (`{ "action": "delete", "base": "<blob>" }`): File was deleted. Only the `base` blob exists. Shown as read-only old content. No annotations allowed on deleted files.
 - **Change** (`{ "action": "change", "base": "<blob>", "after": "<blob>" }`): File was modified. `base` is the state before, `after` the state after. Both are blob SHAs.
 
 ### 1.3 Blob Resolution
@@ -90,24 +90,85 @@ https://example.com/data/abc123
 
 File content is loaded via HTTP GET as plaintext.
 
-### 1.4 Annotations (Suggestions)
+### 1.4 Suggestions
 
-Each annotation in `targets[].annotations` describes a model suggestion:
+Each entry in `targets[].annotations` describes a model suggestion. The `annotations` field is **optional** — when absent or empty the target has no suggestions but remains annotatable (manual annotations are still possible).
 
 - **`path`** — File path within the commit.
 - **`lines`** — List of line ranges as half-open intervals `[start, end)` (1-based, start inclusive, end exclusive). Example: `[10, 15)` covers lines 10, 11, 12, 13, 14.
 - **`description`** — Description of the suggested location (displayed as label).
+
+### 1.5 Optional Targets (Read-Only Mode)
+
+When `targets` is absent, `null`, or an empty array, the component operates as a **read-only commit viewer**:
+
+- Only the context commit is shown in the sidebar.
+- The **Annotations** sidebar section is hidden entirely (no empty group, no heading).
+- No Code Lens actions, no gutter marks, no selection preview.
+- All files are read-only with no annotation capability.
+- The `.value` property returns an empty array. No change events are dispatched.
+
+When a target is present but its `annotations` array is absent or empty:
+
+- The target commit is shown and navigable.
+- Files are interactive — manual annotations can be created via "Mark selection".
+- No suggestion decorations appear in the editor.
+- The **Annotations** sidebar section is visible. When no suggestions and no manual annotations exist yet, a hint is shown: *"No suggestions. Select lines in the editor to annotate manually."*
+
+### 1.6 Error States
+
+#### 1.6.1 JSON Fetch Failure
+
+When the JSON URL is unreachable (HTTP error, network failure, invalid JSON), the entire viewport is replaced with a structured error screen:
+
+- Centered vertically and horizontally in the component viewport.
+- Displays the Argilla **danger** icon (triangle warning, from `assets/icons/danger.js`) at reduced opacity (0.6), colored with `--av-deleted`.
+- Headline: **"Could not load annotation data"** — `--av-text`, 16px, weight 600.
+- Detail line: the raw error message (e.g. `HTTP 404 https://...` or `Failed to fetch`) in monospace, 12px, `--av-muted`. Max width 480px, word-break on overflow.
+- No retry button. No sidebar, no editor.
+
+#### 1.6.2 Blob Fetch Failure
+
+When the JSON loads successfully but an individual blob fetch fails (HTTP error, network failure):
+
+- The failed SHA is recorded. Subsequent navigation to the same file does not retry.
+- The sidebar remains fully navigable. Other files whose blobs loaded successfully continue to work.
+- Instead of the Monaco editor, the editor area displays a placeholder:
+  - Centered vertically and horizontally within the editor panel.
+  - Displays the Argilla **unavailable** icon (circle with diagonal, from `assets/icons/unavailable.js`) at reduced opacity (0.45), colored with `--av-muted`.
+  - Text: **"File content unavailable"** — `--av-muted`, 14px, weight 500.
+  - Detail line: file path and abbreviated blob SHA (7 characters) in monospace, 12px, `--av-muted` at 0.7 opacity.
+- The editor navigation bar (file path) and status bar (SHA, language) are still shown.
+- No crash, no question mark, no unhandled promise rejection.
+
+#### 1.6.3 Binary Files
+
+Monaco Editor is a text editor and cannot meaningfully display binary content. The component detects binary files by file extension and short-circuits before fetching the blob.
+
+- A file is considered **non-viewable** when its extension matches a built-in blocklist of binary formats: images (`.png`, `.jpg`, `.gif`, `.webp`, …), fonts (`.woff`, `.ttf`, …), archives (`.zip`, `.tar.gz`, …), documents (`.pdf`, `.docx`, `.xlsx`, …), media (`.mp3`, `.mp4`, …), compiled artifacts (`.exe`, `.so`, `.wasm`, …), and binary data stores (`.db`, `.sqlite`).
+- Files without an extension (`Makefile`, `Dockerfile`, `LICENSE`) are assumed to be text and are always viewable.
+- For a non-viewable file:
+  - The blob is **not fetched**. No network request is made.
+  - Monaco is **not instantiated** for this file.
+  - The editor area shows the same layout as §1.6.2 (Blob Fetch Failure), with:
+    - Icon: the Argilla **unavailable** icon, `--av-muted` at 0.45 opacity.
+    - Headline: **"Binary file not shown"** — `--av-muted`, 14 px, weight 500.
+    - Detail line: file path and extension (or `"unknown type"` if the extension is missing), monospace, 12 px, `--av-muted` at 0.7 opacity.
+  - The navigation bar (file path) and status bar remain visible. The status bar shows `binary` in place of the language label. The GitHub SHA link in the status bar stays active so the file can be opened externally.
+  - The File / Inline / Side-by-Side mode segment is hidden (no diff is possible for binary content).
+  - The placeholder has no interactive affordances: no cursor, no selection, no context menu.
+- Suggestions on binary paths from the input JSON still appear in the sidebar and remain clickable; clicking navigates to the file and the user lands on the placeholder. Manual annotations cannot be created (there is no editor to select lines in). This is consistent with the read-only behavior of deleted files.
 
 ---
 
 ## 2. Layout
 
 ### 2.1 Sidebar (collapsible)
-- Contains the commits section and the selections list.
+- Contains the commits section and the annotations list.
 - A toggle button in the editor navigation bar collapses and expands the sidebar.
 - When collapsed, the sidebar disappears entirely; the toggle is only visible in the editor navigation bar (no duplicate button).
 - Sidebar width is drag-resizable (minimum 200px, maximum 600px) via a drag handle on the right edge.
-- Sidebar content (commits + selections) is vertically scrollable when it overflows the available height.
+- Sidebar content (commits + annotations) is vertically scrollable when it overflows the available height.
 - The sidebar header is 36px tall (matching the editor navigation bar height) and contains only the collapse toggle — no label.
 - Text selection is fully suppressed across the entire sidebar (`user-select: none`). This prevents accidental text highlighting during drag and click interactions.
 
@@ -115,7 +176,7 @@ Each annotation in `targets[].annotations` describes a model suggestion:
 The sidebar contains exactly two top-level collapsible sections at the same level:
 
 - **Commits** — List of all commits (context + targets). Collapsible via chevron toggle.
-- **Selections** — Unified list of suggestions and manual selections. Collapsible via chevron toggle.
+- **Annotations** — Unified list of suggestions and annotations. Collapsible via chevron toggle.
 
 There is no outer "Navigation" heading or grouping label. Both sections use identical visual treatment: uppercase label, chevron icon, consistent padding.
 
@@ -139,11 +200,11 @@ The commit entry whose file is currently open in the editor is visually highligh
 
 Rules:
 - Clicking a file in the tree → that file opens in the editor → its commit is highlighted.
-- Clicking a selection entry (suggestion or manual) → editor navigates to that file → the owning commit is highlighted.
+- Clicking an annotation entry (suggestion or manual) → editor navigates to that file → the owning commit is highlighted.
 - Clicking a folder → tree expands, no editor change → existing highlight unchanged.
 - Clicking a commit row header → tree expands/collapses, no editor change → existing highlight unchanged.
-- When a commit becomes highlighted via Selections navigation and its tree is not yet open, it auto-expands.
-- The chevron icons used for collapsing/expanding commit rows and section headers (Commits, Selections) are visually identical — same size, same opacity, same path.
+- When a commit becomes highlighted via Annotations navigation and its tree is not yet open, it auto-expands.
+- The chevron icons used for collapsing/expanding commit rows and section headers (Commits, Annotations) are visually identical — same size, same opacity, same path.
 
 ### 3.2 File Tree per Commit
 - Expanding a commit reveals the full file tree (snapshot).
@@ -165,14 +226,14 @@ Rules:
 - The code editor is rendered with **Monaco Editor** (`@monaco-editor/react`).
 - **Unchanged files (plain blob):** Full file content (read-only), loaded from the blob SHA.
 - **Added files:** Full file content (`after` blob). No diff available. Segmented control shows only "File".
-- **Deleted files:** Old content (`base` blob), read-only, greyed out. No diff, no annotations, no selections allowed.
+- **Deleted files:** Old content (`base` blob), read-only, greyed out. No diff, no annotations allowed.
 - **Changed files:** Three view modes via segmented control:
-  - **File** — Full file content (`after` blob), with annotations and suggestions visible and interactive.
+  - **File** — Full file content (`after` blob), with suggestions and annotations visible and interactive.
   - **Inline** — Monaco inline diff (`base` vs. `after`).
   - **Side-by-Side** — Monaco side-by-side diff (`base` vs. `after`).
 - The segmented control is only visible for changed files.
-- Annotations and suggestions are only interactive in **File** mode (gutter selection, accept, reject).
-- On context commits, all files are read-only with no selection capability.
+- Suggestions and annotations are only interactive in **File** mode (gutter selection, accept, reject).
+- On context commits, all files are read-only with no annotation capability.
 
 ### 3.4 Consistent Monaco Theme
 
@@ -208,13 +269,13 @@ The only interactive feature beyond reading is the **"Mark selection"** code act
 
 ---
 
-## 4. Selections (Unified List)
+## 4. Annotations (Unified List)
 
 ### 4.1 Structure
-- A single **"Selections"** section in the sidebar.
+- A single **"Annotations"** section in the sidebar.
 - Two sub-groups with sub-headers:
   - **Suggestions (model name)** — Model name from the `model` field in the JSON input.
-  - **Manual** — Only visible when manual annotator selections exist.
+  - **Manual** — Only visible when annotations exist.
 
 ### 4.2 Navigation (Read-Only)
 - Each entry in the list is **navigation only** — clicking jumps to the file and line in the editor (File mode).
@@ -223,7 +284,7 @@ The only interactive feature beyond reading is the **"Mark selection"** code act
   - **Pending** (`--av-pending`) — Suggestion, undecided.
   - **Accepted** (`--av-accepted`) — Suggestion, accepted.
   - **Rejected** (`--av-muted`, reduced opacity) — Suggestion, rejected. Full row is greyed out.
-  - **Annotator** (`--av-annotator`) — Manually created by the annotator.
+  - **Annotator** (`--av-annotator`) — Annotation created by the annotator.
 - Accepted suggestions show a small "accepted" badge.
 - Non-rejected entries show a subtle background fill on hover (`--av-hover-bg`). Rejected entries have no hover effect (intentional — they are visually de-emphasised).
 
@@ -237,48 +298,56 @@ Each model suggestion is displayed inline in the code (colored bar on the left m
 **Pending:**
 - Two action buttons in the label: ✓ (accept) and ✗ (reject).
 - Both buttons match the suggestion label color, not red or green.
-- **Accept:** Creates an annotator selection at the same location. The suggestion switches visually to the accepted color. The created selection is an internal shadow object and does not appear separately in the navigation.
+- **Accept:** The suggestion switches visually to the accepted color and contributes to the annotator's output. It does not appear as a separate entry in the annotations list.
 - **Reject:** The suggestion is greyed out with reduced opacity.
 
 **Accepted or Rejected:**
 - A single ✗ button to **reset to pending**.
-- On accepted: Removes the shadow annotator selection, resets suggestion to pending.
+- On accepted: Removes the contribution from the output, resets suggestion to pending.
 - On rejected: Resets suggestion to pending.
 - Button color: muted, lighter on hover.
 
-### 5.2 Manual Selections
+### 5.2 Annotations
 
-- Create: **Select lines** in the editor (native Monaco text selection). A "Mark selection" code action appears via the Monaco lightbulb. Triggering it records the selected lines as a manual selection.
-- The lightbulb and "Mark selection" action are available in **every** file in File mode — regardless of whether the file has suggestions. Exceptions: deleted files (`action: "delete"`), context commits, and diff modes (Inline, Side-by-Side).
+- Create: **Select lines** in the editor (native Monaco text selection). A "Mark selection" code action appears via the Monaco lightbulb. Triggering it records the selected lines as an annotation.
+- Available in **every** file in File mode — regardless of whether the file has suggestions. Exceptions: deleted files (`action: "delete"`), context commits, and diff modes (Inline, Side-by-Side).
 - Display: Annotator-colored bar, label with line range.
 - **✗ button** in the label to delete (matching annotator color).
-- Appears in the selections navigation under "Manual".
-
-**Idempotency — repeated marking:**
-Triggering "Mark selection" on a range that fully overlaps with an existing manual selection on the same file produces no new entry. The existing selection is replaced by the union of the old and new range. This ensures repeated marking never creates duplicates — it either extends or does nothing.
-
-**Adjacent marking:**
-Triggering "Mark selection" on a range that directly touches (is adjacent to) an existing manual selection — e.g. existing `[3,6)` and new `[6,9)` — unions them into a single entry `[3,9)`. Adjacent ranges are treated the same as overlapping ranges.
+- Appears in the annotations panel under "Manual".
+- Adding an annotation that touches or overlaps an existing annotation on the same file unions them into one entry (see Section 5.4).
 
 ### 5.3 Overlap Rules
 
-The following rules apply when a manual selection is created on a file that has suggestions. Each rule is evaluated per suggestion independently.
+**Touch vs. overlap.** Two intervals *overlap* when they share interior lines (e.g. `[3,6)` and `[5,9)`). Two intervals *touch* when they share only a boundary (e.g. `[3,6)` and `[6,9)`). Touch and overlap are treated identically for **status evaluation**, **visual merging**, and **export** — but differently for **blocking** (see below).
 
-**No overlap** (manual selection and suggestion share no lines): Suggestion stays unchanged (pending, accepted, or rejected). The manual selection is independent.
+**Suggestion status values** (explicit annotator decisions only):
+- `pending` — undecided, awaiting annotator action.
+- `accepted` — explicitly accepted by the annotator.
+- `rejected` — explicitly rejected by the annotator.
 
-**Partial overlap** (manual selection covers some but not all lines of the suggestion): The suggestion is automatically **rejected**. The manual selection is recorded as-is. Deleting the manual selection returns the suggestion to pending.
+The effective status of a suggestion at any point is derived by folding the current event log: explicit annotator decisions (`accept`, `reject`, `reset`) combined with the current set of annotations. There is no stored `displaced` status — whether a suggestion is overridden by an annotation is always computed fresh.
 
-**Exact match** (manual selection covers exactly the same lines as the suggestion, no more, no less): The suggestion is automatically **accepted**. The manual selection is not recorded separately — the accepted suggestion represents it. No duplicate entry in navigation.
+**When an annotation is added**, each suggestion on the same file is evaluated against the annotation:
 
-**Full coverage with extension** (manual selection covers all lines of the suggestion and additional lines beyond it): The suggestion is automatically **accepted**. The manual selection is recorded and its interval is merged with the accepted suggestion in the export. Deleting the manual selection returns the suggestion to pending.
+| Explicit status | Touches (boundary only) | Overlaps (shared interior) |
+|---|---|---|
+| `pending` | unchanged | overridden (excluded from output, no actions) |
+| `rejected` | unchanged | overridden |
+| `accepted` | union: suggestion interval merged into annotation | union: suggestion interval merged into annotation |
 
-**Core rule:** A manual selection that touches a suggestion always re-evaluates its status from scratch. The existing status (pending, accepted, or rejected) has no effect on the outcome — partial overlap rejects, full coverage (exact or extended) accepts. Deleting the manual selection always returns the suggestion to pending.
+An `accepted` suggestion that touches or overlaps an annotation forms a unified block with it. Its interval is included in the merge and it contributes to the output via the annotation's Remove action.
 
-**Blocking:** As long as a manual selection overlaps a suggestion (partially or fully), the suggestion's action buttons are disabled and non-interactive. The annotator cannot accept, reject, or reset the suggestion while a manual selection covers it. The manual selection must be deleted first to regain control of the suggestion.
+For the exact-match case: if the incoming annotation exactly matches a single `pending` suggestion, the suggestion becomes `accepted` and no separate annotation entry is recorded.
+
+**Deleting an annotation** removes it from the event log. The fold is re-evaluated — suggestions that were overridden by the deleted annotation revert to their explicit status (`pending`, `accepted`, or `rejected`).
+
+**Blocking.** A suggestion's actions (Accept / Reject / Reset) are suppressed only when an annotation **overlaps** it (shares interior lines). Mere adjacency (touch, shared boundary only) does not block — the suggestion remains fully actionable. Exception: an **accepted** suggestion that touches or overlaps an annotation is absorbed into the annotation's visual block and its individual actions are no longer shown.
+
+**When a suggestion is accepted** and an annotation exists that touches or overlaps it, the two form a single unified annotation: one merged interval in output, one visual block, only the annotation's Remove action shown.
 
 ### 5.4 Interval Merging
 
-All selections use **half-open intervals** `[start, end)` (1-based, start inclusive, end exclusive).
+All annotations use **half-open intervals** `[start, end)` (1-based, start inclusive, end exclusive).
 
 Adjacent or overlapping intervals are always merged. There must never be output like `[1, 5), [5, 10)` — it must be `[1, 10)`. Overlapping intervals like `[1, 5), [3, 8)` become `[1, 8)`.
 
@@ -343,11 +412,11 @@ Default color values are taken directly from Argilla's `[data-theme="dark"]` CSS
 | Added | `--av-added` | hsl(88, 74%, 36%) |
 | Deleted | `--av-deleted` | hsl(3, 100%, 69%) |
 
-Button colors derive from the element they belong to: accept and reject buttons on pending suggestions use `--av-pending`, the reset button on accepted or rejected uses `--av-muted`, the delete button on manual selections uses `--av-annotator`.
+Button colors derive from the element they belong to: accept and reject buttons on pending suggestions use `--av-pending`, the reset button on accepted or rejected uses `--av-muted`, the delete button on annotations uses `--av-annotator`.
 
 ### 6.3 Hover Behavior
 
-Interactive rows in the sidebar (commit rows, file tree items, selection entries) display a subtle background fill on hover using `--av-hover-bg`. This provides visual feedback without distraction. Transitions are 100ms ease. Hover is suppressed on visually de-emphasised items (e.g. rejected suggestions).
+Interactive rows in the sidebar (commit rows, file tree items, annotation entries) display a subtle background fill on hover using `--av-hover-bg`. This provides visual feedback without distraction. Transitions are 100ms ease. Hover is suppressed on visually de-emphasised items (e.g. rejected suggestions).
 
 ### 6.4 Icon Style
 
@@ -356,7 +425,7 @@ All custom icons (folder, file, label/tag) follow the Argilla icon style:
 - Filled paths, `fillRule="evenodd"`
 - No stroke
 - Color set via `currentColor` (inherits from `color` CSS property)
-- Neutral coloring: `--av-subtext` for folder and file icons; status color (`--av-pending`, `--av-accepted`, etc.) for label icons in the Selections list
+- Neutral coloring: `--av-subtext` for folder and file icons; status color (`--av-pending`, `--av-accepted`, etc.) for label icons in the Annotations panel
 
 This style is derived from Argilla's own icon assets and ensures visual consistency with the surrounding Argilla UI.
 
@@ -394,7 +463,7 @@ Three modes via segmented control in the editor navigation bar:
 - Only visible for changed files (`action: "change"`).
 - Added files (`action: "add"`) show only "File" mode.
 - Deleted files (`action: "delete"`) show only "File" mode (old content, read-only).
-- Decoration highlights (background tint and colored bar) for suggestions and manual selections are visible in **File** mode only. Diff modes (Inline, Side-by-Side) show no decorations.
+- Decoration highlights (background tint and colored bar) for suggestions and annotations are visible in **File** mode only. Diff modes (Inline, Side-by-Side) show no decorations.
 - Both diff modes are fully read-only (see Section 3.5).
 
 ---
@@ -415,7 +484,7 @@ Three modes via segmented control in the editor navigation bar:
 ### 9.1 Dependencies
 
 - **React** (TypeScript) as UI framework.
-- **Monaco Editor** (`@monaco-editor/react`) for code view and diff rendering. Syntax highlighting for TypeScript, JavaScript, and Python. Inline and side-by-side diff. Gutter decorations for annotations.
+- **Monaco Editor** (`@monaco-editor/react`) for code view and diff rendering. Syntax highlighting for TypeScript, JavaScript, and Python. Inline and side-by-side diff. Gutter decorations for annotations. Monaco is a text editor; binary files are detected by extension and shown as a non-viewable placeholder (see §1.6.3).
 - **MUI Tree View** (`@mui/x-tree-view`) for the file tree.
 - Data is loaded at runtime from the provided JSON URL. Blob contents are lazy-loaded via HTTP GET.
 - State management within the component (React state). Persistence is not part of the component and is handled externally.
@@ -454,19 +523,19 @@ The entire component lives in a **dedicated directory** within the parent projec
 The component is split into three layers:
 
 **Pure logic modules** (`src/lib/`) — No React, no DOM. Fully testable with Vitest:
-- **`selection.ts`** — Core selection state machine. Manages suggestions (accept, reject, reset), manual selections, overlap detection and resolution (Section 5.3), interval merging (Section 5.4), and exports the unified selection state (Section 10.1).
+- **`selection.ts`** — Core event log. Tracks explicit annotator decisions (accept, reject, reset) and manual annotations as an ordered event sequence. `project()` is a fold over this log — overlap detection, interval merging, and status derivation (Section 5.3, 5.4) happen there. Removing an annotation removes its event from the log and re-folds.
 - **`tree.ts`** — Transforms the flat `changes` map into a hierarchical tree structure for MUI Tree View. Handles filtering (changed-only vs. all), detects action types (add, delete, change, unchanged), computes parent directories.
-- **`blob.ts`** — Resolves blob SHAs to URLs relative to the JSON source URL. Manages a loading cache to avoid redundant fetches.
+- **`blob.ts`** — Resolves blob SHAs to URLs relative to the JSON source URL. Caching is delegated to the browser HTTP cache (blobs are content-addressed by SHA, so URLs are stable and cache-friendly).
 - **`interval.ts`** — Half-open interval operations: merge, union, overlap detection, containment checks.
 
 **React hooks** (`src/hooks/`) — Bridge between logic and UI:
 - **`useData`** — Fetches JSON, manages blob loading lifecycle, exposes loading states.
-- **`useSelection`** — Wraps `selection.ts` in React state, dispatches change events.
+- **`useAnnotations`** — Wraps `selection.ts` in React state, dispatches change events.
 
 **React components** (`src/components/`) — Thin UI layer using Monaco and MUI:
-- Sidebar (commit list, file tree, selections list).
+- Sidebar (commit list, file tree, annotations list).
 - Editor (Monaco wrapper, diff modes, inline suggestion actions, gutter selection).
-- These consume the hooks and render. Minimal logic in components.
+- These consume the hooks and render. **No annotation logic in components.** Components receive intervals from `selection.ts` and render them directly — they must not derive, filter, or recompute which intervals to show. All decisions about what is blocked, absorbed, merged, or suppressed live exclusively in `selection.ts`.
 
 ### 9.4 Build System: Vite
 
@@ -498,14 +567,14 @@ The component is delivered as a **single JavaScript bundle** (IIFE) that registe
 Two test layers, both executable headless (`npm test`):
 
 **Vitest (unit tests)** — Pure logic without DOM:
-- `selection.ts`: All state transitions (accept, reject, reset, manual create, manual delete), overlap detection and resolution for all cases in Section 5.3, interval merging (Section 5.4), selection export format.
+- `selection.ts`: All state transitions (accept, reject, reset, annotation create, annotation delete), overlap detection and resolution for all cases in Section 5.3, interval merging (Section 5.4), output format.
 - `tree.ts`: Flat changes map to hierarchical tree, filtering (changed-only), action type detection (add, delete, change, unchanged), parent directory computation.
 - `blob.ts`: URL resolution relative to JSON URL.
 - `interval.ts`: Merge, union, overlap, containment for half-open intervals.
 
 **Playwright (E2E tests)** — Rendered UI in headless Chromium:
 - Static test fixtures in `tests/fixtures/` for lightweight scenarios.
-- **Lightweight scenario:** Small fixture (few files, few targets). Tests the happy path: loading, navigation, diff modes, selection interactions, change event dispatch.
+- **Lightweight scenario:** Small fixture (few files, few targets). Tests the happy path: loading, navigation, diff modes, annotation interactions, change event dispatch.
 - **Heavy scenario:** Fixtures are **generated at test runtime** (not stored on disk). A generator function creates a `meta.json` and in-memory blob responses simulating large repositories (e.g., 500 files per target, 10 targets). Served via a local test server in the Playwright setup. Tests:
   - Initial load time with lazy blob loading.
   - Tree rendering with thousands of entries.
@@ -514,12 +583,12 @@ Two test layers, both executable headless (`npm test`):
 - **Diff scenarios:** Fixtures for each action type:
   - `action: "change"` — All three diff modes work.
   - `action: "add"` — Only File mode, no diff.
-  - `action: "delete"` — Read-only old content, no selections allowed.
-- **Selection scenarios:** See table below. Each scenario covers three verification dimensions: **navigation** (sidebar reflects state), **event** (change event is correct), **editor display** (decorations and widgets are correct). All three are checked per scenario where applicable. Tests use real UI interaction — lightbulb → code action — not programmatic command triggers, except where noted.
+  - `action: "delete"` — Read-only old content, no annotations allowed.
+- **Annotation scenarios:** See table below. Each scenario covers three verification dimensions: **navigation** (sidebar reflects state), **event** (change event is correct), **editor display** (decorations and widgets are correct). All three are checked per scenario where applicable. Tests use real UI interaction — lightbulb → code action — not programmatic command triggers, except where noted.
 
-**Selection acceptance test matrix**
+**Annotation acceptance test matrix**
 
-The fixture used throughout is `tests/fixtures/meta.json`. It contains one target commit (`baz`) with two files: `src/bar.ts` (changed, one suggestion covering lines [3, 6)) and `src/qux.ts` (added, no suggestion). The shared setup for all selection tests is:
+The fixture used throughout is `tests/fixtures/meta.json`. It contains one target commit (`baz`) with two files: `src/bar.ts` (changed, one suggestion covering lines [3, 6)) and `src/qux.ts` (added, no suggestion). The shared setup for all annotation tests is:
 
 1. Load the fixture.
 2. Click the `baz` commit to expand it.
@@ -537,24 +606,24 @@ The fixture used throughout is `tests/fixtures/meta.json`. It contains one targe
 | 3 | resetting an accepted suggestion | shared setup → accept → wait → clear events | click ✗ (muted reset) | entry back to pending dot, no badge | `[]` | decoration back to pending color; ✓ and ✗ buttons visible |
 | 4 | resetting a rejected suggestion | shared setup → reject | click ✗ (reset) | entry back to pending dot, full opacity | no new event (export unchanged) | lines back to full opacity; ✓ and ✗ buttons visible |
 
-**Manual selection — no suggestion overlap**
+**Annotation — no suggestion overlap**
 
 | # | Scenario | Setup | Action | Navigation | Event | Editor display |
 |---|----------|-------|--------|------------|-------|----------------|
-| 5 | manual selection on file without suggestion | shared setup → open `src/qux.ts` | select lines 2–4; trigger lightbulb → "Mark selection" | "Manual" group appears with one entry for `src/qux.ts` lines 2–4 | `[{ sha:"baz", path:"src/qux.ts", lines:[[2,5]] }]` | manual decoration on lines 2–4; manual widget visible with ✗ |
-| 6 | repeated marking extends existing selection | shared setup → open `src/qux.ts` → mark lines 2–4 → wait | select lines 3–6; trigger lightbulb → "Mark selection" | "Manual" group still shows one entry; line range updated to 2–6 | `[{ sha:"baz", path:"src/qux.ts", lines:[[2,7]] }]` | decoration covers lines 2–6; no duplicate widget |
+| 5 | annotation on file without suggestion | shared setup → open `src/qux.ts` | select lines 2–4; trigger lightbulb → "Mark selection" | "Manual" group appears with one entry for `src/qux.ts` lines 2–4 | `[{ sha:"baz", path:"src/qux.ts", lines:[[2,5]] }]` | annotation decoration on lines 2–4; annotation widget visible with ✗ |
+| 6 | repeated marking extends existing annotation | shared setup → open `src/qux.ts` → mark lines 2–4 → wait | select lines 3–6; trigger lightbulb → "Mark selection" | "Manual" group still shows one entry; line range updated to 2–6 | `[{ sha:"baz", path:"src/qux.ts", lines:[[2,7]] }]` | decoration covers lines 2–6; no duplicate widget |
 | 7 | identical re-marking produces no duplicate | shared setup → open `src/qux.ts` → mark lines 2–4 → wait | select same lines 2–4; trigger lightbulb → "Mark selection" | "Manual" group still shows exactly one entry | no new event fires | no duplicate decoration or widget |
-| 8 | deleting a manual selection | shared setup → open `src/qux.ts` → mark lines 2–4 → wait | click ✗ on manual widget | "Manual" group disappears | `[]` | decoration gone; no widget visible |
+| 8 | deleting an annotation | shared setup → open `src/qux.ts` → mark lines 2–4 → wait | click ✗ on annotation widget | "Manual" group disappears | `[]` | decoration gone; no widget visible |
 
-**Manual selection — suggestion overlap**
+**Annotation — suggestion overlap**
 
 | # | Scenario | Setup | Action | Navigation | Event | Editor display |
 |---|----------|-------|--------|------------|-------|----------------|
-| 9 | partial overlap rejects suggestion | shared setup | select lines 4–7 (partially overlaps suggestion [3,6)); trigger lightbulb → "Mark selection" | suggestion entry shows rejected (greyed); manual entry appears for lines 4–7 | `[{ sha:"baz", path:"src/bar.ts", lines:[[4,8]] }]` | suggestion at reduced opacity; manual decoration on lines 4–7; both widgets visible |
-| 10 | exact match auto-accepts suggestion | shared setup | select lines 3–5 (exactly matches suggestion [3,6)); trigger lightbulb → "Mark selection" | suggestion entry shows accepted dot; no separate manual entry | `[{ sha:"baz", path:"src/bar.ts", lines:[[3,6]] }]` | accepted decoration on lines 3–5; suggestion widget shows reset ✗; no separate manual widget |
-| 11 | full coverage with extension auto-accepts and records manual | shared setup | select lines 2–7 (covers and extends suggestion [3,6)); trigger lightbulb → "Mark selection" | suggestion shows accepted dot; manual entry appears for lines 2–7 | `[{ sha:"baz", path:"src/bar.ts", lines:[[2,8]] }]` | accepted decoration on 3–5 merged with manual on 2–7; single visual range |
-| 12 | deleting manual that partially overlapped restores suggestion | shared setup → partial overlap (lines 4–7) → wait | click ✗ on manual widget | manual entry gone; suggestion back to pending dot | `[]` | manual decoration gone; suggestion back to pending decoration; ✓ and ✗ buttons visible |
-| 13 | deleting manual that fully covered restores suggestion | shared setup → full coverage (lines 2–7) → wait | click ✗ on manual widget | manual entry gone; suggestion back to pending dot | `[]` | manual decoration gone; suggestion back to pending decoration; ✓ and ✗ buttons visible |
+| 9 | partial overlap rejects suggestion | shared setup | select lines 4–7 (partially overlaps suggestion [3,6)); trigger lightbulb → "Mark selection" | suggestion entry shows rejected (greyed); annotation entry appears for lines 4–7 | `[{ sha:"baz", path:"src/bar.ts", lines:[[4,8]] }]` | suggestion at reduced opacity; annotation decoration on lines 4–7; both widgets visible |
+| 10 | exact match auto-accepts suggestion | shared setup | select lines 3–5 (exactly matches suggestion [3,6)); trigger lightbulb → "Mark selection" | suggestion entry shows accepted dot; no separate annotation entry | `[{ sha:"baz", path:"src/bar.ts", lines:[[3,6]] }]` | accepted decoration on lines 3–5; suggestion widget shows reset ✗; no separate annotation widget |
+| 11 | full coverage with extension auto-accepts and records annotation | shared setup | select lines 2–7 (covers and extends suggestion [3,6)); trigger lightbulb → "Mark selection" | suggestion shows accepted dot; annotation entry appears for lines 2–7 | `[{ sha:"baz", path:"src/bar.ts", lines:[[2,8]] }]` | single unified visual block covering lines 2–7 |
+| 12 | deleting annotation that partially overlapped restores suggestion | shared setup → partial overlap (lines 4–7) → wait | click ✗ on annotation widget | annotation entry gone; suggestion back to pending dot | `[]` | annotation decoration gone; suggestion back to pending decoration; ✓ and ✗ buttons visible |
+| 13 | deleting annotation that fully covered restores suggestion | shared setup → full coverage (lines 2–7) → wait | click ✗ on annotation widget | annotation entry gone; suggestion back to pending dot | `[]` | annotation decoration gone; suggestion back to pending decoration; ✓ and ✗ buttons visible |
 
 **Cross-file behavior**
 
@@ -562,8 +631,8 @@ The fixture used throughout is `tests/fixtures/meta.json`. It contains one targe
 |---|----------|-------|--------|------------|-------|----------------|
 | 14 | switching files — state persists | shared setup → accept → wait → clear events | open `src/qux.ts`; open `src/bar.ts` | suggestion still shows accepted dot after returning | no spurious event during navigation | accepted decoration and reset ✗ widget still present on return |
 | 15 | switching files — no decoration bleed | shared setup → accept | open `src/qux.ts` | no suggestion entry for `src/qux.ts` | no event fires | no accepted decoration; no suggestion widget in editor |
-| 16 | mark action targets correct file after switch | shared setup | open `src/qux.ts`; select lines 2–4; trigger lightbulb → "Mark selection" | manual entry appears under `src/qux.ts`, not `src/bar.ts` | `[{ sha:"baz", path:"src/qux.ts", lines:[[2,5]] }]` | manual decoration visible in `src/qux.ts` editor; no decoration in `src/bar.ts` |
-| 17 | no provider accumulation | shared setup | open `src/qux.ts`; open `src/bar.ts`; mark lines 7–9 via lightbulb | "Manual" group shows exactly one entry | detail fires exactly once with `lines:[[7,10]]`; not duplicated | manual widget appears exactly once |
+| 16 | mark action targets correct file after switch | shared setup | open `src/qux.ts`; select lines 2–4; trigger lightbulb → "Mark selection" | annotation entry appears under `src/qux.ts`, not `src/bar.ts` | `[{ sha:"baz", path:"src/qux.ts", lines:[[2,5]] }]` | annotation decoration visible in `src/qux.ts` editor; no decoration in `src/bar.ts` |
+| 17 | no provider accumulation | shared setup | open `src/qux.ts`; open `src/bar.ts`; mark lines 7–9 via lightbulb | "Manual" group shows exactly one entry | detail fires exactly once with `lines:[[7,10]]`; not duplicated | annotation widget appears exactly once |
 
 **Performance signals** (Playwright):
 - Performance data is collected via `page.evaluate(() => performance.now())` and `performance.getEntries()`.
@@ -612,7 +681,7 @@ The `Editor` component uses `@monaco-editor/react`. React may mount and unmount 
 
 **Acceptance test:**
 
-A Playwright test verifies that opening multiple files in sequence does not accumulate providers or commands. Concretely: open file A, create a manual selection, open file B (different language group), open file A again, create another manual selection — the change event must contain exactly the two selections, not duplicates caused by double-fired providers.
+A Playwright test verifies that opening multiple files in sequence does not accumulate providers or commands. Concretely: open file A, create an annotation, open file B (different language group), open file A again, create another annotation — the change event must contain exactly the two annotations, not duplicates caused by double-fired providers.
 
 ---
 
@@ -620,7 +689,7 @@ A Playwright test verifies that opening multiple files in sequence does not accu
 
 ### 10.1 Readable State
 
-The current annotation state can be read from the component at any time. The state contains only user-set selections — regardless of whether they originated from accepting a suggestion or manual marking. The internal suggestion status (pending, accepted, rejected) is not part of the exposed state.
+The current annotation output can be read from the component at any time. It contains only the annotator's output — regardless of whether lines came from accepting a suggestion or from a manual annotation. The internal suggestion status (pending, accepted, rejected) is not part of the exposed output.
 
 All intervals are half-open `[start, end)` and guaranteed to be merged (no adjacent or overlapping intervals in the output).
 
@@ -641,21 +710,21 @@ Format:
 ]
 ```
 
-- **`sha`** — The commit the selection refers to (from `targets[].sha`).
+- **`sha`** — The commit the annotation refers to (from `targets[].sha`).
 - **`path`** — File path within the commit.
 - **`lines`** — List of half-open line ranges `[start, end)`. Multiple ranges per file are possible. Adjacent and overlapping ranges are always merged.
 
-Selections are grouped per commit and path. When a user accepts a suggestion, its lines appear in the state. When they reset it, they disappear. Manual selections appear as well. There is no distinction by origin.
+Entries are grouped per commit and path. When a suggestion is accepted, its lines appear in the output. When reset, they disappear. Manual annotations appear as well. There is no distinction by origin.
 
 ### 10.2 Change Event
 
-Every change to the selections dispatches an event that can be consumed externally. The event fires on:
+Every change dispatches an event that can be consumed externally. The event fires on:
 
-- Suggestion accepted (selection added).
-- Suggestion reset (selection removed).
-- Suggestion rejected (no selection affected, but status changed).
-- Manual selection created.
-- Manual selection deleted.
+- Suggestion accepted (lines added to output).
+- Suggestion reset (lines removed from output).
+- Suggestion rejected (no lines affected, but status changed).
+- Annotation created.
+- Annotation deleted.
 
 The event contains the full current state (as described in 10.1). The consumer always receives the complete state, not a delta.
 
@@ -668,3 +737,36 @@ document.getElementById("av").addEventListener("change", (e) => {
 });
 </script>
 ```
+
+---
+
+## 11. Status Notifications
+
+External consumers of `<code-annotation>` (e.g. a host page that persists annotations to a backend) can display status messages inside the viewer via an imperative API on the element:
+
+```js
+const el = document.querySelector("code-annotation");
+el.status("info",    "Saved");
+el.status("warning", "Saved locally");
+el.status("error",   "Save failed (503)");
+```
+
+### 11.1 Levels
+
+- **`info`** — positive confirmation. Auto-dismisses after ~4 seconds. Not interactively dismissable.
+- **`warning`** — degraded operation (fallback path taken, partial result). Persists until the user clicks it.
+- **`error`** — operation failed. Persists until the user clicks it.
+
+### 11.2 Presentation
+
+- Toasts appear stacked in the bottom-right of the component viewport, inside the Shadow DOM.
+- At most 5 toasts are visible at a time. When a 6th is pushed, the oldest is evicted (after its fade-out completes, so the surviving toasts do not visibly repaint).
+- Newest toasts appear at the bottom; older toasts sit above.
+- Each toast shows an icon matching its level, the message text, and (for warning/error) a close button. The whole toast is clickable to dismiss when dismissable.
+- Colors follow the theme variables: info → `--av-accent`, warning → `--av-changed`, error → `--av-deleted`.
+
+### 11.3 Lifecycle
+
+- Messages pushed before the component has mounted are queued and drained on first render, mirroring the `value` setter pattern from §10. No messages are lost due to timing.
+- On `disconnectedCallback` all pending timers are cleared.
+- `status()` is fire-and-forget and returns `void`. There is no programmatic handle to an individual toast.

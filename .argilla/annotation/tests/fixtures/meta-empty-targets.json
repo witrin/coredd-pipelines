@@ -1,0 +1,20 @@
+{
+  "repository": "foo/bar",
+  "model": "foo",
+  "context": {
+    "sha": "bar",
+    "author": "foo",
+    "message": "foo: base implementation",
+    "time": "2024-01-01T10:00:00+00:00",
+    "labels": ["baz"],
+    "changes": {
+      "src/foo.ts": "baz.txt",
+      "src/bar.ts": {
+        "action": "change",
+        "source": "foo.txt",
+        "target": "bar.txt"
+      }
+    }
+  },
+  "targets": []
+}

@@ -131,10 +131,26 @@ Use `foo`, `bar`, `baz` for all such placeholder values.
 
 For generated fixtures (e.g. performance tests) where values have no semantic meaning, use simple numeric strings or omit naming entirely.
 
+### No DRY in tests
+
+Tests must be self-contained and readable top-to-bottom.
+Do not extract shared setup, assertions, or steps into helper functions for the sake of reducing repetition.
+Duplicated code in tests is acceptable and preferred over indirection.
+Each test tells its own story — a reader must never chase through abstractions to understand what is being tested.
+
+### No trivial functions
+
+Do not create functions that wrap a single expression or span only a few lines.
+A function must earn its existence by encapsulating non-trivial logic.
+A one-liner behind a name is not a function — it is obfuscation.
+This applies everywhere, not just in tests.
+
 ### Test helpers
 
+Shared test helpers are permitted only in dedicated files named after what they do, not after a generic concept.
 Never define helper functions or classes inside a test suite file.
-Place shared test helpers in a dedicated file named after what they do, not after a generic concept.
+Helpers must encapsulate genuinely complex multi-step interactions (e.g. navigating through a component, setting up event listeners).
+A helper that saves one or two lines is not worth the indirection — inline it.
 
 Fixtures belong directly in the test, not in a factory file.
 
@@ -157,6 +173,8 @@ docker compose run --rm annotation npm test
 ```
 
 Never execute tests on the host.
+
+Test runs must complete within 60 seconds. If a test command has not returned output within 60 seconds, abort it and report the timeout — do not wait longer.
 
 ## Docker and project setup
 

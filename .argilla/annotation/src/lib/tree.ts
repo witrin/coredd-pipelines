@@ -10,7 +10,7 @@ export type Action = "add" | "delete" | "change" | "unchanged";
  */
 export interface Node {
   /**
-   * Unique path-based identifier for use as a React key or tree item id.
+   * Unique path-based identifier for use as a React key or tree item identifier.
    */
   identifier: string;
   /**
@@ -50,11 +50,16 @@ export class Tree {
   /**
    * Builds a hierarchical node tree from a flat changes map.
    */
-  static build(changes: Record<string, string | Change>, filter: boolean, pinnedPath?: string | null): Node[] {
+  static build(
+    changes: Record<string, string | Change>,
+    filter: boolean,
+    pinnedPath?: string | null,
+  ): Node[] {
     const visible = new Set<string>();
 
     for (const [path, change] of Object.entries(changes)) {
-      if (filter && Tree.action(change) === "unchanged" && path !== pinnedPath) continue;
+      if (filter && Tree.action(change) === "unchanged" && path !== pinnedPath)
+        continue;
       const parts = path.split("/");
       for (let i = 1; i <= parts.length; i++) {
         visible.add(parts.slice(0, i).join("/"));
@@ -109,7 +114,13 @@ export class Tree {
   static #dir(dirMap: Map<string, Node>, p: string): Node {
     if (dirMap.has(p)) return dirMap.get(p)!;
     const parts = p.split("/");
-    const node: Node = { identifier: p, name: parts[parts.length - 1], path: p, directory: true, children: [] };
+    const node: Node = {
+      identifier: p,
+      name: parts[parts.length - 1],
+      path: p,
+      directory: true,
+      children: [],
+    };
     dirMap.set(p, node);
     return node;
   }

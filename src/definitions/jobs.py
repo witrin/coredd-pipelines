@@ -1,15 +1,19 @@
+import json
 import os
 import tarfile
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Optional
 
 import dagster as dg
 import pyarrow.parquet as pq
 from google.cloud import storage as cloud_storage
 
-from components.io import TableAssetStorage
+from components.io import BlobAssetStorage, TableAssetStorage
 from components.location import Location
 from components.meta import AssetResolver
+from benchmark.evaluation.annotation import Projection
 
 
 class SnapshotConfig(dg.Config):
@@ -213,3 +217,200 @@ def snapshot_op(context: dg.OpExecutionContext, config: SnapshotConfig) -> dg.Ou
 @dg.job(name="snapshot_compaction")
 def snapshot_job():
     snapshot_op()
+
+
+class EvaluationConfig(dg.Config):
+    partition: str
+    candidates: list[str] = []
+    workspace: str = "bug-request"
+
+
+@dg.op(name="evaluation_demo_op")
+def evaluation_demo_op(
+    context: dg.OpExecutionContext, config: EvaluationConfig
+) -> dg.Output:
+    import argilla as rg
+
+    argilla = rg.Argilla(
+        api_url=os.environ["ARGILLA_API_URL"],
+        api_key=os.environ["ARGILLA_API_KEY"],
+    )
+
+    workspace = argilla.workspaces(config.workspace)
+
+    if workspace is None:
+        workspace = rg.Workspace(name=config.workspace, client=argilla)
+        workspace.create()
+
+    storage = BlobAssetStorage()
+    location = Location.load()
+    resolver = AssetResolver(context, "ingest-validation-context")
+    version = resolver.version()
+    normalized = config.partition.replace("|", ";").replace("/", "-").replace("_", "-")
+    prefix = storage.prefix(resolver.key, version, location.current, normalized)
+
+    client = cloud_storage.Client(project=os.environ.get("CLOUD_PROJECT"))
+    bucket = client.bucket(os.environ["CLOUD_BUCKET"])
+
+    archives = [
+        item.name
+        for item in bucket.list_blobs(prefix=prefix)
+        if item.name.endswith(".tar.gz")
+    ]
+
+    if not archives:
+        raise dg.Failure(description=f"No archive found at {prefix}")
+
+    with tempfile.TemporaryDirectory() as directory:
+        work = Path(directory)
+        archive = work / "context.tar.gz"
+
+        with open(archive, "wb") as file:
+            bucket.blob(archives[0]).download_to_file(file)
+
+        with tarfile.open(archive, "r:gz") as tar:
+            tar.extractall(work, filter="data")
+
+        source = next(work.glob("**/meta.json"), None)
+
+        if source is None:
+            raise dg.Failure(description="No meta.json found in archive")
+
+        with open(source, "r", encoding="utf-8") as file:
+            meta = json.load(file)
+
+        repository = meta["repository"]
+        case = meta["cases"][0]
+        correction = case["correction"]
+        candidates = config.candidates or list(case.get("defects") or [])
+        root = source.parent
+        snapshot = root / "snapshot"
+
+        with open(snapshot / "meta.json", "r", encoding="utf-8") as file:
+            commits = json.load(file)["commits"]
+
+        projection = Projection(commits, snapshot)
+
+        correction_entry = projection.transform(correction, "correction")
+
+        if correction_entry is None:
+            raise dg.Failure(
+                description=f"Correction {correction} has no parent or is missing from snapshot"
+            )
+
+        targets: list[dict[str, object]] = []
+
+        for candidate in candidates:
+            entry = projection.transform(candidate, "defect")
+
+            if entry is None:
+                context.log.warning(
+                    "Candidate %s skipped (missing or no parent).", candidate
+                )
+                continue
+
+            targets.append(entry)
+
+        annotation: dict[str, object] = {
+            "model": "ground-truth",
+            "repository": repository,
+            "context": correction_entry,
+            "targets": targets,
+        }
+
+        referenced = projection.blobs()
+
+        gcs_prefix = f"evaluation/{repository}"
+
+        bucket.blob(f"{gcs_prefix}/meta.json").upload_from_string(
+            json.dumps(annotation, sort_keys=True),
+            content_type="application/json",
+        )
+
+        context.log.info("Uploaded %s/meta.json", gcs_prefix)
+
+        paths = {
+            sha: snapshot / "blobs" / sha
+            for sha in referenced
+            if (snapshot / "blobs" / sha).exists()
+        }
+
+        with ThreadPoolExecutor() as pool:
+            pool.map(
+                lambda sha: bucket.blob(f"{gcs_prefix}/{sha}").upload_from_filename(
+                    str(paths[sha])
+                ),
+                paths,
+            )
+
+        context.log.info("Uploaded %d blobs to %s/", len(paths), gcs_prefix)
+
+    url = (
+        f"https://storage.googleapis.com/"
+        f"{os.environ['CLOUD_BUCKET']}/evaluation/{repository}/meta.json"
+    )
+
+    name = f"evaluation-{repository.replace('/', '-').lower()}"
+
+    settings = rg.Settings(
+        guidelines=(
+            "Review the correction commit. "
+            "Annotate defect-introducing lines in target commits."
+        ),
+        fields=[
+            rg.CustomField(
+                name="annotation",
+                title="Code Annotation",
+                template=(
+                    '<link rel="stylesheet" href="/annotation/annotation.css">'
+                    '<style>html, body { height: 600px; overflow: hidden; }</style>'
+                    '<script src="/annotation/bundle.js"></script>'
+                    '<code-annotation></code-annotation>'
+                    '<script src="/annotation/adapter.js"></script>'
+                ),
+                advanced_mode=True,
+            ),
+        ],
+        questions=[
+            rg.LabelQuestion(
+                name="quality",
+                title="Quality",
+                labels=["correct", "partial", "incorrect"],
+            ),
+            rg.TextQuestion(name="notes", title="Notes"),
+        ],
+    )
+
+    dataset = argilla.datasets(name=name, workspace=workspace)
+
+    if dataset is None:
+        dataset = rg.Dataset(
+            name=name,
+            workspace=workspace,
+            settings=settings,
+            client=argilla,
+        )
+        dataset.create()
+
+    dataset.records.log([rg.Record(id=correction, fields={"annotation": {"url": url}})])
+
+    context.log.info("Created Argilla dataset %s", name)
+
+    return dg.Output(
+        value=None,
+        metadata={
+            "repository": dg.MetadataValue.text(repository),
+            "correction": dg.MetadataValue.text(correction),
+            "targets": dg.MetadataValue.int(len(targets)),
+            "blobs": dg.MetadataValue.int(len(referenced)),
+            "prefix": dg.MetadataValue.text(
+                f"gs://{os.environ['CLOUD_BUCKET']}/evaluation/{repository}/"
+            ),
+            "dataset": dg.MetadataValue.text(name),
+        },
+    )
+
+
+@dg.job(name="evaluate_validation_demo")
+def evaluation_demo():
+    evaluation_demo_op()

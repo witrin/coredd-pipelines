@@ -26,7 +26,7 @@ test.describe("fixture selections", () => {
   test("suggestions section is visible", async ({ page }) => {
     await setSrc(page, "/tests/fixtures/meta.json");
     await shadowText(page, "Suggestions");
-    await shadowText(page, "foo bar baz");
+    await shadowText(page, "src/bar.ts L3");
   });
 });
 
@@ -41,7 +41,10 @@ test.describe("fixture interaction", () => {
       const root = document.querySelector("code-annotation")?.shadowRoot;
       if (!root) return;
       for (const div of Array.from(root.querySelectorAll("div"))) {
-        if (div.style.cursor === "pointer" && div.textContent?.includes("baz: introduce defect")) {
+        if (
+          div.style.cursor === "pointer" &&
+          div.textContent?.includes("baz: introduce defect")
+        ) {
           div.click();
           break;
         }

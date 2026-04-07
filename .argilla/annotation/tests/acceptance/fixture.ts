@@ -25,7 +25,10 @@ export class PerformanceFixture {
 
     const context: Record<string, string> = {};
     for (let i = 0; i < files; i++) {
-      context[`src/foo${i}.ts`] = PerformanceFixture.#blob(blobs, String(counter++));
+      context[`src/foo${i}.ts`] = PerformanceFixture.#blob(
+        blobs,
+        String(counter++),
+      );
     }
 
     const result = [];
@@ -45,22 +48,39 @@ export class PerformanceFixture {
         time: "2024-01-01T00:00:00Z",
         labels: ["baz"],
         changes,
-        annotations: [{ path: "src/foo0.ts", lines: [[1, 5]], description: "foo" }],
+        annotations: [
+          { path: "src/foo0.ts", lines: [[1, 5]], description: "foo" },
+        ],
       });
     }
 
     return {
       meta: {
+        repository: "foo/bar",
         model: "foo",
-        context: { sha: "bar", author: "foo", message: "baz", time: "2024-01-01T00:00:00Z", labels: [], changes: context },
+        context: {
+          sha: "bar",
+          author: "foo",
+          message: "baz",
+          time: "2024-01-01T00:00:00Z",
+          labels: [],
+          changes: context,
+        },
         targets: result,
       },
       blobs,
     };
   }
 
-  static #blob(blobs: Record<string, string>, identifier: string, lines = 50): string {
-    blobs[identifier] = Array.from({ length: lines }, (_, i) => `// ${i + 1}`).join("\n");
+  static #blob(
+    blobs: Record<string, string>,
+    identifier: string,
+    lines = 50,
+  ): string {
+    blobs[identifier] = Array.from(
+      { length: lines },
+      (_, i) => `// ${i + 1}`,
+    ).join("\n");
     return identifier;
   }
 }
