@@ -655,7 +655,7 @@ def ingest_validation_sources(
 
 
 @asset(
-    metadata={"version": "3.2.1"},
+    metadata={"version": "3.2.2"},
     partitions_def=partitions.ingest_validation_sources_partition,
     group_name="ingest",
     pool="default",
