@@ -17,6 +17,7 @@ from benchmark.attribution.knowledge import (
     KnowledgeEntityGumtree,
     KnowledgeEntityGit,
     KnowledgeFile,
+    KnowledgeFileBridgeGit,
     KnowledgeFileGit,
     KnowledgeFileMark,
     KnowledgeGraphBuilder,
@@ -966,6 +967,32 @@ class TestKnowledgeCommitGit(unittest.TestCase):
                 correction.files,
             )
 
+    def test_build_rename_chain_blame_uses_origin_path(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "x = 1\ny = 1\n"})
+            foo = fixture.commit(tree, [], "foo")
+
+            tree = fixture.tree({"a.py": "x = 2\ny = 1\n"})
+            bar = fixture.commit(tree, [foo], "bar")
+
+            tree = fixture.tree({"b.py": "x = 2\ny = 1\n"})
+            baz = fixture.commit(tree, [bar], "baz")
+
+            tree = fixture.tree({"c.py": "x = 3\ny = 1\n"})
+            after = fixture.commit(tree, [baz], "after")
+
+            repository = VersionControl(fixture.repository)
+            commits = KnowledgeCommitGit(repository, cap=200).build(baz, after)
+            shas = {commit.sha for commit in commits}
+
+            self.assertIn(bar, shas)
+            blamed = self._commit(commits, bar)
+            self.assertEqual(blamed.category, "blame")
+            self.assertIn(
+                self._mark(OperationType.EDIT, "a.py", "a.py"),
+                blamed.files,
+            )
+
     def test_build_gitlink_blame_error_is_ignored(self) -> None:
         with HistoryFixture() as fixture:
             foo = fixture.commit(self._gitlink(fixture, "1" * 40), [], "foo")
@@ -1424,6 +1451,296 @@ class TestKnowledgeCommitGit(unittest.TestCase):
             self.assertEqual(self._paths(blamed.files), {"a.py", "b.js"})
 
 
+class TestKnowledgeFileBridgeGit(unittest.TestCase):
+    def _file(
+        self,
+        *,
+        sha: str | None,
+        base: str | None,
+        after: str | None,
+        operation: OperationType,
+    ) -> KnowledgeFile:
+        path = after if after is not None else base
+        return KnowledgeFile(
+            sha=sha,
+            base=base,
+            after=after,
+            path=path,
+            language="python" if path and path.endswith(".py") else None,
+            operation=operation,
+        )
+
+    def test_build_returns_empty_without_fix_files(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "x = 1\n"})
+            sha = fixture.commit(tree, [], "solo")
+
+            bridges = KnowledgeFileBridgeGit(
+                VersionControl(fixture.repository)
+            ).build(sha, [])
+
+            self.assertEqual(bridges, [])
+
+    _BODY1 = "\n".join(f"line{i}" for i in range(1, 9)) + "\n"
+    _BODY2 = _BODY1.replace("line4", "CHANGED")
+    _BODY3 = _BODY2.replace("line8", "ALSO")
+    _BODY4 = _BODY3.replace("line6", "DIFFER")
+    _BODY5 = _BODY4.replace("line2", "MORE")
+
+    def test_build_skips_when_only_fix_node_exists(self) -> None:
+        """Rename commit is in the graph but only touches the new path.
+
+        The pre-rename path never gained a file node (no graph commit
+        modified it under the old name), so the chain projects to a
+        single node and there is nothing to bridge.
+        """
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"old.py": self._BODY1})
+            foo = fixture.commit(tree, [], "foo")
+
+            tree = fixture.tree({"new.py": self._BODY2})
+            bar = fixture.commit(tree, [foo], "bar")
+
+            tree = fixture.tree({"new.py": self._BODY3})
+            after = fixture.commit(tree, [bar], "after")
+
+            files = [
+                self._file(
+                    sha=after,
+                    base="new.py",
+                    after="new.py",
+                    operation=OperationType.EDIT,
+                ),
+            ]
+
+            bridges = KnowledgeFileBridgeGit(
+                VersionControl(fixture.repository)
+            ).build(after, files)
+
+            self.assertEqual(bridges, [])
+
+    def test_build_skips_when_full_lineage_already_connected(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"old.py": self._BODY1})
+            foo = fixture.commit(tree, [], "foo")
+
+            tree = fixture.tree({"old.py": self._BODY2})
+            bar = fixture.commit(tree, [foo], "bar")
+
+            tree = fixture.tree({"new.py": self._BODY3})
+            baz = fixture.commit(tree, [bar], "baz")
+
+            tree = fixture.tree({"new.py": self._BODY4})
+            after = fixture.commit(tree, [baz], "after")
+
+            files = [
+                self._file(
+                    sha=bar,
+                    base="old.py",
+                    after="old.py",
+                    operation=OperationType.EDIT,
+                ),
+                self._file(
+                    sha=baz,
+                    base="old.py",
+                    after="new.py",
+                    operation=OperationType.MOVE,
+                ),
+                self._file(
+                    sha=after,
+                    base="new.py",
+                    after="new.py",
+                    operation=OperationType.EDIT,
+                ),
+            ]
+
+            bridges = KnowledgeFileBridgeGit(
+                VersionControl(fixture.repository)
+            ).build(after, files)
+
+            self.assertEqual(bridges, [])
+
+    def test_build_emits_bridge_between_existing_file_nodes(self) -> None:
+        """Two file nodes exist (old + new) but the rename commit is out of
+        the graph, so no MOVE connects them. One commitless bridge expected.
+        """
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"old.py": self._BODY1})
+            foo = fixture.commit(tree, [], "foo")
+
+            tree = fixture.tree({"old.py": self._BODY2})
+            bar = fixture.commit(tree, [foo], "bar")
+
+            tree = fixture.tree({"new.py": self._BODY3})
+            baz = fixture.commit(tree, [bar], "baz")
+
+            tree = fixture.tree({"new.py": self._BODY4})
+            after = fixture.commit(tree, [baz], "after")
+
+            files = [
+                self._file(
+                    sha=bar,
+                    base="old.py",
+                    after="old.py",
+                    operation=OperationType.EDIT,
+                ),
+                self._file(
+                    sha=after,
+                    base="new.py",
+                    after="new.py",
+                    operation=OperationType.EDIT,
+                ),
+            ]
+
+            bridges = KnowledgeFileBridgeGit(
+                VersionControl(fixture.repository)
+            ).build(after, files)
+
+            self.assertEqual(len(bridges), 1)
+            bridge = bridges[0]
+            self.assertIsNone(bridge.sha)
+            self.assertEqual(bridge.base, "old.py")
+            self.assertEqual(bridge.after, "new.py")
+            self.assertEqual(bridge.path, "new.py")
+            self.assertEqual(bridge.operation, OperationType.MOVE)
+            self.assertEqual(bridge.language, "python")
+
+    def test_build_fills_only_the_gap_in_a_partially_connected_chain(self) -> None:
+        """Three file nodes. First MOVE is in the graph, second is not.
+
+        Expected: exactly one bridge over the missing rename.
+        """
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": self._BODY1})
+            foo = fixture.commit(tree, [], "foo")
+
+            tree = fixture.tree({"b.py": self._BODY2})
+            bar = fixture.commit(tree, [foo], "bar")
+
+            tree = fixture.tree({"b.py": self._BODY3})
+            baz = fixture.commit(tree, [bar], "baz")
+
+            tree = fixture.tree({"c.py": self._BODY4})
+            qux = fixture.commit(tree, [baz], "qux")
+
+            tree = fixture.tree({"c.py": self._BODY5})
+            after = fixture.commit(tree, [qux], "after")
+
+            files = [
+                self._file(
+                    sha=bar,
+                    base="a.py",
+                    after="b.py",
+                    operation=OperationType.MOVE,
+                ),
+                self._file(
+                    sha=baz,
+                    base="b.py",
+                    after="b.py",
+                    operation=OperationType.EDIT,
+                ),
+                self._file(
+                    sha=after,
+                    base="c.py",
+                    after="c.py",
+                    operation=OperationType.EDIT,
+                ),
+            ]
+
+            bridges = KnowledgeFileBridgeGit(
+                VersionControl(fixture.repository)
+            ).build(after, files)
+
+            self.assertEqual(len(bridges), 1)
+            bridge = bridges[0]
+            self.assertIsNone(bridge.sha)
+            self.assertEqual(bridge.base, "b.py")
+            self.assertEqual(bridge.after, "c.py")
+
+    def test_build_follows_copy_as_rename_chain_step(self) -> None:
+        """Git rename detection may classify a coincidental copy-with-deletion
+        as a COPY rather than a MOVE. The bridge must still treat it as a
+        rename link so the chain bridges the gap to the fix path.
+        """
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"old.py": self._BODY1})
+            foo = fixture.commit(tree, [], "foo")
+
+            tree = fixture.tree({"old.py": self._BODY2})
+            bar = fixture.commit(tree, [foo], "bar")
+
+            tree = fixture.tree({"old.py": self._BODY2, "new.py": self._BODY2})
+            baz = fixture.commit(tree, [bar], "baz")
+
+            tree = fixture.tree({"old.py": self._BODY2, "new.py": self._BODY4})
+            after = fixture.commit(tree, [baz], "after")
+
+            files = [
+                self._file(
+                    sha=bar,
+                    base="old.py",
+                    after="old.py",
+                    operation=OperationType.EDIT,
+                ),
+                self._file(
+                    sha=after,
+                    base="new.py",
+                    after="new.py",
+                    operation=OperationType.EDIT,
+                ),
+            ]
+
+            bridges = KnowledgeFileBridgeGit(
+                VersionControl(fixture.repository)
+            ).build(after, files)
+
+            self.assertEqual(len(bridges), 1)
+            self.assertEqual(bridges[0].base, "old.py")
+            self.assertEqual(bridges[0].after, "new.py")
+            self.assertIsNone(bridges[0].sha)
+
+    def test_build_does_not_duplicate_existing_move(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"old.py": self._BODY1})
+            foo = fixture.commit(tree, [], "foo")
+
+            tree = fixture.tree({"old.py": self._BODY2})
+            bar = fixture.commit(tree, [foo], "bar")
+
+            tree = fixture.tree({"new.py": self._BODY3})
+            baz = fixture.commit(tree, [bar], "baz")
+
+            tree = fixture.tree({"new.py": self._BODY4})
+            after = fixture.commit(tree, [baz], "after")
+
+            files = [
+                self._file(
+                    sha=bar,
+                    base="old.py",
+                    after="old.py",
+                    operation=OperationType.EDIT,
+                ),
+                self._file(
+                    sha=baz,
+                    base="old.py",
+                    after="new.py",
+                    operation=OperationType.MOVE,
+                ),
+                self._file(
+                    sha=after,
+                    base="new.py",
+                    after="new.py",
+                    operation=OperationType.EDIT,
+                ),
+            ]
+
+            bridges = KnowledgeFileBridgeGit(
+                VersionControl(fixture.repository)
+            ).build(after, files)
+
+            self.assertEqual(bridges, [])
+
+
 class TestKnowledgeGraphStore(unittest.TestCase):
     def test_resolve_commit_prefix(self) -> None:
         store = KnowledgeGraphStore()
@@ -1511,6 +1828,48 @@ class TestKnowledgeGraphStore(unittest.TestCase):
             f"Commit prefix a89664 matches {foo}, {bar}",
         ):
             store.resolve("a89664")
+
+    def test_aliases_groups_rename_and_alias_edges(self) -> None:
+        store = KnowledgeGraphStore()
+        sha = "a89664f0d1d70000000000000000000000000000"
+
+        store.add(
+            "commit",
+            {
+                "sha": sha,
+                "timestamp": datetime.now(),
+                "message": "rename",
+                "parents": (),
+                "predecessors": (),
+                "files": (),
+                "type": "blame",
+            },
+        )
+        store.add("file", {"path": "a.py"})
+        store.add("file", {"path": "b.py"})
+        store.add("file", {"path": "c.py"})
+
+        store.link(
+            "RENAME",
+            f"commit:{sha}",
+            "file:b.py",
+            origin="file:a.py",
+        )
+        store.link("ALIAS", "file:b.py", "file:c.py")
+
+        self.assertEqual(
+            store.aliases("file:a.py"),
+            ["file:a.py", "file:b.py", "file:c.py"],
+        )
+        self.assertEqual(
+            store.aliases("file:c.py"),
+            ["file:a.py", "file:b.py", "file:c.py"],
+        )
+
+    def test_aliases_returns_singleton_when_no_rename(self) -> None:
+        store = KnowledgeGraphStore()
+        store.add("file", {"path": "foo.py"})
+        self.assertEqual(store.aliases("file:foo.py"), ["file:foo.py"])
 
 
 if __name__ == "__main__":

@@ -576,27 +576,28 @@ class VersionControl:
 
     def blame(
         self, path: str, commit: str, lines: list[tuple[int, int]]
-    ) -> list[tuple[str | None, tuple[int, int] | None]]:
+    ) -> list[tuple[str | None, str | None, tuple[int, int] | None]]:
         """Return blamed segments for *lines* at *commit*.
 
         *lines* is a list of ``(start_line, end_line)`` 1-indexed inclusive
-        ranges. Each result entry contains the blamed commit SHA and the
-        corresponding origin line range in that blamed commit. One input range
-        may produce multiple entries when blame crosses commit boundaries.
-        Entries stay ordered by the queried line sequence. Invalid ranges still
-        yield ``(None, None)``.
+        ranges. Each result entry contains the blamed commit SHA, the origin
+        path as it was named in that commit, and the corresponding origin line
+        range. One input range may produce multiple entries when blame crosses
+        commit or path boundaries. Entries stay ordered by the queried line
+        sequence. Invalid ranges still yield ``(None, None, None)``.
         """
         oid = pygit2.Oid(hex=commit)
         blame_result = self._repository.blame(path, newest_commit=oid)
-        result: list[tuple[str | None, tuple[int, int] | None]] = []
+        result: list[tuple[str | None, str | None, tuple[int, int] | None]] = []
 
         for start_line, end_line in lines:
             if start_line > end_line:
-                result.append((None, None))
+                result.append((None, None, None))
                 continue
 
-            partial: list[tuple[str, tuple[int, int]]] = []
+            partial: list[tuple[str, str, tuple[int, int]]] = []
             commit_sha: str | None = None
+            origin_path: str | None = None
             origin_start: int | None = None
             origin_end: int | None = None
             valid = True
@@ -609,20 +610,27 @@ class VersionControl:
                     break
 
                 sha = str(hunk.final_commit_id)
+                hunk_path = hunk.orig_path or path
                 origin_line = (
                     hunk.orig_start_line_number + line - hunk.final_start_line_number
                 )
 
                 if commit_sha is None:
                     commit_sha = sha
+                    origin_path = hunk_path
                     origin_start = origin_line
                     origin_end = origin_line
                     continue
 
-                if sha != commit_sha or origin_line != origin_end + 1:
+                if (
+                    sha != commit_sha
+                    or hunk_path != origin_path
+                    or origin_line != origin_end + 1
+                ):
                     partial.append(
                         (
                             commit_sha,
+                            cast(str, origin_path),
                             (
                                 cast(int, origin_start),
                                 cast(int, origin_end),
@@ -630,6 +638,7 @@ class VersionControl:
                         )
                     )
                     commit_sha = sha
+                    origin_path = hunk_path
                     origin_start = origin_line
                     origin_end = origin_line
                     continue
@@ -639,13 +648,16 @@ class VersionControl:
             if (
                 not valid
                 or commit_sha is None
+                or origin_path is None
                 or origin_start is None
                 or origin_end is None
             ):
-                result.append((None, None))
+                result.append((None, None, None))
                 continue
 
-            partial.append((commit_sha, (origin_start, origin_end)))
+            partial.append(
+                (commit_sha, origin_path, (origin_start, origin_end))
+            )
             result.extend(partial)
 
         return result
@@ -1252,14 +1264,15 @@ class VersionControlSnapshot:
 
     def blame(
         self, path: str, commit: str, lines: list[tuple[int, int]]
-    ) -> list[tuple[str | None, tuple[int, int] | None]]:
+    ) -> list[tuple[str | None, str | None, tuple[int, int] | None]]:
         result = self._runtime.blame(path, self._map(commit), lines)
         return [
             (
                 None if sha is None else self._reverse[sha],
+                origin_path,
                 interval,
             )
-            for sha, interval in result
+            for sha, origin_path, interval in result
         ]
 
     def materialize(

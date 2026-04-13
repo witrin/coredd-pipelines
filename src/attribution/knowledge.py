@@ -34,7 +34,7 @@ class KnowledgeCommit:
 
 @dataclass(frozen=True)
 class KnowledgeFile:
-    sha: str
+    sha: str | None
     base: str | None
     after: str | None
     path: str
@@ -158,7 +158,13 @@ class KnowledgeGraphStore:
         self._graph.add_node(key, kind=kind, payload=dict(payload))
         return key
 
-    def link(self, edge: str, source: str, target: str) -> None:
+    def link(
+        self,
+        edge: str,
+        source: str,
+        target: str,
+        **attributes: Any,
+    ) -> None:
         if not self._graph.has_node(source):
             raise KeyError(f"Unknown source node {source}")
         if not self._graph.has_node(target):
@@ -166,7 +172,7 @@ class KnowledgeGraphStore:
         for _, current, data in self._graph.out_edges(source, data=True):
             if data.get("edge") == edge and current == target:
                 return
-        self._graph.add_edge(source, target, edge=edge)
+        self._graph.add_edge(source, target, edge=edge, **attributes)
 
     def kind(self, node: str) -> str:
         key = self.resolve(node)
@@ -204,6 +210,40 @@ class KnowledgeGraphStore:
             seen.add(source)
             result.append(source)
         return result
+
+    def aliases(self, node: str) -> list[str]:
+        key = self.resolve(node)
+        parent: dict[str, str] = {}
+
+        def find(value: str) -> str:
+            current = parent.setdefault(value, value)
+            while parent[current] != current:
+                parent[current] = parent[parent[current]]
+                current = parent[current]
+            return current
+
+        def union(left: str, right: str) -> None:
+            parent[find(left)] = find(right)
+
+        for source, target, data in self._graph.edges(data=True):
+            label = data.get("edge")
+            if label == "ALIAS":
+                union(source, target)
+            elif label == "RENAME":
+                origin = data.get("origin")
+                if origin and self._graph.has_node(origin):
+                    union(origin, target)
+
+        if key not in parent:
+            return [key]
+
+        anchor = find(key)
+        return sorted(
+            node
+            for node in parent
+            if find(node) == anchor
+            and self._graph.nodes[node].get("kind") == "file"
+        )
 
     def fragment(self) -> dict[str, list[str]]:
         """Project the replayable snapshot fragment from commit payload parents.
@@ -344,6 +384,7 @@ class KnowledgeCommitGit:
             if not parents:
                 files[sha] = set()
                 continue
+            seed_paths = seeds[sha]
             files[sha] = {
                 KnowledgeFileMark(
                     (
@@ -359,6 +400,7 @@ class KnowledgeCommitGit:
                     operation.after,
                 )
                 for operation in self._repository.manifest(parents[0], sha)
+                if operation.after in seed_paths or operation.base in seed_paths
             }
 
         predecessors, order = self._parents(set(files))
@@ -386,8 +428,8 @@ class KnowledgeCommitGit:
             values = self._blame(old, base, self._changes(patch))
             if not values:
                 values = self._blame(old, base, self._contexts(patch))
-            for sha in values:
-                seeds.setdefault(sha, set()).add(old)
+            for sha, origin_path in values:
+                seeds.setdefault(sha, set()).add(origin_path)
 
         seeds[after] = files
         return seeds
@@ -450,19 +492,19 @@ class KnowledgeCommitGit:
         path: str,
         commit: str,
         ranges: list[tuple[int, int]],
-    ) -> set[str]:
+    ) -> set[tuple[str, str]]:
         if not ranges:
             return set()
 
-        values: set[str] = set()
+        values: set[tuple[str, str]] = set()
         try:
             entries = self._repository.blame(path, commit, ranges)
         except (KeyError, ValueError):
             return set()
-        for sha, _ in entries:
-            if sha is None:
+        for sha, origin_path, _ in entries:
+            if sha is None or origin_path is None:
                 continue
-            values.add(sha)
+            values.add((sha, origin_path))
         return values
 
     def _parents(
@@ -637,14 +679,14 @@ class KnowledgeFileGit:
                         base=mark.base,
                         after=mark.after,
                         path=path,
-                        language=self._language(path),
+                        language=self.language(path),
                         operation=mark.operation,
                     )
                 )
 
         return result
 
-    def _language(self, path: str) -> str | None:
+    def language(self, path: str) -> str | None:
         if path.endswith(".py"):
             return "python"
         if path.endswith(".ts"):
@@ -654,6 +696,94 @@ class KnowledgeFileGit:
         if path.endswith(".js") or path.endswith(".jsx"):
             return "javascript"
         return None
+
+
+class KnowledgeFileBridgeGit:
+    """Close rename gaps between file nodes that already exist in the graph.
+
+    The commit walker caps the graph at ``depth`` per seed, so a rename whose
+    commit is not in the graph leaves adjacent file nodes disconnected. This
+    producer fills such gaps without inventing new file nodes: it runs the
+    path walker from the fix commit without a depth limit to obtain the full
+    rename chain, projects the chain onto paths that already correspond to
+    graph file nodes, and emits a single commitless MOVE between consecutive
+    projected nodes whenever no MOVE edge connects them yet.
+
+    Nodes never grow from bridges — a file is only part of the graph when a
+    graph commit touches it.
+    """
+
+    def __init__(self, repository: VersionControl) -> None:
+        self._repository = repository
+        self._files = KnowledgeFileGit(repository)
+
+    def build(
+        self,
+        after: str,
+        files: list[KnowledgeFile],
+    ) -> list[KnowledgeFile]:
+        fix_paths = {file.path for file in files if file.sha == after}
+        if not fix_paths:
+            return []
+
+        node_paths = {file.path for file in files}
+        existing_edges = {
+            (file.base, file.after)
+            for file in files
+            if file.operation == OperationType.MOVE
+        }
+
+        result: list[KnowledgeFile] = []
+        seen_edges: set[tuple[str, str]] = set()
+
+        for fix_path in sorted(fix_paths):
+            try:
+                walker = VersionControlPathWalker(
+                    self._repository._repository, after, fix_path, 1_000_000
+                )
+            except (TypeError, FileNotFoundError, ValueError):
+                continue
+
+            chain = self._chain(walker, fix_path)
+            projected = [path for path in chain if path in node_paths]
+
+            for base, head in zip(projected, projected[1:]):
+                if base == head:
+                    continue
+                if (base, head) in existing_edges:
+                    continue
+                if (base, head) in seen_edges:
+                    continue
+                seen_edges.add((base, head))
+                result.append(
+                    KnowledgeFile(
+                        sha=None,
+                        base=base,
+                        after=head,
+                        path=head,
+                        language=self._files.language(head),
+                        operation=OperationType.MOVE,
+                    )
+                )
+
+        return result
+
+    def _chain(
+        self,
+        walker: VersionControlPathWalker,
+        fix_path: str,
+    ) -> list[str]:
+        result = [fix_path]
+        current = fix_path
+        for entry in walker.entries():
+            if entry.operation not in {OperationType.MOVE, OperationType.COPY}:
+                continue
+            if entry.after != current:
+                continue
+            current = entry.base
+            result.append(current)
+        result.reverse()
+        return result
 
 
 class KnowledgeEntityGumtree:
@@ -974,9 +1104,23 @@ class KnowledgeGraphMaterializer:
             )
 
         for file in state.files:
-            store.link("MODIFIES", f"commit:{file.sha}", f"file:{file.path}")
-            if file.operation == OperationType.MOVE:
-                store.link("MOVE", f"file:{file.base}", f"file:{file.after}")
+            if file.sha is not None:
+                store.link("MODIFIES", f"commit:{file.sha}", f"file:{file.path}")
+            if file.operation != OperationType.MOVE:
+                continue
+            source = f"file:{file.base}"
+            target = f"file:{file.after}"
+            if source not in store.graph or target not in store.graph:
+                continue
+            if file.sha is None:
+                store.link("ALIAS", source, target)
+            else:
+                store.link(
+                    "RENAME",
+                    f"commit:{file.sha}",
+                    target,
+                    origin=source,
+                )
 
         for entity in state.entities:
             target = f"entity:{entity.path}:{entity.urn.removeprefix('entity:')}"
@@ -1009,6 +1153,7 @@ class KnowledgeGraphBuilder:
             raise ValueError("cap must be positive")
         self._commits = KnowledgeCommitGit(repository, cap, depth)
         self._files = KnowledgeFileGit(repository)
+        self._bridges = KnowledgeFileBridgeGit(repository)
         self._entities = KnowledgeEntityGumtree(repository)
         self._fallback = KnowledgeEntityGit(repository)
         self._materializer = KnowledgeGraphMaterializer()
@@ -1016,13 +1161,15 @@ class KnowledgeGraphBuilder:
     def build(self, base: str, after: str) -> KnowledgeGraphStore:
         commits = self._commits.build(base, after)
         files = self._files.build(commits)
+        bridges = self._bridges.build(after, files)
+        entity_files = [file for file in files if file.sha is not None]
         try:
-            entities = self._entities.build(files)
+            entities = self._entities.build(entity_files)
         except Exception:
-            entities = self._fallback.build(files)
+            entities = self._fallback.build(entity_files)
         state = KnowledgeState(
             commits=commits,
-            files=files,
+            files=files + bridges,
             entities=entities,
             after=after,
         )

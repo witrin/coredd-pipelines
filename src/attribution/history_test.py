@@ -164,36 +164,36 @@ class TestVersionControlBlame(unittest.TestCase):
         self.assertEqual(
             result,
             [
-                (self.sha_foo, (1, 1)),
-                (self.sha_qux, (2, 2)),
-                (self.sha_quux, (5, 5)),
+                (self.sha_foo, "foo.txt", (1, 1)),
+                (self.sha_qux, "foo.txt", (2, 2)),
+                (self.sha_quux, "foo.txt", (5, 5)),
             ],
         )
 
     def test_blame_line(self) -> None:
         result = self._candidate.blame("foo.txt", self.sha_quux, [(2, 2)])
-        self.assertEqual(result, [(self.sha_qux, (2, 2))])
+        self.assertEqual(result, [(self.sha_qux, "foo.txt", (2, 2))])
 
     def test_blame_unchanged(self) -> None:
         result = self._candidate.blame("foo.txt", self.sha_quux, [(1, 1)])
-        self.assertEqual(result, [(self.sha_foo, (1, 1))])
+        self.assertEqual(result, [(self.sha_foo, "foo.txt", (1, 1))])
 
     def test_blame_mixed(self) -> None:
         result = self._candidate.blame("foo.txt", self.sha_quux, [(1, 5)])
         self.assertEqual(
             result,
             [
-                (self.sha_foo, (1, 1)),
-                (self.sha_qux, (2, 2)),
-                (self.sha_foo, (3, 3)),
-                (self.sha_baz, (4, 4)),
-                (self.sha_quux, (5, 5)),
+                (self.sha_foo, "foo.txt", (1, 1)),
+                (self.sha_qux, "foo.txt", (2, 2)),
+                (self.sha_foo, "foo.txt", (3, 3)),
+                (self.sha_baz, "foo.txt", (4, 4)),
+                (self.sha_quux, "foo.txt", (5, 5)),
             ],
         )
 
     def test_blame_range(self) -> None:
         result = self._candidate.blame("foo.txt", self.sha_quux, [(9, 9)])
-        self.assertEqual(result, [(None, None)])
+        self.assertEqual(result, [(None, None, None)])
 
 
 class TestVersionControlMaterialize(unittest.TestCase):

@@ -1351,11 +1351,11 @@ class TestLLM4SZZGraph(unittest.TestCase):
                 autospec=True,
                 side_effect=[
                     [
-                        ("sha-old", (2, 2)),
-                        ("sha-mid", (3, 3)),
+                        ("sha-old", "a.py", (2, 2)),
+                        ("sha-mid", "a.py", (3, 3)),
                     ],
                     [
-                        ("sha-new", (10, 10)),
+                        ("sha-new", "a.py", (10, 10)),
                     ],
                 ],
             ) as blame,
@@ -1501,8 +1501,8 @@ class TestLLM4SZZGraph(unittest.TestCase):
                 "blame",
                 autospec=True,
                 return_value=[
-                    ("sha-old", (2, 2)),
-                    ("sha-mid", (3, 3)),
+                    ("sha-old", "a.py", (2, 2)),
+                    ("sha-mid", "a.py", (3, 3)),
                 ],
             ) as blame,
             patch.object(

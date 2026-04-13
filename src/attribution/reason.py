@@ -1086,7 +1086,7 @@ class BlameNode:
             ]
             blamed = self._factory.repository.blame(path, correction.base, entries)
 
-            for commit, origin in blamed:
+            for commit, _, origin in blamed:
                 if commit is None or origin is None:
                     continue
                 parents = self._factory.repository.parents(commit)
