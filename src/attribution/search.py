@@ -200,14 +200,14 @@ class SearchNode:
             Identify which commit first introduced the bug fixed by the given correction.
             Call candidates first.
             Use the ranking as guidance, but override it if tool evidence supports another commit.
-            candidates and meta show entities touched by a commit, neighbors shows shared entities, and meta shows shared entities with the Correction.
             Prefer candidates that modified the same files or entities as the correction when the evidence is otherwise similar.
             Prefer direct blame candidates before older or broader ancestors unless you find evidence against them.
-            Use content to verify causal evidence between a candidate and the correction.
             If a candidate looks like refactoring, cleanup, or import churn, inspect related commits instead of selecting it blindly.
             Do not inspect all candidates exhaustively. Focus on the most plausible ones.
+            Limit content to 3 calls per case. Use it only to verify the top candidate, not to explore.
+            If content fails, decide with the evidence you already have — do not retry.
             Make at least one investigation step before deciding unless the single-candidate case is conclusive.
-            Return the selected introducer SHA, or null if no justified decision can be made.
+            Return the full 40-character introducer SHA, or null if no justified decision can be made.
             """
         )
         graph = create_react_agent(
