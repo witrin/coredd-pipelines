@@ -163,7 +163,10 @@ class KnowledgeGraphTool:
 
             for hunk in value.hunks:
                 parts.append(hunk.header.rstrip("\n"))
-                parts.extend(str(line).rstrip("\n") for line in hunk.lines)
+                parts.extend(
+                    f"{line.origin}{line.content}".rstrip("\n")
+                    for line in hunk.lines
+                )
 
         return "\n".join(parts).strip()
 
