@@ -24,6 +24,8 @@ from benchmark.attribution.graph import (
 )
 from benchmark.attribution.graph import AgenticSZZGraphBuilder
 from benchmark.attribution.graph import AgenticSZZGraph
+from benchmark.attribution.graph import AgentSZZGraphBuilder
+from benchmark.attribution.graph import AgentSZZGraph
 from benchmark.attribution.graph import LLM4SZZGraphBuilder
 from benchmark.attribution.graph import LLM4SZZGraph
 from benchmark.attribution.history import VersionControl
@@ -43,7 +45,13 @@ from benchmark.attribution.reason import (
     VerifyNode,
     VerifyResponseSchema,
 )
-from benchmark.attribution.search import SearchNode, SearchResult, SeedNode
+from benchmark.attribution.search import (
+    KnowledgeGraphSearchNode,
+    KnowledgeGraphSeedNode,
+    RepositorySearchNode,
+    RepositorySeedNode,
+    SearchResult,
+)
 from benchmark.attribution.tracing import (
     AttributionRunnable,
     ResultTable,
@@ -2534,7 +2542,7 @@ class TestLLM4SZZGraph(unittest.TestCase):
         resolve: Mock,
     ) -> None:
         repository = object.__new__(VersionControl)
-        node = SeedNode(repository=repository)
+        node = KnowledgeGraphSeedNode(repository=repository)
         correction = Change(
             number=1,
             base="base-sha",
@@ -2589,7 +2597,7 @@ class TestLLM4SZZGraph(unittest.TestCase):
         resolve: Mock,
     ) -> None:
         repository = object.__new__(VersionControl)
-        node = SeedNode(repository=repository)
+        node = KnowledgeGraphSeedNode(repository=repository)
         correction = Change(
             number=1,
             base="base-sha",
@@ -2635,7 +2643,7 @@ class TestLLM4SZZGraph(unittest.TestCase):
 
     def test_search_inputs(self) -> None:
         with self.assertRaises(ValueError):
-            SearchNode().run({})
+            KnowledgeGraphSearchNode().run({})
 
     def test_search_steps(self) -> None:
         tools = Mock(spec_set=["tools"])
@@ -2657,7 +2665,7 @@ class TestLLM4SZZGraph(unittest.TestCase):
         }
 
         with patch("benchmark.attribution.search.create_react_agent", return_value=agent):
-            SearchNode(tool=tools, llm=object()).run(
+            KnowledgeGraphSearchNode(tool=tools, llm=object()).run(
                 {
                     "base": "base-sha",
                     "after": "after-sha",
@@ -2680,7 +2688,7 @@ class TestLLM4SZZGraph(unittest.TestCase):
         tool.tools.return_value = []
 
         with self.assertRaises(ValueError):
-            SearchNode(tool=tool, llm=object()).run(
+            KnowledgeGraphSearchNode(tool=tool, llm=object()).run(
                 {
                     "base": "base-sha",
                     "after": "after-sha",
@@ -2703,7 +2711,7 @@ class TestLLM4SZZGraph(unittest.TestCase):
         }
 
         with patch("benchmark.attribution.search.create_react_agent", return_value=agent):
-            result = SearchNode(tool=tool, llm=object()).run(
+            result = KnowledgeGraphSearchNode(tool=tool, llm=object()).run(
                 {
                     "base": "base-sha",
                     "after": "after-sha",
@@ -2733,7 +2741,7 @@ class TestLLM4SZZGraph(unittest.TestCase):
         node_type.return_value = tool_node
 
         llm = object()
-        node = SearchNode(tool=tool, llm=llm)
+        node = KnowledgeGraphSearchNode(tool=tool, llm=llm)
 
         result = node.run(
             {
@@ -2770,15 +2778,15 @@ class TestLLM4SZZGraph(unittest.TestCase):
                 Identify which commit first introduced the bug fixed by the given correction.
                 Call candidates first.
                 Use the ranking as guidance, but override it if tool evidence supports another commit.
-                candidates and meta show entities touched by a commit, neighbors shows shared entities, and meta shows shared entities with the Correction.
                 Prefer candidates that modified the same files or entities as the correction when the evidence is otherwise similar.
                 Prefer direct blame candidates before older or broader ancestors unless you find evidence against them.
-                Use content to verify causal evidence between a candidate and the correction.
                 If a candidate looks like refactoring, cleanup, or import churn, inspect related commits instead of selecting it blindly.
                 Do not inspect all candidates exhaustively. Focus on the most plausible ones.
+                Limit content to 3 calls per case. Use it only to verify the top candidate, not to explore.
+                If content fails, decide with the evidence you already have — do not retry.
                 Make at least one investigation step before deciding unless the single-candidate case is conclusive.
-                Return the selected introducer SHA, or null if no justified decision can be made.
-            """
+                Return the full 40-character introducer SHA, or null if no justified decision can be made.
+                """
             ),
             response_format=SearchResult,
         )
@@ -3158,4 +3166,385 @@ class TestLLM4SZZGraph(unittest.TestCase):
         self.assertEqual(
             result_table.column_names,
             ["summary", "introducer", "aborted", "state_json"],
+        )
+
+    def test_repository_seed_requires_inputs(self) -> None:
+        with self.assertRaises(ValueError):
+            RepositorySeedNode().run({})
+
+    @patch("benchmark.attribution.search.DiffRenderer.render")
+    @patch.object(VersionControl, "manifest", autospec=True)
+    @patch.object(VersionControl, "diff", autospec=True)
+    @patch.object(VersionControl, "meta", autospec=True)
+    def test_repository_seed_contains_fix_diff(
+        self,
+        meta: Mock,
+        diff: Mock,
+        manifest: Mock,
+        render: Mock,
+    ) -> None:
+        repository = object.__new__(VersionControl)
+        node = RepositorySeedNode(repository=repository)
+        correction = Change(
+            number=1,
+            base="base-sha",
+            after="after-sha",
+            description="Fix parser",
+        )
+        meta.return_value = Commit(
+            sha="after-sha",
+            message="Fix parser",
+            time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            author="a",
+        )
+        diff.return_value = object()
+        render.return_value = "diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py"
+        manifest.return_value = [
+            FileOperation(
+                base="foo.py",
+                after="foo.py",
+                operation=OperationType.EDIT,
+            )
+        ]
+
+        result = node.run({"correction": correction})
+
+        meta.assert_called_once_with(repository, "after-sha")
+        diff.assert_called_once_with(repository, "base-sha", "after-sha")
+        manifest.assert_called_once_with(repository, "base-sha", "after-sha")
+        self.assertEqual(
+            result,
+            {
+                "base": "base-sha",
+                "after": "after-sha",
+                "seed": [
+                    {"title": "Correction Commit", "body": "after-sha"},
+                    {"title": "Commit Message", "body": "Fix parser"},
+                    {
+                        "title": "Fix Diff",
+                        "body": "diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py",
+                    },
+                    {"title": "Modified Files", "body": "foo.py"},
+                ],
+            },
+        )
+
+    @patch("benchmark.attribution.search.DiffRenderer.render")
+    @patch.object(VersionControl, "manifest", autospec=True)
+    @patch.object(VersionControl, "diff", autospec=True)
+    @patch.object(VersionControl, "meta", autospec=True)
+    def test_repository_seed_omits_empty_sections(
+        self,
+        meta: Mock,
+        diff: Mock,
+        manifest: Mock,
+        render: Mock,
+    ) -> None:
+        repository = object.__new__(VersionControl)
+        node = RepositorySeedNode(repository=repository)
+        correction = Change(
+            number=1,
+            base="base-sha",
+            after="after-sha",
+            description="Fix parser",
+        )
+        meta.return_value = Commit(
+            sha="after-sha",
+            message="",
+            time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            author="a",
+        )
+        diff.return_value = object()
+        render.return_value = ""
+        manifest.return_value = []
+
+        result = node.run({"correction": correction})
+
+        self.assertEqual(
+            result["seed"],
+            [{"title": "Correction Commit", "body": "after-sha"}],
+        )
+
+    def test_repository_search_requires_inputs(self) -> None:
+        with self.assertRaises(ValueError):
+            RepositorySearchNode().run({})
+
+    def test_repository_search_invalid_steps(self) -> None:
+        tool = Mock(spec_set=["tools"])
+        tool.tools.return_value = []
+
+        with self.assertRaises(ValueError):
+            RepositorySearchNode(tool=tool, llm=object()).run(
+                {
+                    "base": "base-sha",
+                    "after": "after-sha",
+                    "seed": [{"title": "Commit Message", "body": "prompt"}],
+                },
+                steps=0,
+            )
+
+    def test_repository_search_forwards_steps(self) -> None:
+        tool = Mock(spec_set=["tools"])
+        tool.tools.return_value = []
+        agent = Mock(spec_set=["invoke"])
+        agent.invoke.return_value = {
+            "structured_response": {"introducer": "deadbeef"},
+        }
+
+        with patch(
+            "benchmark.attribution.search.create_react_agent",
+            return_value=agent,
+        ):
+            RepositorySearchNode(tool=tool, llm=object()).run(
+                {
+                    "base": "base-sha",
+                    "after": "after-sha",
+                    "seed": [{"title": "Commit Message", "body": "prompt"}],
+                },
+                steps=11,
+            )
+
+        args, kwargs = agent.invoke.call_args
+        self.assertEqual(kwargs, {"config": {"recursion_limit": 11}})
+        self.assertEqual(args[0]["remaining_steps"], 11)
+
+    @patch("benchmark.attribution.search.ToolNode")
+    @patch("benchmark.attribution.search.create_react_agent")
+    def test_repository_search_agent(
+        self,
+        factory: Mock,
+        node_type: Mock,
+    ) -> None:
+        tool = Mock(spec_set=["tools"])
+        tool.tools.return_value = ["tool-a", "tool-b"]
+        agent = Mock(spec_set=["invoke"])
+        agent.invoke.return_value = {
+            "structured_response": {"introducer": "deadbeef"},
+        }
+        factory.return_value = agent
+        tool_node = Mock()
+        node_type.return_value = tool_node
+
+        llm = object()
+        node = RepositorySearchNode(tool=tool, llm=llm)
+
+        result = node.run(
+            {
+                "base": "base-sha",
+                "after": "after-sha",
+                "seed": [
+                    {"title": "Commit Message", "body": "Fix parser"},
+                    {
+                        "title": "Fix Diff",
+                        "body": "diff --git a/foo.py b/foo.py",
+                    },
+                    {"title": "Modified Files", "body": "foo.py"},
+                ],
+            }
+        )
+
+        tool.tools.assert_called_once_with()
+        node_type.assert_called_once()
+        args, kwargs = node_type.call_args
+        self.assertEqual(args, (["tool-a", "tool-b"],))
+        self.assertIn("handle_tool_errors", kwargs)
+        self.assertTrue(callable(kwargs["handle_tool_errors"]))
+        factory.assert_called_once()
+        factory_args, factory_kwargs = factory.call_args
+        self.assertEqual(factory_args, (llm,))
+        self.assertIs(factory_kwargs["tools"], tool_node)
+        self.assertIs(factory_kwargs["response_format"], SearchResult)
+        self.assertIn("blame", factory_kwargs["prompt"])
+        self.assertIn("pickaxe", factory_kwargs["prompt"])
+        self.assertIn("trace", factory_kwargs["prompt"])
+        self.assertIn("full 40-character", factory_kwargs["prompt"])
+        invoke_args, invoke_kwargs = agent.invoke.call_args
+        self.assertEqual(invoke_kwargs, {"config": {"recursion_limit": 50}})
+        self.assertEqual(invoke_args[0]["remaining_steps"], 50)
+        self.assertEqual(len(invoke_args[0]["messages"]), 1)
+        self.assertIsInstance(invoke_args[0]["messages"][0], HumanMessage)
+        self.assertEqual(
+            invoke_args[0]["messages"][0].content,
+            "\n\n".join(
+                [
+                    "# Context",
+                    "## Commit Message\n````text\nFix parser\n````",
+                    "## Fix Diff\n````text\ndiff --git a/foo.py b/foo.py\n````",
+                    "## Modified Files\n````text\nfoo.py\n````",
+                ]
+            ),
+        )
+        self.assertEqual(result, {"introducer": "deadbeef"})
+
+    def test_agent_szz_interface(self) -> None:
+        self.assertIsInstance(
+            AgentSZZGraph(
+                seed=Mock(spec_set=["run"]),
+                search=Mock(spec_set=["run"]),
+            ),
+            AttributionGraph,
+        )
+
+    def test_agent_szz_requires_nodes(self) -> None:
+        with self.assertRaises(ValueError):
+            AgentSZZGraph()
+
+    def test_agent_szz_rejects_invalid_steps(self) -> None:
+        with self.assertRaises(ValueError):
+            AgentSZZGraph(
+                seed=Mock(spec_set=["run"]),
+                search=Mock(spec_set=["run"]),
+                steps=0,
+            )
+
+    def test_agent_szz_builder_interface(self) -> None:
+        builder = AgentSZZGraphBuilder(
+            seed=Mock(),
+            search=Mock(),
+        )
+
+        self.assertIsInstance(builder, AttributionGraphBuilder)
+
+    def test_agent_szz_builder_requires_nodes(self) -> None:
+        with self.assertRaises(ValueError):
+            AgentSZZGraphBuilder()
+
+    def test_agent_szz_builder_rejects_invalid_steps(self) -> None:
+        with self.assertRaises(ValueError):
+            AgentSZZGraphBuilder(
+                seed=Mock(),
+                search=Mock(),
+                steps=0,
+            )
+
+    def test_agent_szz_builder_graph(self) -> None:
+        repository = object.__new__(VersionControl)
+        seed = object()
+        search = object()
+        seed_builder = Mock(return_value=seed)
+        search_builder = Mock(return_value=search)
+        builder = AgentSZZGraphBuilder(
+            seed=seed_builder,
+            search=search_builder,
+        )
+
+        graph = builder.create(repository)
+
+        self.assertIsInstance(graph, AgentSZZGraph)
+        seed_builder.assert_called_once_with(repository)
+        search_builder.assert_called_once_with(repository)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("langgraph") is not None,
+        "langgraph is not installed",
+    )
+    def test_agent_szz_graph_forwards_steps(self) -> None:
+        correction = Change(
+            number=1,
+            base="base-sha",
+            after="after-sha",
+            description="Fix parser",
+        )
+        seed = Mock(spec_set=["run"])
+        seed.run.return_value = {
+            "base": "base-sha",
+            "after": "after-sha",
+            "seed": [{"title": "Commit Message", "body": "Fix parser"}],
+        }
+        search = Mock(spec_set=["run"])
+        search.run.return_value = {"introducer": "deadbeef"}
+        graph = AgentSZZGraph(
+            seed=seed,
+            search=search,
+            steps=13,
+        )
+
+        result = graph.invoke(correction)
+
+        seed.run.assert_called_once_with({"correction": correction})
+        search.run.assert_called_once_with(
+            {
+                "base": "base-sha",
+                "after": "after-sha",
+                "seed": [{"title": "Commit Message", "body": "Fix parser"}],
+            },
+            steps=13,
+        )
+        self.assertEqual(
+            result,
+            {"introducer": "deadbeef", "aborted": False},
+        )
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("langgraph") is not None,
+        "langgraph is not installed",
+    )
+    def test_agent_szz_builder_forwards_steps(self) -> None:
+        repository = object.__new__(VersionControl)
+        correction = Change(
+            number=1,
+            base="base-sha",
+            after="after-sha",
+            description="Fix parser",
+        )
+        seed = Mock(spec_set=["run"])
+        seed.run.return_value = {
+            "base": "base-sha",
+            "after": "after-sha",
+            "seed": [{"title": "Commit Message", "body": "Fix parser"}],
+        }
+        search = Mock(spec_set=["run"])
+        search.run.return_value = {"introducer": "deadbeef"}
+        seed_builder = Mock(return_value=seed)
+        search_builder = Mock(return_value=search)
+        builder = AgentSZZGraphBuilder(
+            seed=seed_builder,
+            search=search_builder,
+            steps=17,
+        )
+
+        result = builder.create(repository).invoke(correction)
+
+        seed_builder.assert_called_once_with(repository)
+        search_builder.assert_called_once_with(repository)
+        search.run.assert_called_once_with(
+            {
+                "base": "base-sha",
+                "after": "after-sha",
+                "seed": [{"title": "Commit Message", "body": "Fix parser"}],
+            },
+            steps=17,
+        )
+        self.assertEqual(
+            result,
+            {"introducer": "deadbeef", "aborted": False},
+        )
+
+    def test_agent_szz_invoke(self) -> None:
+        graph = AgentSZZGraph(
+            seed=Mock(spec_set=["run"]),
+            search=Mock(spec_set=["run"]),
+        )
+        compiled = Mock(spec_set=["invoke"])
+        compiled.invoke.return_value = {"introducer": "abc123", "aborted": False}
+        graph.build = Mock(return_value=compiled)
+        correction = Change(
+            number=1,
+            base="base-sha",
+            after="after-sha",
+            description="Fix parser",
+        )
+
+        result = graph.invoke(correction)
+
+        compiled.invoke.assert_called_once_with(
+            {
+                "correction": correction,
+                "nodes": {},
+            },
+            trace=None,
+        )
+        self.assertEqual(
+            result,
+            {"introducer": "abc123", "aborted": False},
         )

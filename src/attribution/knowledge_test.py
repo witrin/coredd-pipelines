@@ -373,6 +373,40 @@ class TestKnowledgeGraphBuilder(unittest.TestCase):
                     data,
                 )
 
+    def test_store_payload_applies_message_filter(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": """
+                def foo():
+                    return 1
+            """})
+            base = fixture.commit(tree, [], "base")
+
+            tree = fixture.tree({"a.py": """
+                def foo():
+                    return 2
+            """})
+            after = fixture.commit(tree, [base], "secret message")
+
+            store = KnowledgeGraphBuilder(
+                repository=VersionControl(fixture.repository)
+            ).build(base, after)
+
+            loaded = KnowledgeGraphStore.load(
+                store.dump(),
+                filter=lambda kind, value: (
+                    value.replace("secret", "<redacted>")
+                    if kind == "message"
+                    else value
+                ),
+            )
+
+            raw = store.payload(after)
+            filtered = loaded.payload(after)
+            self.assertIn("secret", raw["message"])
+            self.assertNotIn("secret", filtered["message"])
+            self.assertIn("<redacted>", filtered["message"])
+            self.assertEqual(filtered["sha"], raw["sha"])
+
     def test_audit_entity(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"a.py": """

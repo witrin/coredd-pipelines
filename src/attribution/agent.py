@@ -1,14 +1,45 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 from langchain_core.tools import BaseTool, tool
 import pygit2
 
-from benchmark.attribution.history import VersionControl
+from benchmark.attribution.diff.entity import EntityPath
+from benchmark.attribution.domain import FileOperation
+from benchmark.attribution.history import VersionControl, VersionControlPathWalker
 from benchmark.attribution.knowledge import KnowledgeGraphBuilder, KnowledgeGraphStore
+
+
+class DiffRenderer:
+    """Render a pygit2.Diff as a unified-diff string, optionally path-scoped."""
+
+    def render(self, diff: pygit2.Diff, path: str | None = None) -> str:
+        parts: list[str] = []
+
+        for value in diff:
+            old = value.delta.old_file.path
+            new = value.delta.new_file.path
+            if path is not None and old != path and new != path:
+                continue
+
+            source = "/dev/null" if old is None else f"a/{old}"
+            target = "/dev/null" if new is None else f"b/{new}"
+            parts.append(f"diff --git {source} {target}")
+            parts.append(f"--- {source}")
+            parts.append(f"+++ {target}")
+
+            for hunk in value.hunks:
+                parts.append(hunk.header.rstrip("\n"))
+                parts.extend(
+                    f"{line.origin}{line.content}".rstrip("\n")
+                    for line in hunk.lines
+                )
+
+        return "\n".join(parts).strip()
 
 
 class KnowledgeGraphTool:
@@ -26,6 +57,7 @@ class KnowledgeGraphTool:
         self._budget = budget
         self._target: dict[str, list[str]] = {}
         self._scopes: dict[str, set[tuple[str, ...]]] = {}
+        self._renderer = DiffRenderer()
 
     @property
     def store(self) -> KnowledgeGraphStore:
@@ -123,7 +155,7 @@ class KnowledgeGraphTool:
         patch = ""
         if parents:
             diff = self._repository.diff(parents[0], payload["sha"])
-            patch = self._render(diff, path)
+            patch = self._renderer.render(diff, path)
             if path is not None and not patch:
                 files = payload["files"]
                 allowed = ", ".join(files[:8])
@@ -141,34 +173,6 @@ class KnowledgeGraphTool:
             "path": path,
             "patch": patch,
         }
-
-    def _render(
-        self,
-        diff: pygit2.Diff,
-        path: str | None,
-    ) -> str:
-        parts: list[str] = []
-
-        for value in diff:
-            old = value.delta.old_file.path
-            new = value.delta.new_file.path
-            if path is not None and old != path and new != path:
-                continue
-
-            source = "/dev/null" if old is None else f"a/{old}"
-            target = "/dev/null" if new is None else f"b/{new}"
-            parts.append(f"diff --git {source} {target}")
-            parts.append(f"--- {source}")
-            parts.append(f"+++ {target}")
-
-            for hunk in value.hunks:
-                parts.append(hunk.header.rstrip("\n"))
-                parts.extend(
-                    f"{line.origin}{line.content}".rstrip("\n")
-                    for line in hunk.lines
-                )
-
-        return "\n".join(parts).strip()
 
     def _meta(
         self,
@@ -353,17 +357,356 @@ class KnowledgeGraphToolFactory:
         self,
         repository: VersionControl,
         source: KnowledgeGraphBuilder | Path,
+        filter: Callable[[str, str], str] | None = None,
     ) -> None:
         self._repository = repository
         self._source = source
+        self._filter = filter
 
     def create(self, base: str, after: str) -> KnowledgeGraphTool:
         if isinstance(self._source, Path):
             with open(self._source / f"{after}.json", "r", encoding="utf-8") as file:
-                store = KnowledgeGraphStore.load(json.load(file))
+                store = KnowledgeGraphStore.load(json.load(file), filter=self._filter)
         else:
             store = self._source.build(base, after)
+            if self._filter is not None:
+                store._filter = self._filter
         return KnowledgeGraphTool(
             repository=self._repository,
             store=store,
+        )
+
+
+class RepositoryTool:
+    """Repository-native tool surface paralleling AgentSZZ's git-CLI toolset.
+
+    Exposes ``show``, ``blame``, ``pickaxe``, ``trace`` and ``grep`` over a
+    :class:`VersionControl` instance so the search agent can operate on the
+    repository without a prebuilt knowledge graph.
+    """
+
+    def __init__(
+        self,
+        repository: VersionControl,
+        after: str,
+        *,
+        budget: int = 15,
+    ) -> None:
+        self._repository = repository
+        self._after = after
+        self._budget = budget
+        self._reads = 0
+        self._renderer = DiffRenderer()
+
+    def tools(self) -> list[BaseTool]:
+        return [
+            tool(self.show),
+            tool(self.blame),
+            tool(self.pickaxe),
+            tool(self.trace),
+            tool(self.grep),
+        ]
+
+    def _resolve(self, commit: str) -> str:
+        node = self._repository.handle.revparse_single(commit)
+        return str(node.peel(pygit2.Commit).id)
+
+    def show(self, commit: str, path: str | None = None) -> dict[str, Any]:
+        """Return commit metadata and its unified diff against the first parent.
+
+        Accepts any git revision expression (``<sha>``, ``<sha>^``, ``<sha>~1``,
+        ``HEAD``, branch names, …). Use this to read the exact change introduced
+        by a commit. Optionally restrict the diff to a single ``path``.
+        """
+        commit = self._resolve(commit)
+        meta = self._repository.meta(commit)
+        parents = self._repository.parents(commit)
+        patch = ""
+        if parents:
+            diff = self._repository.diff(parents[0], commit)
+            patch = self._renderer.render(diff, path)
+        return {
+            "sha": commit,
+            "message": meta.message,
+            "timestamp": meta.time,
+            "author": meta.author,
+            "parents": parents,
+            "path": path,
+            "patch": patch,
+        }
+
+    def blame(
+        self,
+        path: str,
+        commit: str,
+        start: int,
+        end: int,
+    ) -> dict[str, Any]:
+        """Blame one contiguous line range in a file at a given commit.
+
+        Accepts any git revision expression for ``commit``. Returns ``blame``
+        as a string with one ``L<n>: <sha> | <origin_path> | <code>`` entry per
+        line and ``commits`` as a map from each referenced SHA to the first
+        line of its commit message.
+        """
+        commit = self._resolve(commit)
+        raw = self._repository.blame(path, commit, [(start, end)])
+        try:
+            data = self._repository.blob(commit, path).decode(
+                "utf-8", errors="replace"
+            )
+        except (FileNotFoundError, ValueError):
+            data = ""
+        source = data.splitlines()
+
+        lines: list[str] = []
+        commits: dict[str, str] = {}
+        cursor = start
+        for sha, origin_path, origin_range in raw:
+            if sha is None or origin_path is None or origin_range is None:
+                lines.append(f"L{cursor}: ? | ? | ")
+                cursor += 1
+                continue
+            segment_start, segment_end = origin_range
+            span = segment_end - segment_start + 1
+            if sha not in commits:
+                commits[sha] = self._repository.meta(sha).message.splitlines()[0]
+            for _ in range(span):
+                code = (
+                    source[cursor - 1]
+                    if 0 < cursor <= len(source)
+                    else ""
+                )
+                lines.append(f"L{cursor}: {sha} | {origin_path} | {code}")
+                cursor += 1
+
+        return {"blame": "\n".join(lines), "commits": commits}
+
+    def pickaxe(
+        self,
+        needle: str,
+        path: str,
+        max: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Find commits that added or removed occurrences of ``needle`` in ``path``.
+
+        Walks the file history reachable from the correction commit (exclusive)
+        with rename tracking and emits at most ``max`` commits, newest first,
+        where the occurrence count of ``needle`` changed between the parent and
+        the commit.
+        """
+        self._consume()
+        if not needle:
+            raise ValueError("pickaxe needle must not be empty.")
+        if not path:
+            raise ValueError("pickaxe path must not be empty.")
+
+        walker = VersionControlPathWalker(
+            self._repository.handle,
+            self._after,
+            path,
+            depth=max * 5 + 5,
+        )
+        result: list[dict[str, Any]] = []
+        for entry in walker.entries():
+            if entry.commit == self._after:
+                continue
+            delta = self._pickaxe_delta(entry, needle)
+            if delta is None or delta == 0:
+                continue
+            result.append(self._pickaxe_entry(entry.commit, delta))
+            if len(result) >= max:
+                break
+        return result
+
+    def trace(
+        self,
+        pattern: str,
+        path: str,
+        max: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Track commits that modified any entity whose URN matches ``pattern``.
+
+        ``pattern`` is a regular expression applied to tree-sitter entity URNs
+        (e.g. ``entity:function=parse`` or ``entity:class=Parser:method=read``)
+        via :func:`re.search`. Entries whose sources fail to parse are skipped.
+        """
+        self._consume()
+        try:
+            matcher = re.compile(pattern)
+        except re.error as error:
+            raise ValueError(f"Invalid trace pattern: {error}") from error
+
+        language = self._language(path)
+        if language is None:
+            raise ValueError(f"Unsupported language for path {path!r}.")
+
+        walker = VersionControlPathWalker(
+            self._repository.handle,
+            self._after,
+            path,
+            depth=max * 5 + 5,
+        )
+        result: list[dict[str, Any]] = []
+        for entry in walker.entries():
+            if entry.commit == self._after:
+                continue
+            matches = self._trace_match(entry, language, matcher)
+            if not matches:
+                continue
+            result.append(
+                {
+                    "sha": entry.commit,
+                    "path": entry.after or entry.base,
+                    "operation": entry.operation.value,
+                    "entities": sorted(matches),
+                }
+            )
+            if len(result) >= max:
+                break
+        return result
+
+    def grep(
+        self,
+        needle: str,
+        commit: str,
+        path: str | None = None,
+        max: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Substring search over the repository tree at a given commit.
+
+        Accepts any git revision expression for ``commit``. Returns up to
+        ``max`` matches, each carrying ``path``, 1-based ``line``, 0-based
+        ``column`` and the full line text. Restrict the search with ``path``
+        (exact path, not glob).
+        """
+        self._consume()
+        if not needle:
+            raise ValueError("grep needle must not be empty.")
+
+        commit = self._resolve(commit)
+        paths = [path] if path is not None else self._repository.tree(commit)
+        result: list[dict[str, Any]] = []
+        for current in paths:
+            try:
+                data = self._repository.blob(commit, current)
+            except (FileNotFoundError, ValueError):
+                continue
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            for index, line in enumerate(text.splitlines(), start=1):
+                column = line.find(needle)
+                if column < 0:
+                    continue
+                result.append(
+                    {
+                        "path": current,
+                        "line": index,
+                        "column": column,
+                        "text": line,
+                    }
+                )
+                if len(result) >= max:
+                    return result
+        return result
+
+    def _pickaxe_delta(self, entry: Any, needle: str) -> int | None:
+        base_data = self._safe_blob(entry.commit, entry.after or entry.base or "")
+        parents = self._repository.parents(entry.commit)
+        parent_data = b""
+        if parents and entry.base is not None:
+            parent_data = self._safe_blob(parents[0], entry.base)
+        if base_data is None and parent_data is None:
+            return None
+        after = 0 if base_data is None else base_data.count(needle.encode("utf-8"))
+        before = 0 if parent_data is None else parent_data.count(needle.encode("utf-8"))
+        return after - before
+
+    def _pickaxe_entry(self, sha: str, delta: int) -> dict[str, Any]:
+        meta = self._repository.meta(sha)
+        return {
+            "sha": sha,
+            "message": meta.message,
+            "timestamp": meta.time,
+            "author": meta.author,
+            "delta": delta,
+        }
+
+    def _trace_match(
+        self,
+        entry: Any,
+        language: str,
+        matcher: re.Pattern[str],
+    ) -> set[str]:
+        parents = self._repository.parents(entry.commit)
+        base_blob = None
+        if parents and entry.base is not None:
+            base_blob = self._safe_blob(parents[0], entry.base)
+        after_blob = None
+        if entry.after is not None:
+            after_blob = self._safe_blob(entry.commit, entry.after)
+
+        operation = FileOperation(
+            base=entry.base,
+            after=entry.after,
+            operation=entry.operation,
+        )
+        try:
+            values = EntityPath(
+                operation,
+                base_blob,
+                after_blob,
+                language=language,
+            ).resolve()
+        except Exception:
+            return set()
+
+        matches: set[str] = set()
+        for _, base_urn, after_urn in values:
+            for urn in (base_urn, after_urn):
+                if urn is None:
+                    continue
+                if matcher.search(urn):
+                    matches.add(urn)
+        return matches
+
+    def _safe_blob(self, commit: str, path: str) -> bytes | None:
+        if not path:
+            return None
+        try:
+            return self._repository.blob(commit, path)
+        except (FileNotFoundError, ValueError):
+            return None
+
+    def _language(self, path: str) -> str | None:
+        if path.endswith(".py"):
+            return "python"
+        if path.endswith(".ts"):
+            return "typescript"
+        if path.endswith(".tsx"):
+            return "tsx"
+        if path.endswith(".js") or path.endswith(".jsx"):
+            return "javascript"
+        if path.endswith(".java"):
+            return "java"
+        return None
+
+    def _consume(self) -> None:
+        if self._reads >= self._budget:
+            raise ValueError("Tool read budget exhausted.")
+        self._reads += 1
+
+
+class RepositoryToolFactory:
+    def __init__(self, repository: VersionControl, budget: int = 15) -> None:
+        self._repository = repository
+        self._budget = budget
+
+    def create(self, base: str, after: str) -> RepositoryTool:
+        return RepositoryTool(
+            repository=self._repository,
+            after=after,
+            budget=self._budget,
         )

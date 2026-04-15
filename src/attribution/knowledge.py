@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import re
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import networkx as nx
 from networkx.readwrite import json_graph
@@ -85,10 +85,14 @@ class KnowledgeAuditCase:
 class KnowledgeGraphStore:
     """In-memory temporal knowledge graph."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        filter: Callable[[str, str], str] | None = None,
+    ) -> None:
         self._graph = nx.MultiDiGraph()
         self._base = ""
         self._after = ""
+        self._filter = filter
 
     @property
     def graph(self) -> nx.MultiDiGraph:
@@ -105,8 +109,12 @@ class KnowledgeGraphStore:
         }
 
     @classmethod
-    def load(cls, data: dict[str, object]) -> KnowledgeGraphStore:
-        store = cls()
+    def load(
+        cls,
+        data: dict[str, object],
+        filter: Callable[[str, str], str] | None = None,
+    ) -> KnowledgeGraphStore:
+        store = cls(filter=filter)
         store.base = str(data["base"])
         store.after = str(data["after"])
         store._graph = cast(
@@ -180,7 +188,10 @@ class KnowledgeGraphStore:
 
     def payload(self, node: str) -> dict[str, Any]:
         key = self.resolve(node)
-        return dict(self._graph.nodes[key]["payload"])
+        payload = dict(self._graph.nodes[key]["payload"])
+        if self._filter is not None and isinstance(payload.get("message"), str):
+            payload["message"] = self._filter("message", payload["message"])
+        return payload
 
     def nodes(self, kind: str) -> list[str]:
         return [

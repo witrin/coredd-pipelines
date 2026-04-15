@@ -58,6 +58,14 @@ class AgenticSZZGraphState(AttributionResult, total=False):
     nodes: dict[str, NodeState]
 
 
+class AgentSZZGraphState(AttributionResult, total=False):
+    correction: Change
+    base: str
+    after: str
+    seed: list[SeedItem]
+    nodes: dict[str, NodeState]
+
+
 class LLM4SZZGraph:
     """Wire node instances into the semantic LLM4SZZ LangGraph."""
 
@@ -579,6 +587,125 @@ class AgenticSZZGraphBuilder:
         repository: VersionControl,
     ) -> AttributionGraph:
         return AgenticSZZGraph(
+            seed=self._seed(repository),
+            search=self._search(repository),
+            steps=self._steps,
+        )
+
+
+class AgentSZZGraph:
+    """Wire the repository-native AgentSZZ search node into its own LangGraph."""
+
+    def __init__(
+        self,
+        seed: Any | None = None,
+        search: Any | None = None,
+        steps: int = 50,
+    ) -> None:
+        if seed is None or search is None:
+            raise ValueError("AgentSZZGraph requires explicit seed and search nodes.")
+        if steps < 1:
+            raise ValueError("AgentSZZGraph steps must be positive.")
+        self._seed = seed
+        self._search = search
+        self._steps = steps
+        self._graph: AttributionRunnable | None = None
+
+    def build(self) -> object:
+        from langchain_core.runnables import RunnableLambda
+        from langgraph.graph import END, START, StateGraph
+
+        graph = StateGraph(AgentSZZGraphState)
+        graph.add_node(
+            "seed",
+            RunnableLambda(self._run_seed).with_config(run_name="seed"),
+        )
+        graph.add_node(
+            "search",
+            RunnableLambda(self._run_search).with_config(run_name="search"),
+        )
+        graph.add_edge(START, "seed")
+        graph.add_edge("seed", "search")
+        graph.add_edge("search", END)
+        return AttributionRunnable(graph.compile())
+
+    def invoke(
+        self,
+        correction: Change,
+        *,
+        trace: Trace | None = None,
+        **kwargs: object,
+    ) -> AttributionResult:
+        result = self._compiled().invoke(
+            {
+                "correction": correction,
+                "nodes": {},
+            },
+            trace=trace,
+            **kwargs,
+        )
+        return {
+            "introducer": result.get("introducer"),
+            "aborted": bool(result.get("aborted", False)),
+        }
+
+    def _compiled(self) -> AttributionRunnable:
+        if self._graph is None:
+            self._graph = self.build()
+        return self._graph
+
+    def _run_seed(self, state: AgentSZZGraphState) -> dict[str, object]:
+        output = self._seed.run({"correction": state["correction"]})
+        return {
+            "base": output["base"],
+            "after": output["after"],
+            "seed": list(output["seed"]),
+            "nodes": {
+                **state["nodes"],
+                "seed": output,
+            },
+        }
+
+    def _run_search(self, state: AgentSZZGraphState) -> dict[str, object]:
+        output = self._search.run(
+            {
+                "base": state["base"],
+                "after": state["after"],
+                "seed": state["seed"],
+            },
+            steps=self._steps,
+        )
+        return {
+            "introducer": output["introducer"],
+            "nodes": {
+                **state["nodes"],
+                "search": output,
+            },
+        }
+
+
+class AgentSZZGraphBuilder:
+    """Create repository-bound AgentSZZ graph instances."""
+
+    def __init__(
+        self,
+        seed: Callable[[VersionControl], Any] | None = None,
+        search: Callable[[VersionControl], Any] | None = None,
+        steps: int = 50,
+    ) -> None:
+        if seed is None or search is None:
+            raise ValueError("AgentSZZGraphBuilder requires explicit node builders.")
+        if steps < 1:
+            raise ValueError("AgentSZZGraphBuilder steps must be positive.")
+        self._seed = seed
+        self._search = search
+        self._steps = steps
+
+    def create(
+        self,
+        repository: VersionControl,
+    ) -> AttributionGraph:
+        return AgentSZZGraph(
             seed=self._seed(repository),
             search=self._search(repository),
             steps=self._steps,

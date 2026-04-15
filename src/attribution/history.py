@@ -405,6 +405,11 @@ class VersionControl:
 
         raise FileNotFoundError(f"No bare git repository found under {repo_dir}")
 
+    @property
+    def handle(self) -> pygit2.Repository:
+        """Return the underlying pygit2 repository."""
+        return self._repository
+
     def parents(self, commit: str) -> list[str]:
         """Return parent SHAs of *commit*."""
         obj = self._repository.get(commit)
@@ -923,6 +928,11 @@ class VersionControl:
 
         return blob.data
 
+    def tree(self, commit: str) -> list[str]:
+        """Return all blob paths in the tree of *commit*, sorted."""
+        values = self._files(commit)
+        return [str(value["path"]) for value in values]
+
 
 class VersionControlSnapshot:
     """Snapshot-backed git operations replayed into a temporary pygit2 repository.
@@ -1257,6 +1267,10 @@ class VersionControlSnapshot:
                 if not (source / "blobs" / blob).exists():
                     raise ValueError(f"Snapshot blob {blob} is missing.")
 
+    @property
+    def handle(self) -> pygit2.Repository:
+        return self._runtime.handle
+
     def parents(self, commit: str) -> list[str]:
         return [
             self._reverse[parent] for parent in self._runtime.parents(self._map(commit))
@@ -1317,6 +1331,9 @@ class VersionControlSnapshot:
 
     def blob(self, commit: str, path: str) -> bytes:
         return self._runtime.blob(self._map(commit), path)
+
+    def tree(self, commit: str) -> list[str]:
+        return self._runtime.tree(self._map(commit))
 
     def _map(self, commit: str) -> str:
         try:

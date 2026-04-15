@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import Mock
 from unittest.mock import patch
 
 from langchain_core.tools import BaseTool
 
-from benchmark.attribution.agent import KnowledgeGraphTool
+from benchmark.attribution.agent import (
+    DiffRenderer,
+    KnowledgeGraphTool,
+    KnowledgeGraphToolFactory,
+    RepositoryTool,
+    RepositoryToolFactory,
+)
 from benchmark.attribution.history import VersionControl, VersionControlSnapshot
 from benchmark.attribution.history_fixture import HistoryFixture
 from benchmark.attribution.knowledge import KnowledgeGraphBuilder, KnowledgeGraphStore
@@ -273,6 +281,53 @@ class TestKnowledgeGraphTool(unittest.TestCase):
             self.assertEqual(
                 agent.content(after, "a.py")["path"],
                 "a.py",
+            )
+
+    def test_factory_redacts_messages_through_filter(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree(
+                {
+                    "a.py": """
+                    def foo():
+                        return 1
+                    """
+                }
+            )
+            base = fixture.commit(tree, [], "base")
+
+            tree = fixture.tree(
+                {
+                    "a.py": """
+                    def foo():
+                        return 2
+                    """
+                }
+            )
+            after = fixture.commit(tree, [base], "secret fix")
+
+            repository = VersionControl(fixture.repository)
+            store = KnowledgeGraphBuilder(repository=repository).build(base, after)
+
+            with tempfile.TemporaryDirectory() as work:
+                path = Path(work)
+                with open(path / f"{after}.json", "w", encoding="utf-8") as file:
+                    json.dump(store.dump(), file, default=str)
+
+                factory = KnowledgeGraphToolFactory(
+                    repository=repository,
+                    source=path,
+                    filter=lambda kind, value: (
+                        value.replace("secret", "<redacted>")
+                        if kind == "message"
+                        else value
+                    ),
+                )
+                agent = factory.create(base, after)
+
+            self.assertNotIn("secret", agent.meta(after)["message"])
+            self.assertIn("<redacted>", agent.meta(after)["message"])
+            self.assertTrue(
+                all("secret" not in candidate["message"] for candidate in agent.candidates())
             )
 
     def test_candidates_use_canonical_type(self) -> None:
@@ -709,6 +764,260 @@ class TestKnowledgeGraphTool(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             agent.content("foo")
+
+
+class TestRepositoryTool(unittest.TestCase):
+    def test_show_returns_diff_against_first_parent(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "def foo():\n    return 1\n"})
+            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree({"foo.py": "def foo():\n    return 2\n"})
+            after = fixture.commit(tree, [base], "bump return value")
+
+            repository = VersionControl(fixture.repository)
+            tool = RepositoryTool(repository=repository, after=after)
+
+            result = tool.show(after)
+
+            self.assertEqual(result["sha"], after)
+            self.assertEqual(result["message"], "bump return value")
+            self.assertEqual(result["parents"], [base])
+            self.assertIn("return 1", result["patch"])
+            self.assertIn("return 2", result["patch"])
+
+    def test_show_scoped_to_path(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree(
+                {
+                    "foo.py": "def foo():\n    return 1\n",
+                    "bar.py": "def bar():\n    return 1\n",
+                }
+            )
+            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree(
+                {
+                    "foo.py": "def foo():\n    return 2\n",
+                    "bar.py": "def bar():\n    return 2\n",
+                }
+            )
+            after = fixture.commit(tree, [base], "bump both")
+
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            result = tool.show(after, path="foo.py")
+
+            self.assertIn("foo.py", result["patch"])
+            self.assertNotIn("bar.py", result["patch"])
+
+    def test_blame_returns_origin_commit(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "alpha\nbeta\n"})
+            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree({"foo.py": "alpha\ngamma\n"})
+            after = fixture.commit(tree, [base], "replace beta")
+
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            first = tool.blame("foo.py", after, 1, 1)
+            self.assertEqual(
+                first["blame"],
+                f"L1: {base} | foo.py | alpha",
+            )
+            self.assertEqual(first["commits"], {base: "base"})
+
+            second = tool.blame("foo.py", after, 2, 2)
+            self.assertEqual(
+                second["blame"],
+                f"L2: {after} | foo.py | gamma",
+            )
+            self.assertEqual(second["commits"], {after: "replace beta"})
+
+    def test_pickaxe_emits_commits_with_changed_count(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "x = 0\n"})
+            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree({"foo.py": "x = 0\ny = token\n"})
+            introduce = fixture.commit(tree, [base], "introduce token")
+            tree = fixture.tree({"foo.py": "x = 0\ny = token\nz = 1\n"})
+            after = fixture.commit(tree, [introduce], "unrelated")
+
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            result = tool.pickaxe("token", path="foo.py")
+            shas = {entry["sha"] for entry in result}
+            self.assertIn(introduce, shas)
+            self.assertNotIn(after, shas)
+
+    def test_pickaxe_requires_path(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "pass\n"})
+            after = fixture.commit(tree, [], "base")
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+            with self.assertRaises(ValueError):
+                tool.pickaxe("needle", path="")
+
+    def test_trace_matches_entity_regex(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree(
+                {
+                    "foo.py": """
+                    def parse():
+                        return 1
+                    """,
+                }
+            )
+            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree(
+                {
+                    "foo.py": """
+                    def parse():
+                        return 2
+                    """,
+                }
+            )
+            change = fixture.commit(tree, [base], "tweak parse")
+            tree = fixture.tree(
+                {
+                    "foo.py": """
+                    def parse():
+                        return 2
+
+                    def other():
+                        pass
+                    """,
+                }
+            )
+            after = fixture.commit(tree, [change], "add unrelated")
+
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            result = tool.trace("parse", path="foo.py")
+            shas = {entry["sha"] for entry in result}
+            self.assertIn(change, shas)
+
+    def test_grep_scans_tree_at_commit(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree(
+                {
+                    "foo.py": "needle\nother\n",
+                    "bar.py": "unrelated\n",
+                }
+            )
+            after = fixture.commit(tree, [], "base")
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            result = tool.grep("needle", commit=after)
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0]["path"], "foo.py")
+            self.assertEqual(result[0]["line"], 1)
+            self.assertEqual(result[0]["text"], "needle")
+
+    def test_grep_respects_path_filter(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree(
+                {
+                    "foo.py": "needle\n",
+                    "bar.py": "needle\n",
+                }
+            )
+            after = fixture.commit(tree, [], "base")
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            result = tool.grep("needle", commit=after, path="bar.py")
+            self.assertEqual([entry["path"] for entry in result], ["bar.py"])
+
+    def test_tools_exposes_five_entries(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "pass\n"})
+            after = fixture.commit(tree, [], "base")
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            entries = tool.tools()
+            self.assertEqual(len(entries), 5)
+            for entry in entries:
+                self.assertIsInstance(entry, BaseTool)
+
+    def test_budget_blocks_over_budget_pickaxe(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "needle\n"})
+            after = fixture.commit(tree, [], "base")
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+                budget=1,
+            )
+            tool.pickaxe("needle", path="foo.py")
+            with self.assertRaises(ValueError):
+                tool.pickaxe("needle", path="foo.py")
+
+    def test_factory_creates_tool_bound_to_after(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "pass\n"})
+            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree({"foo.py": "x = 1\n"})
+            after = fixture.commit(tree, [base], "edit")
+
+            factory = RepositoryToolFactory(
+                repository=VersionControl(fixture.repository),
+            )
+            tool = factory.create(base, after)
+
+            show = tool.show(after)
+            self.assertEqual(show["sha"], after)
+
+
+class TestDiffRenderer(unittest.TestCase):
+    def test_renders_path_scoped_hunks(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree(
+                {
+                    "foo.py": "alpha\n",
+                    "bar.py": "alpha\n",
+                }
+            )
+            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree(
+                {
+                    "foo.py": "beta\n",
+                    "bar.py": "beta\n",
+                }
+            )
+            after = fixture.commit(tree, [base], "edit")
+
+            repository = VersionControl(fixture.repository)
+            diff = repository.diff(base, after)
+
+            full = DiffRenderer().render(diff)
+            scoped = DiffRenderer().render(diff, path="foo.py")
+
+            self.assertIn("foo.py", full)
+            self.assertIn("bar.py", full)
+            self.assertIn("foo.py", scoped)
+            self.assertNotIn("bar.py", scoped)
 
 
 if __name__ == "__main__":
