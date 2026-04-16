@@ -767,7 +767,7 @@ def ingest_validation_context(
 
 
 @asset(
-    metadata={"version": "1.1.0"},
+    metadata={"version": "2.0.0"},
     partitions_def=partitions.ingest_validation_sources_partition,
     group_name="ingest",
     pool="default",
@@ -791,7 +791,7 @@ def ingest_validation_context_index(
                         [
                             ("commit", pa.string()),
                             ("base", pa.string()),
-                            ("score", pa.float64()),
+                            ("category", pa.string()),
                             ("position", pa.int64()),
                             ("time", pa.timestamp("us", tz="UTC")),
                         ]
@@ -876,14 +876,14 @@ def ingest_validation_context_index(
                     for commit in graph.nodes("commit"):
                         payload = graph.payload(commit)
                         sha = str(payload["sha"])
-                        score = payload.get("score")
+                        category = payload.get("type")
                         parents = snapshot.parents(sha)
 
                         commits.append(
                             {
                                 "commit": sha,
                                 "base": parents[0] if parents else None,
-                                "score": score,
+                                "category": category,
                                 "position": (
                                     position[commit] if commit in position else 0
                                 ),
