@@ -767,7 +767,7 @@ def ingest_validation_context(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "1.1.0"},
     partitions_def=partitions.ingest_validation_sources_partition,
     group_name="ingest",
     pool="default",
@@ -805,6 +805,7 @@ def ingest_validation_context_index(
                         [
                             ("commit", pa.string()),
                             ("path", pa.string()),
+                            ("origin", pa.string()),
                             ("added", pa.int64()),
                             ("deleted", pa.int64()),
                             ("hunks", pa.int64()),
@@ -900,6 +901,15 @@ def ingest_validation_context_index(
                             file_payload = graph.payload(node)
                             paths[node] = str(file_payload["path"])
 
+                        renames: dict[str, str] = {}
+                        for _, target, data in graph.graph.out_edges(commit, data=True):
+                            if data.get("edge") != "RENAME":
+                                continue
+                            new_path = str(graph.payload(target)["path"])
+                            renames[new_path] = str(data["origin"]).removeprefix(
+                                "file:"
+                            )
+
                         names = set(paths.values())
                         patches = {}
 
@@ -932,6 +942,7 @@ def ingest_validation_context_index(
                                 {
                                     "commit": sha,
                                     "path": path,
+                                    "origin": renames.get(path),
                                     "added": added,
                                     "deleted": deleted,
                                     "hunks": hunks,
@@ -953,6 +964,20 @@ def ingest_validation_context_index(
                                             "operation": operation,
                                         }
                                     )
+
+                        for new_path, old_path in renames.items():
+                            if new_path in names:
+                                continue
+                            files.append(
+                                {
+                                    "commit": sha,
+                                    "path": new_path,
+                                    "origin": old_path,
+                                    "added": 0,
+                                    "deleted": 0,
+                                    "hunks": 0,
+                                }
+                            )
 
                     rows.append(
                         {
