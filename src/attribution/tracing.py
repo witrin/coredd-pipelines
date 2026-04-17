@@ -60,7 +60,7 @@ class Trace:
 
     def to_table(self) -> pa.Table:
         events = self._events
-        return pa.table(
+        table = pa.table(
             {
                 "trace": pa.array([e["trace"] for e in events], type=pa.string()),
                 "sequence": pa.array([e["sequence"] for e in events], type=pa.int64()),
@@ -75,6 +75,43 @@ class Trace:
                 "payload": pa.array([e["payload"] for e in events], type=pa.string()),
             }
         )
+        return table.replace_schema_metadata(
+            {
+                b"trace.id": self.id.encode("utf-8"),
+                b"trace.metadata": json.dumps(
+                    self.metadata,
+                    default=self._json_default,
+                    sort_keys=True,
+                ).encode("utf-8"),
+            }
+        )
+
+    @classmethod
+    def from_table(cls, table: pa.Table) -> Trace:
+        schema = table.schema.metadata or {}
+        seed = schema.get(b"trace.id")
+        raw = schema.get(b"trace.metadata")
+        metadata = json.loads(raw.decode("utf-8")) if raw else {}
+        trace = cls(
+            seed=seed.decode("utf-8") if seed else None,
+            metadata=metadata,
+        )
+        rows = table.to_pylist()
+        trace._sequence = max((int(row["sequence"]) for row in rows), default=0)
+        trace._events = [
+            {
+                "trace": row["trace"],
+                "sequence": int(row["sequence"]),
+                "timestamp": row["timestamp"],
+                "node": row["node"],
+                "span": row["span"],
+                "parent": row["parent"],
+                "event": row["event"],
+                "payload": row["payload"],
+            }
+            for row in rows
+        ]
+        return trace
 
     def metadata_table(self) -> pa.Table:
         if not self.metadata:

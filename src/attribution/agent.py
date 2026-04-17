@@ -186,7 +186,7 @@ class KnowledgeGraphTool:
                 "sha": payload["sha"],
                 "type": self._category(payload),
                 "message": payload["message"],
-                "timestamp": payload["timestamp"],
+                "timestamp": self._timestamp(payload["timestamp"]),
                 "files": self._files(payload),
                 "entities": self._touched(key),
                 "overlap": self._overlap(key),
@@ -209,7 +209,7 @@ class KnowledgeGraphTool:
             "type": category,
             "score": self._score(category),
             "message": payload["message"],
-            "timestamp": payload["timestamp"],
+            "timestamp": self._timestamp(payload["timestamp"]),
             "files": self._files(payload),
             "entities": self._touched(key),
         }
@@ -342,6 +342,10 @@ class KnowledgeGraphTool:
 
         return sorted(result)
 
+    @staticmethod
+    def _timestamp(value: object) -> str:
+        return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
     def _starts(
         self,
         prefix: tuple[str, ...],
@@ -428,7 +432,7 @@ class RepositoryTool:
         return {
             "sha": commit,
             "message": meta.message,
-            "timestamp": meta.time,
+            "timestamp": self._timestamp(meta.time),
             "author": meta.author,
             "parents": parents,
             "path": path,
@@ -629,7 +633,7 @@ class RepositoryTool:
         return {
             "sha": sha,
             "message": meta.message,
-            "timestamp": meta.time,
+            "timestamp": self._timestamp(meta.time),
             "author": meta.author,
             "delta": delta,
         }
@@ -679,6 +683,10 @@ class RepositoryTool:
             return self._repository.blob(commit, path)
         except (FileNotFoundError, ValueError):
             return None
+
+    @staticmethod
+    def _timestamp(value: object) -> str:
+        return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
     def _language(self, path: str) -> str | None:
         if path.endswith(".py"):

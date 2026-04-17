@@ -3168,6 +3168,57 @@ class TestLLM4SZZGraph(unittest.TestCase):
             ["summary", "introducer", "aborted", "state_json"],
         )
 
+    def test_trace_roundtrip(self) -> None:
+        trace = Trace(seed="roundtrip", metadata={"foo": "bar", "baz": 1})
+        trace.append(
+            node="summarize",
+            span="span-1",
+            parent=None,
+            event="node_start",
+            payload={"phase": "start"},
+        )
+        trace.append(
+            node="summarize",
+            span="span-1",
+            parent=None,
+            event="node_end",
+            payload={"phase": "end"},
+        )
+
+        restored = Trace.from_table(trace.to_table())
+
+        self.assertEqual(restored.id, "roundtrip")
+        self.assertEqual(restored.metadata, {"foo": "bar", "baz": 1})
+        original = list(trace.events())
+        revived = list(restored.events())
+        self.assertEqual(len(original), len(revived))
+        for before, after in zip(original, revived, strict=True):
+            self.assertEqual(before["trace"], after["trace"])
+            self.assertEqual(before["sequence"], after["sequence"])
+            self.assertEqual(before["node"], after["node"])
+            self.assertEqual(before["span"], after["span"])
+            self.assertEqual(before["parent"], after["parent"])
+            self.assertEqual(before["event"], after["event"])
+            self.assertEqual(before["payload"], after["payload"])
+
+        trace.append(
+            node="summarize",
+            span="span-2",
+            parent=None,
+            event="node_start",
+            payload=None,
+        )
+        revived_after = Trace.from_table(trace.to_table())
+        revived_after.append(
+            node="summarize",
+            span="span-2",
+            parent=None,
+            event="node_end",
+            payload=None,
+        )
+        sequences = [event["sequence"] for event in revived_after.events()]
+        self.assertEqual(sequences, [1, 2, 3, 4])
+
     def test_repository_seed_requires_inputs(self) -> None:
         with self.assertRaises(ValueError):
             RepositorySeedNode().run({})
