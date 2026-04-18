@@ -572,7 +572,7 @@ class AgenticSZZGraphBuilder:
         self,
         seed: Callable[[VersionControl], Any] | None = None,
         search: Callable[[VersionControl], Any] | None = None,
-        steps: int = 50,
+        steps: int = 20,
     ) -> None:
         if seed is None or search is None:
             raise ValueError("AgenticSZZGraphBuilder requires explicit node builders.")

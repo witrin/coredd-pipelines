@@ -1023,7 +1023,7 @@ def ingest_validation_context_index(
 class AttributionEvaluationConfig(dg.Config):
     model: str = "MiniMaxAI/MiniMax-M2.7"
     temperature: float = 0.0
-    steps: int = 50
+    steps: int = 20
 
 
 @asset(

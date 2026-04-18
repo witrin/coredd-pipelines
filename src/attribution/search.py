@@ -166,7 +166,7 @@ class KnowledgeGraphSearchNode:
         self,
         input: Seed,
         *,
-        steps: int = 50,
+        steps: int = 20,
     ) -> SearchOutput:
         base = input.get("base")
         after = input.get("after")
@@ -206,16 +206,39 @@ class KnowledgeGraphSearchNode:
         prompt = inspect.cleandoc(
             """
             Identify which commit first introduced the bug fixed by the given correction.
-            Call candidates first.
-            Use the ranking as guidance, but override it if tool evidence supports another commit.
-            Prefer candidates that modified the same files or entities as the correction when the evidence is otherwise similar.
-            Prefer direct blame candidates before older or broader ancestors unless you find evidence against them.
-            If a candidate looks like refactoring, cleanup, or import churn, inspect related commits instead of selecting it blindly.
-            Do not inspect all candidates exhaustively. Focus on the most plausible ones.
-            Limit content to 3 calls per case. Use it only to verify the top candidate, not to explore.
-            If content fails, decide with the evidence you already have — do not retry.
-            Make at least one investigation step before deciding unless the single-candidate case is conclusive.
-            Return the full 40-character introducer SHA, or null if no justified decision can be made.
+
+            ## Commit Types (Priority Order)
+            1. blame (score 1.0): Code deleted or modified by the correction was last
+               touched by this commit. Highest priority.
+            2. blame-ancestor (score 0.6): Commit before the blame commit in file
+               history. Lower priority.
+            3. correction-ancestor (score 0.3): Commit after blame but before the
+               correction. Lowest priority.
+
+            ## Workflow
+            1. Call candidates first. Use the fitness ranking as initial guidance, but
+               override it if tool evidence supports a different commit.
+            2. Verify the top-ranked candidate using content before deciding:
+               - Does it ADD the code that the correction REMOVES?
+               - Does it introduce the LOGIC that exhibits the bug?
+            3. If the top candidate is refactoring, cleanup, or import churn, reject it
+               and inspect related commits via neighbors or ancestors instead.
+            4. Before selecting a candidate, confirm a direct causal link to the buggy
+               logic. A commit that merely exposes or triggers a pre-existing bug is
+               not the introducer.
+
+            Each candidate lists modified files and symbols (classes, methods,
+            functions). Use these to assess structural overlap with the correction.
+
+            ## Constraints
+            - Limit content to 3 calls per case. Use it to verify, not to explore.
+            - If content fails, decide with the evidence you already have.
+            - Make at least one investigation step before deciding unless a single
+              candidate is conclusive.
+            - Do not inspect all candidates exhaustively. Focus on the most plausible.
+
+            Return the full 40-character introducer SHA, or null if no justified
+            decision can be made.
             """
         )
         graph = create_react_agent(

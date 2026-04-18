@@ -35,8 +35,7 @@ class DiffRenderer:
             for hunk in value.hunks:
                 parts.append(hunk.header.rstrip("\n"))
                 parts.extend(
-                    f"{line.origin}{line.content}".rstrip("\n")
-                    for line in hunk.lines
+                    f"{line.origin}{line.content}".rstrip("\n") for line in hunk.lines
                 )
 
         return "\n".join(parts).strip()
@@ -75,8 +74,8 @@ class KnowledgeGraphTool:
         """List the top-ranked commit candidates for the prepared correction graph.
 
         Use this first to inspect the ranked search space. Each item returns one
-        candidate commit with its ordinal score, commit metadata, and the entities
-        touched by that commit.
+        candidate commit with its ordinal score, commit metadata, and the symbols
+        (classes, methods, functions) touched by that commit.
         """
         result: list[dict[str, Any]] = []
         for node in self.store.nodes("commit"):
@@ -98,8 +97,8 @@ class KnowledgeGraphTool:
         """Traverse from one commit to structurally related commit candidates.
 
         Use this to find structurally related candidate commits. Each item returns a
-        related commit together with the shared entities between the queried commit
-        and that neighbor.
+        related commit together with the shared symbols (classes, methods, functions)
+        between the queried commit and that neighbor.
         """
         result: dict[str, dict[str, Any]] = {}
         source = self.store.resolve(sha)
@@ -116,14 +115,14 @@ class KnowledgeGraphTool:
         values = list(result.values())
         scope = self._scope(source_targets)
         for item in values:
-            item["entities"] = self._entities(
+            item["symbols"] = self._entities(
                 scope,
                 self._scope(self._targets(self.store.resolve(cast(str, item["sha"])))),
             )
         values.sort(
             key=lambda value: (
                 -value["score"],
-                -self._precision(cast(list[str], value["entities"])),
+                -self._precision(cast(list[str], value["symbols"])),
                 -self.store.payload(value["sha"])["timestamp"].timestamp(),
                 value["sha"],
             )
@@ -131,10 +130,11 @@ class KnowledgeGraphTool:
         return values
 
     def meta(self, node: str) -> dict[str, Any]:
-        """Inspect one commit or code entity.
+        """Inspect one commit or code symbol.
 
-        For commits, this returns commit metadata, the entities touched by the
-        commit, and the shared entities between the commit and the Correction.
+        For commits, this returns commit metadata, the symbols (classes, methods,
+        functions) touched by the commit, and the shared symbols between the commit
+        and the Correction.
         """
         key = self.store.resolve(node)
         kind = self.store.kind(key)
@@ -188,7 +188,7 @@ class KnowledgeGraphTool:
                 "message": payload["message"],
                 "timestamp": self._timestamp(payload["timestamp"]),
                 "files": self._files(payload),
-                "entities": self._touched(key),
+                "symbols": self._touched(key),
                 "overlap": self._overlap(key),
             }
 
@@ -211,7 +211,7 @@ class KnowledgeGraphTool:
             "message": payload["message"],
             "timestamp": self._timestamp(payload["timestamp"]),
             "files": self._files(payload),
-            "entities": self._touched(key),
+            "symbols": self._touched(key),
         }
 
     def _category(self, payload: dict[str, Any]) -> str:
@@ -224,7 +224,7 @@ class KnowledgeGraphTool:
         return list(cast(tuple[str, ...] | list[str], payload.get("files", ())))
 
     def _touched(self, key: str) -> list[str]:
-        result: set[str] = set()
+        grouped: dict[str, set[str]] = {}
         for edge in ("ADD", "EDIT", "DELETE"):
             for target in self.store.targets(key, edge):
                 if target.startswith("file:"):
@@ -232,8 +232,27 @@ class KnowledgeGraphTool:
                 value = self.store.payload(target)
                 if value.get("urn") == "entity:program":
                     continue
-                result.add(":".join(self._path(target)))
-        return sorted(result)
+                path = str(value["path"])
+                name = self._symbol(value)
+                if name is not None:
+                    grouped.setdefault(path, set()).add(name)
+        return self._grouped(grouped)[:10]
+
+    @staticmethod
+    def _symbol(payload: dict[str, Any]) -> str | None:
+        urn = str(payload.get("urn", "")).removeprefix("entity:")
+        if not urn or urn == "program":
+            return None
+        parts = urn.split(":")
+        return ".".join(part.split("=", 1)[-1] for part in parts)
+
+    @staticmethod
+    def _grouped(grouped: dict[str, set[str]]) -> list[str]:
+        result: list[str] = []
+        for path in sorted(grouped):
+            names = sorted(grouped[path])
+            result.append(f"{path}: {', '.join(names)}")
+        return result
 
     def _overlap(self, key: str) -> list[str]:
         if self.store.after is None:
@@ -290,9 +309,20 @@ class KnowledgeGraphTool:
         source: set[tuple[str, ...]],
         target: set[tuple[str, ...]],
     ) -> list[str]:
-        nodes = sorted(":".join(value) for value in self._trim(source & target))
-        items = [value for value in nodes if ":" in value]
-        return items or nodes
+        trimmed = self._trim(source & target)
+        grouped: dict[str, set[str]] = {}
+        file_only: list[str] = []
+        for tup in trimmed:
+            if len(tup) == 1:
+                file_only.append(tup[0].removeprefix("file="))
+            else:
+                path = tup[0].removeprefix("file=")
+                name = ".".join(
+                    part.split("=", 1)[-1] for part in tup[1:]
+                )
+                grouped.setdefault(path, set()).add(name)
+        items = self._grouped(grouped)
+        return items or sorted(file_only)
 
     def _precision(self, values: list[str]) -> int:
         return 1 if any(":" in value for value in values) else 0
@@ -456,9 +486,7 @@ class RepositoryTool:
         commit = self._resolve(commit)
         raw = self._repository.blame(path, commit, [(start, end)])
         try:
-            data = self._repository.blob(commit, path).decode(
-                "utf-8", errors="replace"
-            )
+            data = self._repository.blob(commit, path).decode("utf-8", errors="replace")
         except (FileNotFoundError, ValueError):
             data = ""
         source = data.splitlines()
@@ -476,11 +504,7 @@ class RepositoryTool:
             if sha not in commits:
                 commits[sha] = self._repository.meta(sha).message.splitlines()[0]
             for _ in range(span):
-                code = (
-                    source[cursor - 1]
-                    if 0 < cursor <= len(source)
-                    else ""
-                )
+                code = source[cursor - 1] if 0 < cursor <= len(source) else ""
                 lines.append(f"L{cursor}: {sha} | {origin_path} | {code}")
                 cursor += 1
 

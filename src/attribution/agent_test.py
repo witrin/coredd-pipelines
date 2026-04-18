@@ -392,27 +392,27 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                     "type": "blame",
                     "score": 1.0,
                     "message": "foo",
-                    "timestamp": datetime(2024, 1, 3, tzinfo=timezone.utc),
+                    "timestamp": "2024-01-03T00:00:00+00:00",
                     "files": ["a.py"],
-                    "entities": ["file=a.py:function=foo"],
+                    "symbols": ["a.py: foo"],
                 },
                 {
                     "sha": "bar",
                     "type": "blame-ancestor",
                     "score": 0.6,
                     "message": "bar",
-                    "timestamp": datetime(2024, 1, 2, tzinfo=timezone.utc),
+                    "timestamp": "2024-01-02T00:00:00+00:00",
                     "files": ["a.py"],
-                    "entities": ["file=a.py:function=foo"],
+                    "symbols": ["a.py: foo"],
                 },
                 {
                     "sha": "baz",
                     "type": "correction-ancestor",
                     "score": 0.3,
                     "message": "baz",
-                    "timestamp": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                    "timestamp": "2024-01-01T00:00:00+00:00",
                     "files": ["b.py"],
-                    "entities": [],
+                    "symbols": [],
                 },
             ],
         )
@@ -472,10 +472,10 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                 "sha": "bar",
                 "type": "blame-ancestor",
                 "message": "bar",
-                "timestamp": datetime(2024, 1, 2, tzinfo=timezone.utc),
+                "timestamp": "2024-01-02T00:00:00+00:00",
                 "files": ["a.py"],
-                "entities": ["file=a.py:function=foo"],
-                "overlap": ["file=a.py:function=foo"],
+                "symbols": ["a.py: foo"],
+                "overlap": ["a.py: foo"],
             },
         )
         self.assertNotIn("payload", agent.meta("bar"))
@@ -538,18 +538,18 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                     "type": "blame-ancestor",
                     "score": 0.6,
                     "message": "bar",
-                    "timestamp": datetime(2024, 1, 7, tzinfo=timezone.utc),
+                    "timestamp": "2024-01-07T00:00:00+00:00",
                     "files": [],
-                    "entities": ["file=a.py:function=foo"],
+                    "symbols": ["a.py: foo"],
                 },
                 {
                     "sha": "baz",
                     "type": "correction-ancestor",
                     "score": 0.3,
                     "message": "baz",
-                    "timestamp": datetime(2024, 1, 4, tzinfo=timezone.utc),
+                    "timestamp": "2024-01-04T00:00:00+00:00",
                     "files": [],
-                    "entities": ["file=a.py"],
+                    "symbols": ["a.py"],
                 },
             ],
         )
@@ -617,9 +617,9 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                     "type": "blame-ancestor",
                     "score": 0.6,
                     "message": "bar",
-                    "timestamp": datetime(2024, 1, 7, tzinfo=timezone.utc),
+                    "timestamp": "2024-01-07T00:00:00+00:00",
                     "files": [],
-                    "entities": ["file=a.py:class=Outer"],
+                    "symbols": ["a.py: Outer"],
                 },
             ],
         )
@@ -673,9 +673,9 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                     "type": "blame",
                     "score": 1.0,
                     "message": "foo",
-                    "timestamp": datetime(2024, 1, 3, tzinfo=timezone.utc),
+                    "timestamp": "2024-01-03T00:00:00+00:00",
                     "files": ["a.py"],
-                    "entities": ["file=a.py:class=Outer:method=bar"],
+                    "symbols": ["a.py: Outer.bar"],
                 },
             ],
         )
@@ -735,9 +735,9 @@ class TestKnowledgeGraphTool(unittest.TestCase):
         self.assertTrue(all(isinstance(tool, BaseTool) for tool in tools))
         self.assertIn("top-ranked commit candidates", tools[0].description)
         self.assertIn("touched by that commit", tools[0].description)
-        self.assertIn("shared entities", tools[1].description)
-        self.assertIn("Inspect one commit or code entity", tools[2].description)
-        self.assertIn("shared entities between the commit and the Correction", tools[2].description)
+        self.assertIn("shared symbols", tools[1].description)
+        self.assertIn("Inspect one commit or code symbol", tools[2].description)
+        self.assertIn("shared symbols between the commit", tools[2].description)
         self.assertIn("It returns the commit diff", tools[3].description)
 
     def test_budget(self) -> None:
