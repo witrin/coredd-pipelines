@@ -3284,7 +3284,7 @@ class TestLLM4SZZGraph(unittest.TestCase):
         result = node.run({"correction": correction})
 
         meta.assert_called_once_with(repository, "after-sha")
-        diff.assert_called_once_with(repository, "base-sha", "after-sha")
+        diff.assert_called_once_with(repository, "base-sha", "after-sha", context=3)
         manifest.assert_called_once_with(repository, "base-sha", "after-sha")
         self.assertEqual(
             result,
@@ -3433,8 +3433,8 @@ class TestLLM4SZZGraph(unittest.TestCase):
         self.assertIn("trace", factory_kwargs["prompt"])
         self.assertIn("full 40-character", factory_kwargs["prompt"])
         invoke_args, invoke_kwargs = agent.invoke.call_args
-        self.assertEqual(invoke_kwargs, {"config": {"recursion_limit": 50}})
-        self.assertEqual(invoke_args[0]["remaining_steps"], 50)
+        self.assertEqual(invoke_kwargs, {"config": {"recursion_limit": 30}})
+        self.assertEqual(invoke_args[0]["remaining_steps"], 30)
         self.assertEqual(len(invoke_args[0]["messages"]), 1)
         self.assertIsInstance(invoke_args[0]["messages"][0], HumanMessage)
         self.assertEqual(

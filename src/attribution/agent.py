@@ -317,9 +317,7 @@ class KnowledgeGraphTool:
                 file_only.append(tup[0].removeprefix("file="))
             else:
                 path = tup[0].removeprefix("file=")
-                name = ".".join(
-                    part.split("=", 1)[-1] for part in tup[1:]
-                )
+                name = ".".join(part.split("=", 1)[-1] for part in tup[1:])
                 grouped.setdefault(path, set()).add(name)
         items = self._grouped(grouped)
         return items or sorted(file_only)
@@ -458,7 +456,7 @@ class RepositoryTool:
         patch = ""
         if parents:
             diff = self._repository.diff(parents[0], commit)
-            patch = self._renderer.render(diff, path)
+            patch = self._compress_patch(self._renderer.render(diff, path))
         return {
             "sha": commit,
             "message": meta.message,
@@ -503,31 +501,35 @@ class RepositoryTool:
             span = segment_end - segment_start + 1
             if sha not in commits:
                 commits[sha] = self._repository.meta(sha).message.splitlines()[0]
+            short = sha[:12]
             for _ in range(span):
                 code = source[cursor - 1] if 0 < cursor <= len(source) else ""
-                lines.append(f"L{cursor}: {sha} | {origin_path} | {code}")
+                lines.append(f"L{cursor}: {short} | {origin_path} | {code}")
                 cursor += 1
 
-        return {"blame": "\n".join(lines), "commits": commits}
+        return {"blame": "\n".join(self._compress_blame(lines)), "commits": commits}
 
     def pickaxe(
         self,
         needle: str,
-        path: str,
+        path: str | None = None,
         max: int = 20,
     ) -> list[dict[str, Any]]:
-        """Find commits that added or removed occurrences of ``needle`` in ``path``.
+        """Find commits that added or removed occurrences of ``needle``.
 
-        Walks the file history reachable from the correction commit (exclusive)
-        with rename tracking and emits at most ``max`` commits, newest first,
-        where the occurrence count of ``needle`` changed between the parent and
-        the commit.
+        When ``path`` is given, walks the file history of that path from the
+        correction commit backward with rename tracking.  When ``path`` is
+        ``None``, searches repository-wide across all files.
+
+        Emits at most ``max`` commits, newest first, where the occurrence count
+        of ``needle`` changed between the parent and the commit.
         """
         self._consume()
         if not needle:
             raise ValueError("pickaxe needle must not be empty.")
-        if not path:
-            raise ValueError("pickaxe path must not be empty.")
+
+        if path is None:
+            return self._pickaxe_repository(needle, max)
 
         walker = VersionControlPathWalker(
             self._repository.handle,
@@ -662,6 +664,45 @@ class RepositoryTool:
             "delta": delta,
         }
 
+    def _pickaxe_repository(self, needle: str, max: int) -> list[dict[str, Any]]:
+        repo = self._repository.handle
+        start = repo.revparse_single(self._after)
+        encoded = needle.encode("utf-8")
+        result: list[dict[str, Any]] = []
+        depth = max * 5 + 5
+
+        for i, commit in enumerate(repo.walk(start.id, pygit2.GIT_SORT_TIME)):
+            if i >= depth:
+                break
+            sha = str(commit.id)
+            if sha == self._after:
+                continue
+            if len(commit.parents) != 1:
+                continue
+
+            parent = commit.parents[0]
+            diff = repo.diff(parent.tree, commit.tree, context_lines=0)
+            delta = 0
+            for patch in diff:
+                after = 0
+                before = 0
+                if patch.delta.new_file.path is not None:
+                    blob = self._safe_blob(sha, patch.delta.new_file.path)
+                    if blob is not None:
+                        after = blob.count(encoded)
+                if patch.delta.old_file.path is not None:
+                    blob = self._safe_blob(str(parent.id), patch.delta.old_file.path)
+                    if blob is not None:
+                        before = blob.count(encoded)
+                delta += after - before
+
+            if delta == 0:
+                continue
+            result.append(self._pickaxe_entry(sha, delta))
+            if len(result) >= max:
+                break
+        return result
+
     def _trace_match(
         self,
         entry: Any,
@@ -724,6 +765,36 @@ class RepositoryTool:
         if path.endswith(".java"):
             return "java"
         return None
+
+    @staticmethod
+    def _compress_patch(patch: str, max_lines: int = 80) -> str:
+        lines = patch.split("\n")
+        kept: list[str] = []
+        for line in lines:
+            if (
+                line.startswith("diff --git")
+                or line.startswith("---")
+                or line.startswith("+++")
+                or line.startswith("@@")
+                or line.startswith("+")
+                or line.startswith("-")
+            ):
+                kept.append(line)
+        if len(kept) > max_lines:
+            half = max_lines // 2
+            omitted = len(kept) - max_lines
+            kept = (
+                kept[:half] + [f"... [{omitted} diff lines omitted] ..."] + kept[-half:]
+            )
+        return "\n".join(kept)
+
+    @staticmethod
+    def _compress_blame(lines: list[str], max_lines: int = 150) -> list[str]:
+        if len(lines) <= max_lines:
+            return lines
+        half = max_lines // 2
+        omitted = len(lines) - max_lines
+        return lines[:half] + [f"... [{omitted} lines omitted] ..."] + lines[-half:]
 
     def _consume(self) -> None:
         if self._reads >= self._budget:

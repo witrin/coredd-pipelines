@@ -309,7 +309,7 @@ class RepositorySeedNode:
         if message:
             seed.append({"title": "Commit Message", "body": message})
 
-        diff = self._repository.diff(base, after)
+        diff = self._repository.diff(base, after, context=3)
         patch = self._renderer.render(diff)
         if patch:
             seed.append({"title": "Fix Diff", "body": patch})
@@ -352,7 +352,7 @@ class RepositorySearchNode:
         self,
         input: Seed,
         *,
-        steps: int = 50,
+        steps: int = 30,
     ) -> SearchOutput:
         base = input.get("base")
         after = input.get("after")
@@ -399,20 +399,31 @@ class RepositorySearchNode:
             1. Start with blame on the lines the fix modified or removed at the parent of the
                correction commit. For omission-style fixes that only add lines, blame the
                surrounding context or the function signature instead.
-            2. For each distinct candidate returned by blame, call show to classify it. Treat
+            2. When blame returns multiple distinct commits, call show on at least the most
+               frequent commit and the commit directly on the buggy line. If they are the
+               same commit, one show call suffices.
+            3. For each distinct candidate returned by blame, call show to classify it. Treat
                refactorings, cherry-picks, merges, formatting, and other non-semantic changes
                as transparent and re-blame at the candidate's parent to trace further back.
-            3. Before selecting a candidate, confirm a direct causal link to the buggy logic.
+            4. If blame traces back to the repository's initial commit (a root commit with no
+               parents), treat it as a valid bug-introducing commit. Do not continue searching
+               for a newer commit unless contrary evidence is present.
+            5. If a commit moves or adds an entire driver, subsystem, or module into the
+               repository, treat that commit as the introducer rather than tracing further
+               back into the original source.
+            6. Before selecting a candidate, confirm a direct causal link to the buggy logic.
                A commit that merely exposes or triggers a pre-existing bug is not the
                introducer.
 
-            Use pickaxe to follow a symbol across renames or cross-file changes. Use trace to
-            track a specific entity's history via tree-sitter. Use grep to inspect the
-            codebase at a snapshot. Do not exhaust the tool budget exploring alternatives once
-            you have a confirmed candidate.
+            Use pickaxe to find commits that added or removed a symbol. Without a path it
+            searches repository-wide; with a path it follows the file's rename history. Use
+            trace to track a specific entity's history via tree-sitter. Use grep to inspect
+            the codebase at a snapshot. Do not exhaust the tool budget exploring alternatives
+            once you have a confirmed candidate.
 
-            Return the full 40-character introducer SHA, or null if no justified decision can
-            be made.
+            Return the full 40-character introducer SHA. Once evidence points to a candidate,
+            return it — uncertainty alone is not a reason to return null. Return null only if
+            no evidence was found at all.
             """
         )
         graph = create_react_agent(

@@ -827,14 +827,14 @@ class TestRepositoryTool(unittest.TestCase):
             first = tool.blame("foo.py", after, 1, 1)
             self.assertEqual(
                 first["blame"],
-                f"L1: {base} | foo.py | alpha",
+                f"L1: {base[:12]} | foo.py | alpha",
             )
             self.assertEqual(first["commits"], {base: "base"})
 
             second = tool.blame("foo.py", after, 2, 2)
             self.assertEqual(
                 second["blame"],
-                f"L2: {after} | foo.py | gamma",
+                f"L2: {after[:12]} | foo.py | gamma",
             )
             self.assertEqual(second["commits"], {after: "replace beta"})
 
@@ -973,6 +973,94 @@ class TestRepositoryTool(unittest.TestCase):
             tool.pickaxe("needle", path="foo.py")
             with self.assertRaises(ValueError):
                 tool.pickaxe("needle", path="foo.py")
+
+    def test_pickaxe_without_path_searches_across_files(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"a.py": "pass\n", "b.py": "pass\n"})
+            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree({"a.py": "token = 1\n", "b.py": "pass\n"})
+            introduce = fixture.commit(tree, [base], "add token in a")
+            tree = fixture.tree({"a.py": "token = 1\n", "b.py": "token = 2\n"})
+            after = fixture.commit(tree, [introduce], "add token in b")
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            result = tool.pickaxe("token", path=None)
+            shas = {entry["sha"] for entry in result}
+            self.assertIn(introduce, shas)
+            self.assertNotIn(after, shas)
+
+    def test_pickaxe_without_path_skips_correction(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "pass\n"})
+            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree({"foo.py": "token\n"})
+            after = fixture.commit(tree, [base], "correction")
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            result = tool.pickaxe("token", path=None)
+            shas = {entry["sha"] for entry in result}
+            self.assertNotIn(after, shas)
+
+    def test_show_compresses_large_patch(self) -> None:
+        lines = ["+" + f"line{i}" for i in range(120)]
+        patch = "\n".join(
+            ["diff --git a/f.py b/f.py", "--- a/f.py", "+++ b/f.py", "@@ -0,0 +1,120 @@"]
+            + lines
+        )
+        compressed = RepositoryTool._compress_patch(patch)
+        self.assertIn("diff lines omitted", compressed)
+        output_lines = compressed.split("\n")
+        self.assertLessEqual(len(output_lines), 85)
+
+    def test_show_preserves_short_patch(self) -> None:
+        patch = "\n".join([
+            "diff --git a/f.py b/f.py",
+            "--- a/f.py",
+            "+++ b/f.py",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+        ])
+        compressed = RepositoryTool._compress_patch(patch)
+        self.assertNotIn("omitted", compressed)
+        self.assertIn("-old", compressed)
+        self.assertIn("+new", compressed)
+
+    def test_blame_compresses_long_output(self) -> None:
+        lines = [f"L{i}: abc123 | foo.py | code" for i in range(200)]
+        compressed = RepositoryTool._compress_blame(lines)
+        self.assertLess(len(compressed), 200)
+        self.assertTrue(any("omitted" in line for line in compressed))
+
+    def test_blame_preserves_short_output(self) -> None:
+        lines = [f"L{i}: abc123 | foo.py | code" for i in range(10)]
+        compressed = RepositoryTool._compress_blame(lines)
+        self.assertEqual(compressed, lines)
+
+    def test_blame_uses_short_shas(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "alpha\n"})
+            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree({"foo.py": "beta\n"})
+            after = fixture.commit(tree, [base], "edit")
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            result = tool.blame("foo.py", commit=base, start=1, end=1)
+            blame_text = result["blame"]
+            for line in blame_text.splitlines():
+                if line.startswith("L") and "|" in line:
+                    sha_part = line.split(":")[1].strip().split(" |")[0].strip()
+                    if sha_part != "?":
+                        self.assertEqual(len(sha_part), 12)
 
     def test_factory_creates_tool_bound_to_after(self) -> None:
         with HistoryFixture() as fixture:
