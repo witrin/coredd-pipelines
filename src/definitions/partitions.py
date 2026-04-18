@@ -228,3 +228,14 @@ ingest_source_partition = dg.DynamicPartitionsDefinition(name="ingest_source")
 ingest_validation_sources_partition = dg.DynamicPartitionsDefinition(
     name="ingest_validation_sources"
 )
+
+attribution_run_partition = dg.StaticPartitionsDefinition(
+    [str(i) for i in range(1, 11)]
+)
+
+attribution_evaluation_partition = dg.MultiPartitionsDefinition(
+    {
+        "repository": ingest_validation_sources_partition,
+        "run": attribution_run_partition,
+    }
+)

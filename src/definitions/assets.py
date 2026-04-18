@@ -1,3 +1,4 @@
+import os
 import json
 import base64
 import tarfile
@@ -9,8 +10,23 @@ from pathlib import Path
 from components.decorator import asset
 from components.infrastructure import GithubResource
 from benchmark.definitions import partitions
+from benchmark.attribution.agent import KnowledgeGraphToolFactory, RepositoryToolFactory
+from benchmark.attribution.evaluation import TraceMonitor
+from benchmark.attribution.graph import AgenticSZZGraphBuilder, AgentSZZGraphBuilder
 from benchmark.attribution.history import VersionControl, VersionControlSnapshot
 from benchmark.attribution.knowledge import KnowledgeGraphBuilder, KnowledgeGraphStore
+from benchmark.attribution.search import (
+    KnowledgeGraphSearchNode,
+    KnowledgeGraphSeedNode,
+    RepositorySearchNode,
+    RepositorySeedNode,
+)
+from benchmark.attribution.validation import (
+    KnowledgeGraphSetup,
+    RepositorySetup,
+    ValidationCase,
+    ValidationExecutor,
+)
 from benchmark.scope.cohort import ChangeCollector, IssueCollector
 from benchmark.attribution.ingestion import ValidationExtractor
 from benchmark.scope.ingestion import ChangeExtractor, IssueExtractor, SourceExtractor
@@ -22,6 +38,7 @@ import dagster as dg
 import networkx as nx
 from google.cloud import bigquery
 from github.GithubException import UnknownObjectException
+from langchain_openai import ChatOpenAI
 import pygit2
 
 
@@ -1001,3 +1018,284 @@ def ingest_validation_context_index(
     context.log.info("Indexed %d validation context cases.", table.num_rows)
 
     return table
+
+
+class AttributionEvaluationConfig(dg.Config):
+    model: str = "MiniMaxAI/MiniMax-M2.7"
+    temperature: float = 0.0
+    steps: int = 50
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    partitions_def=partitions.attribution_evaluation_partition,
+    group_name="attribution",
+    pool="default",
+    ins={
+        "ingest_validation_context_index": dg.AssetIn(
+            partition_mapping=dg.MultiToSingleDimensionPartitionMapping(
+                partition_dimension_name="repository",
+            )
+        ),
+        "ingest_validation_context": dg.AssetIn(
+            partition_mapping=dg.MultiToSingleDimensionPartitionMapping(
+                partition_dimension_name="repository",
+            )
+        ),
+    },
+)
+def attribution_agentic_szz_evaluation(
+    context: dg.AssetExecutionContext,
+    config: AttributionEvaluationConfig,
+    ingest_validation_context_index: pa.Table,
+    ingest_validation_context,
+) -> pa.Table:
+    """Evaluate the AgenticSZZ (knowledge-graph-backed) agent on validation cases."""
+    import polars as pl
+
+    keys = context.partition_key.keys_by_dimension
+    repository_key = keys["repository"]
+
+    rows = pl.from_arrow(ingest_validation_context_index)
+    partition_cases = rows.filter(pl.col("partition") == repository_key)
+
+    cases = [
+        ValidationCase(
+            repository=item["repository"],
+            correction=item["correction"],
+            partition=item["partition"],
+        )
+        for item in partition_cases.iter_rows(named=True)
+    ]
+    defects = {
+        (item["repository"], item["correction"]): item["defects"]
+        for item in partition_cases.iter_rows(named=True)
+    }
+
+    context.log.info(
+        "Evaluating %d cases for partition %s (run %s)",
+        len(cases),
+        repository_key,
+        keys["run"],
+    )
+
+    archive = Path(tempfile.mktemp(suffix=".tar.gz"))
+    with open(archive, "wb") as file:
+        for chunk in iter(lambda: ingest_validation_context.read(8 * 1024 * 1024), b""):
+            file.write(chunk)
+
+    llm = ChatOpenAI(
+        model=config.model,
+        api_key=os.getenv("TOGETHER_AI_API_KEY"),
+        base_url="https://api.together.xyz/v1",
+        temperature=config.temperature,
+    )
+
+    tables: list[pa.Table] = []
+
+    for case in cases:
+        defect = defects[(case.repository, case.correction)][0]
+        setup = KnowledgeGraphSetup.build(case, defect=defect, context=archive)
+
+        class _EmptyCache:
+            def resolve(self, correction):
+                raise KeyError(correction)
+
+        [run] = ValidationExecutor(
+            candidate=AgenticSZZGraphBuilder(
+                seed=lambda repository: KnowledgeGraphSeedNode(repository=repository),
+                search=lambda repository: KnowledgeGraphSearchNode(
+                    tool=KnowledgeGraphToolFactory(
+                        repository=repository,
+                        source=setup.source,
+                        filter=setup.redact,
+                    ),
+                    llm=llm,
+                ),
+                steps=config.steps,
+            ),
+            cache=_EmptyCache(),
+            repository=lambda _: setup.snapshot,
+            hook=TraceMonitor(sink=context.log.info),
+        ).run([case])
+
+        if run.trace is not None:
+            run.trace.metadata["correction"] = case.correction
+            run.trace.metadata["repository"] = case.repository
+            table = run.trace.to_table()
+            table = table.append_column(
+                "repository",
+                pa.array([case.repository] * table.num_rows, type=pa.string()),
+            )
+            table = table.append_column(
+                "correction",
+                pa.array([case.correction] * table.num_rows, type=pa.string()),
+            )
+            tables.append(table)
+
+        context.log.info(
+            "Case %s/%s: %s",
+            case.repository,
+            case.correction[:8],
+            "error" if run.error else "ok",
+        )
+
+    if not tables:
+        return pa.table(
+            {
+                "trace": pa.array([], type=pa.string()),
+                "sequence": pa.array([], type=pa.int64()),
+                "timestamp": pa.array([], type=pa.timestamp("us", tz="UTC")),
+                "node": pa.array([], type=pa.string()),
+                "span": pa.array([], type=pa.string()),
+                "parent": pa.array([], type=pa.string()),
+                "event": pa.array([], type=pa.string()),
+                "payload": pa.array([], type=pa.string()),
+                "repository": pa.array([], type=pa.string()),
+                "correction": pa.array([], type=pa.string()),
+            }
+        )
+
+    return pa.concat_tables(tables, promote_options="permissive")
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    partitions_def=partitions.attribution_evaluation_partition,
+    group_name="attribution",
+    pool="default",
+    ins={
+        "ingest_validation_context_index": dg.AssetIn(
+            partition_mapping=dg.MultiToSingleDimensionPartitionMapping(
+                partition_dimension_name="repository",
+            )
+        ),
+        "ingest_validation_context": dg.AssetIn(
+            partition_mapping=dg.MultiToSingleDimensionPartitionMapping(
+                partition_dimension_name="repository",
+            )
+        ),
+        "ingest_validation_sources": dg.AssetIn(
+            partition_mapping=dg.MultiToSingleDimensionPartitionMapping(
+                partition_dimension_name="repository",
+            )
+        ),
+    },
+)
+def attribution_agent_szz_evaluation(
+    context: dg.AssetExecutionContext,
+    config: AttributionEvaluationConfig,
+    ingest_validation_context_index: pa.Table,
+    ingest_validation_context,
+    ingest_validation_sources,
+) -> pa.Table:
+    """Evaluate the AgentSZZ (repository-native) agent on validation cases."""
+    import polars as pl
+
+    keys = context.partition_key.keys_by_dimension
+    repository_key = keys["repository"]
+
+    rows = pl.from_arrow(ingest_validation_context_index)
+    partition_cases = rows.filter(pl.col("partition") == repository_key)
+
+    cases = [
+        ValidationCase(
+            repository=item["repository"],
+            correction=item["correction"],
+            partition=item["partition"],
+        )
+        for item in partition_cases.iter_rows(named=True)
+    ]
+    defects = {
+        (item["repository"], item["correction"]): item["defects"]
+        for item in partition_cases.iter_rows(named=True)
+    }
+
+    context.log.info(
+        "Evaluating %d cases for partition %s (run %s)",
+        len(cases),
+        repository_key,
+        keys["run"],
+    )
+
+    context_archive = Path(tempfile.mktemp(suffix=".tar.gz"))
+    with open(context_archive, "wb") as file:
+        for chunk in iter(lambda: ingest_validation_context.read(8 * 1024 * 1024), b""):
+            file.write(chunk)
+
+    sources_archive = Path(tempfile.mktemp(suffix=".tar.gz"))
+    with open(sources_archive, "wb") as file:
+        for chunk in iter(lambda: ingest_validation_sources.read(8 * 1024 * 1024), b""):
+            file.write(chunk)
+
+    llm = ChatOpenAI(
+        model=config.model,
+        api_key=os.getenv("TOGETHER_AI_API_KEY"),
+        base_url="https://api.together.xyz/v1",
+        temperature=config.temperature,
+    )
+
+    tables: list[pa.Table] = []
+
+    for case in cases:
+        defect = defects[(case.repository, case.correction)][0]
+        setup = RepositorySetup.build(
+            case, defect=defect, context=context_archive, sources=sources_archive,
+        )
+
+        class _EmptyCache:
+            def resolve(self, correction):
+                raise KeyError(correction)
+
+        [run] = ValidationExecutor(
+            candidate=AgentSZZGraphBuilder(
+                seed=lambda repository: RepositorySeedNode(repository=repository),
+                search=lambda repository: RepositorySearchNode(
+                    tool=RepositoryToolFactory(repository=repository),
+                    llm=llm,
+                ),
+                steps=config.steps,
+            ),
+            cache=_EmptyCache(),
+            repository=lambda _: setup.repository,
+            hook=TraceMonitor(sink=context.log.info),
+        ).run([case])
+
+        if run.trace is not None:
+            run.trace.metadata["correction"] = case.correction
+            run.trace.metadata["repository"] = case.repository
+            table = run.trace.to_table()
+            table = table.append_column(
+                "repository",
+                pa.array([case.repository] * table.num_rows, type=pa.string()),
+            )
+            table = table.append_column(
+                "correction",
+                pa.array([case.correction] * table.num_rows, type=pa.string()),
+            )
+            tables.append(table)
+
+        context.log.info(
+            "Case %s/%s: %s",
+            case.repository,
+            case.correction[:8],
+            "error" if run.error else "ok",
+        )
+
+    if not tables:
+        return pa.table(
+            {
+                "trace": pa.array([], type=pa.string()),
+                "sequence": pa.array([], type=pa.int64()),
+                "timestamp": pa.array([], type=pa.timestamp("us", tz="UTC")),
+                "node": pa.array([], type=pa.string()),
+                "span": pa.array([], type=pa.string()),
+                "parent": pa.array([], type=pa.string()),
+                "event": pa.array([], type=pa.string()),
+                "payload": pa.array([], type=pa.string()),
+                "repository": pa.array([], type=pa.string()),
+                "correction": pa.array([], type=pa.string()),
+            }
+        )
+
+    return pa.concat_tables(tables, promote_options="permissive")

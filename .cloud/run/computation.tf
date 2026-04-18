@@ -30,7 +30,8 @@ locals {
       data.google_secret_manager_secret_version.github_dagster_client_id.secret,
       data.google_secret_manager_secret_version.github_dagster_client_secret.secret,
       data.google_secret_manager_secret_version.github_guard_token.secret,
-      data.google_secret_manager_secret_version.github_dagster_api_secret.secret
+      data.google_secret_manager_secret_version.github_dagster_api_secret.secret,
+      data.google_secret_manager_secret_version.together_ai_api_key.secret
     ]
     compute_default = [
       data.google_secret_manager_secret_version.pipelines_database_password.secret,
