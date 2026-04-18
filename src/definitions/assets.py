@@ -1063,14 +1063,11 @@ def attribution_agentic_szz_evaluation(
         ValidationCase(
             repository=item["repository"],
             correction=item["correction"],
+            defects=tuple(item["defects"] or ()),
             partition=item["partition"],
         )
         for item in partition_cases.iter_rows(named=True)
     ]
-    defects = {
-        (item["repository"], item["correction"]): item["defects"]
-        for item in partition_cases.iter_rows(named=True)
-    }
 
     context.log.info(
         "Evaluating %d cases for partition %s (run %s)",
@@ -1094,8 +1091,7 @@ def attribution_agentic_szz_evaluation(
     tables: list[pa.Table] = []
 
     for case in cases:
-        defect = defects[(case.repository, case.correction)][0]
-        setup = KnowledgeGraphSetup.build(case, defect=defect, context=archive)
+        setup = KnowledgeGraphSetup.build(case, context=archive)
 
         class _EmptyCache:
             def resolve(self, correction):
@@ -1108,7 +1104,7 @@ def attribution_agentic_szz_evaluation(
                     tool=KnowledgeGraphToolFactory(
                         repository=repository,
                         source=setup.source,
-                        filter=setup.redact,
+                        filter=setup.redaction,
                     ),
                     llm=llm,
                 ),
@@ -1202,14 +1198,11 @@ def attribution_agent_szz_evaluation(
         ValidationCase(
             repository=item["repository"],
             correction=item["correction"],
+            defects=tuple(item["defects"] or ()),
             partition=item["partition"],
         )
         for item in partition_cases.iter_rows(named=True)
     ]
-    defects = {
-        (item["repository"], item["correction"]): item["defects"]
-        for item in partition_cases.iter_rows(named=True)
-    }
 
     context.log.info(
         "Evaluating %d cases for partition %s (run %s)",
@@ -1238,9 +1231,8 @@ def attribution_agent_szz_evaluation(
     tables: list[pa.Table] = []
 
     for case in cases:
-        defect = defects[(case.repository, case.correction)][0]
         setup = RepositorySetup.build(
-            case, defect=defect, context=context_archive, sources=sources_archive,
+            case, context=context_archive, sources=sources_archive,
         )
 
         class _EmptyCache:

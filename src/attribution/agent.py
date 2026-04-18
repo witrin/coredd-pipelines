@@ -389,7 +389,7 @@ class KnowledgeGraphToolFactory:
         self,
         repository: VersionControl,
         source: KnowledgeGraphBuilder | Path,
-        filter: Callable[[str, str], str] | None = None,
+        filter: Callable[[str, str, str | None], str] | None = None,
     ) -> None:
         self._repository = repository
         self._source = source

@@ -373,3 +373,15 @@ result = graph.invoke({"correction": correction}, trace=trace)
 events = list(trace.events())
 trace_table = trace.to_table()
 ```
+
+## Commit-Message Evaluation Policy
+
+The default setting in this project is not code-only.
+Commit messages are treated as legitimate evidence because they are part of the normal repository context and likely matter for realistic attribution performance.
+This is also consistent with Rosa et al., whose GitHub dataset is derived from developer-authored commit messages that explicitly document the bug-inducing commit.
+
+Accordingly, the preferred policy is targeted, case-specific redaction of direct leaks in the bug-fixing commit, rather than broad sanitization across all commit messages.
+This is closer to the `Agents for SZZ` setup than to the more aggressive global sanitization used by `AgenticSZZ`.
+
+A code-only setting is still useful, but it should be treated as a separate ablation.
+If the goal is truly code-only evaluation, commit messages should be removed entirely rather than partially sanitized.

@@ -24,6 +24,7 @@ from benchmark.attribution.tracing import Trace
 class ValidationCase:
     repository: str
     correction: str
+    defects: tuple[str, ...] = ()
     partition: str | None = None
 
 
@@ -32,6 +33,173 @@ class ValidationRun:
     error: str | None
     trace: Trace | None
     output: AttributionResult | None
+
+
+class ValidationRedaction:
+    """Base redaction policy for validation inputs.
+
+    Subclasses can override ``message`` to sanitize commit messages while
+    leaving all other metadata kinds untouched by default.
+    """
+
+    def __call__(
+        self,
+        kind: str,
+        value: str,
+        identifier: str | None = None,
+    ) -> str:
+        return self.redact(kind, value, identifier)
+
+    def redact(
+        self,
+        kind: str,
+        value: str,
+        identifier: str | None = None,
+    ) -> str:
+        if kind != "message":
+            return value
+        return self.message(value, identifier)
+
+    def message(
+        self,
+        value: str,
+        identifier: str | None = None,
+    ) -> str:
+        return value
+
+
+class GitHubRedaction(ValidationRedaction):
+    """Case-aware validation redaction for GitHub-style commit metadata.
+
+    Applies strict reference filtering only to the configured correction
+    commit message while leaving other commit messages unchanged.
+    """
+
+    def __init__(
+        self,
+        correction: str | None = None,
+        defects: Sequence[str] = (),
+    ) -> None:
+        self._correction = correction
+        self._defects = tuple(
+            value.lower()
+            for value in defects
+            if re.fullmatch(r"[0-9a-fA-F]{7,40}", value)
+        )
+
+    def message(
+        self,
+        value: str,
+        identifier: str | None = None,
+    ) -> str:
+        if identifier != self._correction:
+            return value
+        current = self._drop_fields(value)
+        current = self._drop_inline(current)
+        current = self._drop_number(current)
+        return self._normalize(current)
+
+    def _drop_fields(
+        self,
+        value: str,
+    ) -> str:
+        result: list[str] = []
+
+        for line in value.splitlines():
+            if self._field(line):
+                continue
+            result.append(line.rstrip())
+
+        return "\n".join(result)
+
+    def _field(
+        self,
+        line: str,
+    ) -> bool:
+        return re.match(
+            r"^\s*(Fixes|Closes|Resolves|Link):\s+.*$",
+            line,
+            flags=re.IGNORECASE,
+        ) is not None
+
+    def _drop_inline(
+        self,
+        value: str,
+    ) -> str:
+        current = re.sub(
+            r"https?://github\.com/[^/\s]+/[^/\s]+/commit/([0-9a-fA-F]{7,40})\b",
+            self._commit_url,
+            value,
+        )
+        current = re.sub(
+            r"https?://github\.com/[^/\s]+/[^/\s]+/pull/\d+/commits/([0-9a-fA-F]{7,40})\b",
+            self._commit_url,
+            current,
+        )
+        current = re.sub(
+            r"https?://github\.com/[^/\s]+/[^/\s]+/issues/\d+\b",
+            "<reference>",
+            current,
+        )
+        current = re.sub(
+            r"https?://github\.com/[^/\s]+/[^/\s]+/pull/\d+\b",
+            "<reference>",
+            current,
+        )
+        current = re.sub(
+            r"\b[Cc]ommit\s+([0-9a-fA-F]{7,40})(?:\s*\((?:\".*?\"|'.*?'|[^)]*?)\))?",
+            self._commit_ref,
+            current,
+        )
+        current = re.sub(
+            r"(?<![0-9a-fA-F])([0-9a-fA-F]{7,40})(?![0-9a-fA-F])",
+            self._sha_ref,
+            current,
+        )
+        return current
+
+    def _commit_url(
+        self,
+        match: re.Match[str],
+    ) -> str:
+        return "<reference>" if self._defect(match.group(1)) else match.group(0)
+
+    def _commit_ref(
+        self,
+        match: re.Match[str],
+    ) -> str:
+        return "<commit>" if self._defect(match.group(1)) else match.group(0)
+
+    def _sha_ref(
+        self,
+        match: re.Match[str],
+    ) -> str:
+        token = match.group(1).lower()
+        return "<commit>" if self._defect(token) else match.group(0)
+
+    def _defect(
+        self,
+        value: str,
+    ) -> bool:
+        token = value.lower()
+        return any(
+            defect == token or defect.startswith(token)
+            for defect in self._defects
+        )
+
+    def _drop_number(
+        self,
+        value: str,
+    ) -> str:
+        return re.sub(r"(?<!\w)#\d+\b", "<reference>", value)
+
+    def _normalize(
+        self,
+        value: str,
+    ) -> str:
+        lines = [line.rstrip() for line in value.splitlines()]
+        current = "\n".join(lines).strip()
+        return re.sub(r"\n{3,}", "\n\n", current)
 
 
 class ValidationSetup:
@@ -46,27 +214,32 @@ class ValidationSetup:
         source: Path,
         metrics: Metrics,
         correction: str,
-        redact: Callable[[str, str], str],
+        redaction: ValidationRedaction,
     ) -> None:
         self.snapshot = snapshot
         self.source = source
         self.metrics = metrics
         self.correction = correction
-        self.redact = redact
+        self.redaction = redaction
 
     @classmethod
     def build(
         cls,
         case: ValidationCase,
         *,
-        defect: str,
         context: Path,
         sources: Path | None = None,
+        redaction: ValidationRedaction | None = None,
     ) -> ValidationSetup:
-        context_root = cls._extract(context)
-        root = context_root / case.repository.lower()
+        if redaction is None:
+            redaction = GitHubRedaction(
+                correction=case.correction,
+                defects=case.defects,
+            )
+
+        root = cls._extract(context) / case.repository.lower()
         if not root.exists():
-            with open(next(context_root.glob("*/*/meta.json")), "r", encoding="utf-8") as file:
+            with open(next(root.parent.glob("*/*/meta.json")), "r", encoding="utf-8") as file:
                 root = Path(file.name).parent
 
         snapshot = VersionControlSnapshot.load(
@@ -75,16 +248,19 @@ class ValidationSetup:
         metrics = KnowledgeGraphMetrics.build(
             snapshot, root / "context", case.correction,
         )
-        correction_message = snapshot.meta(case.correction).message
-        redact = cls._redact(defect)
+        correction = redaction.redact(
+            "message",
+            snapshot.meta(case.correction).message,
+            case.correction,
+        )
 
         return cls._assemble(
             case=case,
             snapshot=snapshot,
             source=root / "context",
             metrics=metrics,
-            correction=correction_message,
-            redact=redact,
+            correction=correction,
+            redaction=redaction,
             sources=sources,
         )
 
@@ -97,7 +273,7 @@ class ValidationSetup:
         source: Path,
         metrics: Metrics,
         correction: str,
-        redact: Callable[[str, str], str],
+        redaction: ValidationRedaction,
         sources: Path | None,
     ) -> ValidationSetup:
         return cls(
@@ -105,7 +281,7 @@ class ValidationSetup:
             source=source,
             metrics=metrics,
             correction=correction,
-            redact=redact,
+            redaction=redaction,
         )
 
     @staticmethod
@@ -115,20 +291,6 @@ class ValidationSetup:
             with tarfile.open(archive, "r:gz") as tar:
                 tar.extractall(work, filter="data")
         return work
-
-    @staticmethod
-    def _redact(defect: str) -> Callable[[str, str], str]:
-        pattern = rf"(?<![0-9a-f])(?:{'|'.join(re.escape(defect[:size]) for size in range(len(defect), 4, -1))})(?![0-9a-f])"
-
-        def apply(kind: str, value: str) -> str:
-            if kind != "message":
-                return value
-            return re.sub(
-                r"https?://github\.com/\S+", "<reference>",
-                re.sub(pattern, "<commit>", value, flags=re.IGNORECASE),
-            )
-
-        return apply
 
 
 class RepositorySetup(ValidationSetup):
@@ -142,12 +304,12 @@ class RepositorySetup(ValidationSetup):
         source: Path,
         metrics: Metrics,
         correction: str,
-        redact: Callable[[str, str], str],
+        redaction: ValidationRedaction,
         repository: VersionControl,
     ) -> None:
         super().__init__(
             snapshot=snapshot, source=source, metrics=metrics,
-            correction=correction, redact=redact,
+            correction=correction, redaction=redaction,
         )
         self.repository = repository
 
@@ -160,7 +322,7 @@ class RepositorySetup(ValidationSetup):
         source: Path,
         metrics: Metrics,
         correction: str,
-        redact: Callable[[str, str], str],
+        redaction: ValidationRedaction,
         sources: Path | None,
     ) -> RepositorySetup:
         if sources is None:
@@ -168,14 +330,14 @@ class RepositorySetup(ValidationSetup):
         sources_root = cls._extract(sources)
         repository = VersionControl(
             pygit2.Repository(str(sources_root / "repository.git")),
-            filter=redact,
+            filter=redaction,
         )
         return cls(
             snapshot=snapshot,
             source=source,
             metrics=metrics,
             correction=correction,
-            redact=redact,
+            redaction=redaction,
             repository=repository,
         )
 
@@ -193,20 +355,20 @@ class KnowledgeGraphSetup(ValidationSetup):
         source: Path,
         metrics: Metrics,
         correction: str,
-        redact: Callable[[str, str], str],
+        redaction: ValidationRedaction,
         sources: Path | None,
     ) -> KnowledgeGraphSetup:
-        snapshot_with_redact = VersionControlSnapshot.load(
+        snapshot = VersionControlSnapshot.load(
             source.parent / "snapshot",
             cache=source.parent / ".git",
-            filter=redact,
+            filter=redaction,
         )
         return cls(
-            snapshot=snapshot_with_redact,
+            snapshot=snapshot,
             source=source,
             metrics=metrics,
             correction=correction,
-            redact=redact,
+            redaction=redaction,
         )
 
 

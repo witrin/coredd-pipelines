@@ -19,6 +19,7 @@ from benchmark.attribution.history import (
     VersionControlSnapshot,
 )
 from benchmark.attribution.history_fixture import HistoryFixture
+from benchmark.attribution.validation import GitHubRedaction
 
 
 class TestVersionControlPathWalkerSubmodule(unittest.TestCase):
@@ -571,13 +572,43 @@ class TestVersionControlSnapshot(unittest.TestCase):
         source = self._source([self._fragment([[self.sha_foo, self.sha_bar]])])
         snapshot = VersionControlSnapshot.load(
             source,
-            filter=lambda kind, value: (
+            filter=lambda kind, value, identifier: (
                 "filtered" if kind == "message" else value
             ),
         )
         self.addCleanup(snapshot.close)
 
         self.assertEqual(snapshot.meta(self.sha_bar).message, "filtered")
+
+    def test_load_filter_uses_original_identifier(self) -> None:
+        tree = self._fixture.tree({"a.py": "print('foo')"})
+        defect = self._fixture.commit(tree, [], "defect", ref=None)
+        correction = self._fixture.commit(
+            tree,
+            [defect],
+            "\n".join(
+                [
+                    "foo",
+                    f"Fixes: {defect}",
+                    f"commit {defect[:8]}",
+                ]
+            ),
+            ref=None,
+        )
+        source = self._source([self._fragment([[defect, correction]])])
+        snapshot = VersionControlSnapshot.load(
+            source,
+            filter=GitHubRedaction(
+                correction=correction,
+                defects=(defect,),
+            ),
+        )
+        self.addCleanup(snapshot.close)
+
+        self.assertEqual(
+            snapshot.meta(correction).message,
+            "foo\n<commit>",
+        )
 
     def test_blob(self) -> None:
         snapshot = self._snapshot([self._fragment([[self.sha_baz, self.sha_qux]])])

@@ -393,7 +393,7 @@ class TestKnowledgeGraphBuilder(unittest.TestCase):
 
             loaded = KnowledgeGraphStore.load(
                 store.dump(),
-                filter=lambda kind, value: (
+                filter=lambda kind, value, identifier: (
                     value.replace("secret", "<redacted>")
                     if kind == "message"
                     else value

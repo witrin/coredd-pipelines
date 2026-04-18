@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, call
+from unittest.mock import Mock, call, patch
 
 from benchmark.attribution.domain import Change
+from benchmark.attribution.history import VersionControl
+from benchmark.attribution.history_fixture import HistoryFixture
+from benchmark.attribution.knowledge import KnowledgeGraphStore
 from benchmark.attribution.tracing import Trace
-from benchmark.attribution.validation import ValidationCase, ValidationExecutor
+from benchmark.attribution.validation import (
+    GitHubRedaction,
+    RepositorySetup,
+    ValidationCase,
+    ValidationExecutor,
+)
 
 
 class TestValidationExecutor(unittest.TestCase):
@@ -272,6 +282,230 @@ class TestValidationExecutor(unittest.TestCase):
         self.assertEqual(payload["partition"], "p1")
         self.assertIsInstance(payload["trace"], str)
         self.assertEqual(payload["event"]["event"], "node_start")
+
+
+class TestValidationSetup(unittest.TestCase):
+    def test_redact_preserves_non_message(self) -> None:
+        redaction = GitHubRedaction(
+            correction="after-sha",
+            defects=("abcdef1234567890",),
+        )
+
+        self.assertEqual(
+            redaction.redact("description", "Fixes: abc1234", "after-sha"),
+            "Fixes: abc1234",
+        )
+
+    def test_redact_bfc_drops_direct_leaks(self) -> None:
+        redaction = GitHubRedaction(
+            correction="after-sha",
+            defects=("abcdef1234567890", "1234567890abcde0"),
+        )
+        value = "\n".join(
+            [
+                "Subject line",
+                "Fixes: abcdef1234567890 (quoted title)",
+                "Reviewed-by: foo",
+                "Mention commit abcdef1234567890 (\"quoted title\") for context.",
+                "Leak abcdef1234567890 in prose.",
+                "Prefix abcdef1 in prose.",
+                "See https://github.com/foo/bar/commit/abcdef1234567890",
+                "Issue https://github.com/foo/bar/issues/42",
+                "Pull https://github.com/foo/bar/pull/7",
+                "Patch https://github.com/foo/bar/pull/7/commits/abcdef1234567890",
+                "Ticket #123 remains a reference.",
+                "Repo https://github.com/foo/bar should remain.",
+            ]
+        )
+
+        result = redaction.redact("message", value, "after-sha")
+
+        self.assertEqual(
+            result,
+            "\n".join(
+                [
+                    "Subject line",
+                    "Reviewed-by: foo",
+                    "Mention <commit> for context.",
+                    "Leak <commit> in prose.",
+                    "Prefix <commit> in prose.",
+                    "See <reference>",
+                    "Issue <reference>",
+                    "Pull <reference>",
+                    "Patch <reference>",
+                    "Ticket <reference> remains a reference.",
+                    "Repo https://github.com/foo/bar should remain.",
+                ]
+            ),
+        )
+
+    def test_redact_preserves_non_bfc_messages(self) -> None:
+        redaction = GitHubRedaction(
+            correction="after-sha",
+            defects=("abcdef1234567890",),
+        )
+        value = "\n".join(
+            [
+                "Fixes: abcdef1234567890",
+                "Issue https://github.com/foo/bar/issues/42",
+                "Pull https://github.com/foo/bar/pull/7",
+                "Standalone #123 remains.",
+            ]
+        )
+
+        result = redaction.redact("message", value, "base-sha")
+
+        self.assertEqual(result, value)
+
+    def test_redact_normalizes_blank_lines(self) -> None:
+        redaction = GitHubRedaction(
+            correction="after-sha",
+            defects=("abcdef1234567",),
+        )
+        value = "foo\nFixes: abcdef1234567\n\n\nbar  \n"
+
+        self.assertEqual(
+            redaction.redact("message", value, "after-sha"),
+            "foo\n\nbar",
+        )
+
+    def test_version_control_meta_redacts_only_bfc(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "print('foo')"})
+            base = fixture.commit(
+                tree,
+                [],
+                "Fixes: abcdef1234567890\nStandalone #123 remains.",
+            )
+            after = fixture.commit(
+                tree,
+                [base],
+                "\n".join(
+                    [
+                        "foo",
+                        "Fixes: abcdef1234567890",
+                        "Issue https://github.com/foo/bar/issues/42",
+                        "Reviewed-by: bar",
+                        "commit abcdef1234567890",
+                    ]
+                ),
+            )
+            repository = VersionControl(
+                fixture.repository,
+                filter=GitHubRedaction(
+                    correction=after,
+                    defects=("abcdef1234567890",),
+                ),
+            )
+
+            self.assertEqual(
+                repository.meta(after).message,
+                "foo\nIssue <reference>\nReviewed-by: bar\n<commit>",
+            )
+            self.assertEqual(
+                repository.meta(base).message,
+                "Fixes: abcdef1234567890\nStandalone #123 remains.",
+            )
+
+    def test_knowledge_graph_payload_redacts_only_bfc(self) -> None:
+        store = KnowledgeGraphStore(
+            filter=GitHubRedaction(
+                correction="after-sha",
+                defects=("abcdef1234567890",),
+            )
+        )
+        store.add(
+            "commit",
+            {
+                "sha": "after-sha",
+                "message": "Pull https://github.com/foo/bar/pull/7\n#123",
+            },
+        )
+        store.add(
+            "commit",
+            {
+                "sha": "base-sha",
+                "message": "Pull https://github.com/foo/bar/pull/7\n#123",
+            },
+        )
+
+        self.assertEqual(
+            store.payload("after-sha")["message"],
+            "Pull <reference>\n<reference>",
+        )
+        self.assertEqual(
+            store.payload("base-sha")["message"],
+            "Pull https://github.com/foo/bar/pull/7\n#123",
+        )
+
+    def test_repository_setup_applies_filter_to_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as work:
+            context_root = Path(work) / "context"
+            sources_root = Path(work) / "sources"
+            repo_root = context_root / "repo/a"
+            (repo_root / "context").mkdir(parents=True)
+            (sources_root / "repository.git").mkdir(parents=True)
+
+            snapshot = Mock(spec_set=["meta"])
+            snapshot.meta.return_value = SimpleNamespace(
+                message="foo\nFixes: abcdef1234567\nReviewed-by: bar\n#123",
+            )
+            metrics = Mock()
+            repository = Mock()
+            case = ValidationCase(
+                repository="repo/a",
+                correction="after-sha",
+                defects=("abcdef1234567", "1234567890abcde"),
+            )
+
+            with (
+                patch(
+                    "benchmark.attribution.validation.ValidationSetup._extract",
+                    side_effect=[context_root, sources_root],
+                ),
+                patch(
+                    "benchmark.attribution.validation.VersionControlSnapshot.load",
+                    return_value=snapshot,
+                ),
+                patch(
+                    "benchmark.attribution.validation.KnowledgeGraphMetrics.build",
+                    return_value=metrics,
+                ),
+                patch(
+                    "benchmark.attribution.validation.pygit2.Repository",
+                    return_value=Mock(),
+                ),
+                patch(
+                    "benchmark.attribution.validation.VersionControl",
+                    return_value=repository,
+                ) as control,
+            ):
+                setup = RepositorySetup.build(
+                    case,
+                    context=Path("context.tar.gz"),
+                    sources=Path("sources.tar.gz"),
+                )
+
+            self.assertIs(setup.repository, repository)
+            self.assertEqual(setup.correction, "foo\nReviewed-by: bar\n<reference>")
+            redaction = control.call_args.kwargs["filter"]
+            self.assertEqual(
+                redaction(
+                    "message",
+                    "foo\nFixes: abcdef1234567\nReviewed-by: bar\n#123",
+                    "after-sha",
+                ),
+                "foo\nReviewed-by: bar\n<reference>",
+            )
+            self.assertEqual(
+                redaction(
+                    "message",
+                    "foo\nFixes: abcdef1234567\nReviewed-by: bar\n#123",
+                    "base-sha",
+                ),
+                "foo\nFixes: abcdef1234567\nReviewed-by: bar\n#123",
+            )
+            self.assertIs(setup.redaction, redaction)
 
 
 if __name__ == "__main__":

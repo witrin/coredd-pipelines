@@ -349,7 +349,7 @@ class VersionControl:
     def __init__(
         self,
         repository: pygit2.Repository,
-        filter: Callable[[str, str], str] | None = None,
+        filter: Callable[[str, str, str | None], str] | None = None,
     ) -> None:
         self._repository = repository
         self._cache: dict[str, set[str]] = {}
@@ -365,7 +365,7 @@ class VersionControl:
         partition: str,
         *,
         workdir: str | Path | None = None,
-        filter: Callable[[str, str], str] | None = None,
+        filter: Callable[[str, str, str | None], str] | None = None,
     ) -> VersionControl:
         """Download a bare repository from GCS and return a VersionControl instance."""
         work = Path(workdir or tempfile.mkdtemp())
@@ -476,7 +476,7 @@ class VersionControl:
             message = commit.message.strip()
 
             if self._filter is not None:
-                message = self._filter("message", message)
+                message = self._message(message, sha)
 
             self._dump_tree(commit.tree, target)
             commits[sha] = {
@@ -769,13 +769,23 @@ class VersionControl:
         c = obj.peel(pygit2.Commit)
         message = c.message.strip()
         if self._filter is not None:
-            message = self._filter("message", message)
+            message = self._message(message, commit)
         return Commit(
             sha=commit,
             message=message,
             time=datetime.fromtimestamp(c.commit_time, tz=timezone.utc),
             author=c.author.name,
         )
+
+    def _message(
+        self,
+        value: str,
+        identifier: str,
+    ) -> str:
+        filter = self._filter
+        if filter is None:
+            return value
+        return filter("message", value, identifier)
 
     def log(self, base: str, after: str, merge: bool = False) -> list[str]:
         """Return commit SHAs between *base* and *after* (both exclusive).
@@ -948,13 +958,14 @@ class VersionControlSnapshot:
         cleanup: Callable[[], None],
         forward: dict[str, str],
         reverse: dict[str, str],
-        filter: Callable[[str, str], str] | None = None,
+        filter: Callable[[str, str, str | None], str] | None = None,
     ) -> None:
         self._repository = repository
         self._cleanup = cleanup
         self._forward = forward
         self._reverse = reverse
-        self._runtime = VersionControl(repository, filter=filter)
+        self._filter = filter
+        self._runtime = VersionControl(repository)
         self._closed = False
 
     def close(self) -> None:
@@ -975,7 +986,7 @@ class VersionControlSnapshot:
         source: str | Path,
         *,
         cache: str | Path | None = None,
-        filter: Callable[[str, str], str] | None = None,
+        filter: Callable[[str, str, str | None], str] | None = None,
     ) -> VersionControlSnapshot:
         source = Path(source)
 
@@ -1002,7 +1013,7 @@ class VersionControlSnapshot:
         source: Path,
         target: Path,
         *,
-        filter: Callable[[str, str], str] | None = None,
+        filter: Callable[[str, str, str | None], str] | None = None,
     ) -> VersionControlSnapshot:
         meta = cls._load_meta(source)
         commits = cls._commits(meta)
@@ -1025,7 +1036,7 @@ class VersionControlSnapshot:
         cls,
         target: Path,
         *,
-        filter: Callable[[str, str], str] | None = None,
+        filter: Callable[[str, str, str | None], str] | None = None,
     ) -> VersionControlSnapshot:
         try:
             repository = pygit2.Repository(str(target))
@@ -1041,7 +1052,7 @@ class VersionControlSnapshot:
         source: Path,
         target: Path,
         *,
-        filter: Callable[[str, str], str] | None = None,
+        filter: Callable[[str, str, str | None], str] | None = None,
     ) -> VersionControlSnapshot:
         if target.is_dir():
             shutil.rmtree(target)
@@ -1058,7 +1069,7 @@ class VersionControlSnapshot:
         cleanup: Callable[[], None],
         commits: dict[str, dict[str, object]],
         *,
-        filter: Callable[[str, str], str] | None = None,
+        filter: Callable[[str, str, str | None], str] | None = None,
     ) -> VersionControlSnapshot:
         forward: dict[str, str] = {}
         reverse: dict[str, str] = {}
@@ -1303,9 +1314,12 @@ class VersionControlSnapshot:
 
     def meta(self, commit: str) -> Commit:
         value = self._runtime.meta(self._map(commit))
+        message = value.message
+        if self._filter is not None:
+            message = self._filter("message", message, commit)
         return Commit(
             sha=commit,
-            message=value.message,
+            message=message,
             time=value.time,
             author=value.author,
         )
@@ -1409,7 +1423,7 @@ class PlatformCache:
         self,
         table: pa.Table,
         repository: VersionControl,
-        filter: Callable[[str, str], str] | None = None,
+        filter: Callable[[str, str, str | None], str] | None = None,
     ) -> None:
         self._table = table
         self._repository = repository
@@ -1469,7 +1483,7 @@ class PlatformCache:
         version: str,
         partition: str,
         repository: VersionControl,
-        filter: Callable[[str, str], str] | None = None,
+        filter: Callable[[str, str, str | None], str] | None = None,
     ) -> PlatformCache:
         """Download a Parquet asset from GCS and return a PlatformCache instance."""
         gcs_bucket = client.bucket(bucket)
@@ -1536,7 +1550,7 @@ class PlatformCache:
         payload: dict,
         base: str,
         *,
-        filter: Callable[[str, str], str] | None = None,
+        filter: Callable[[str, str, str | None], str] | None = None,
     ) -> Change:
         merge_sha = payload.get("merge_commit_sha")
         if not merge_sha:
@@ -1548,7 +1562,7 @@ class PlatformCache:
         body = payload.get("body") or ""
         description = f"{title}\n\n{body}".strip()
         if filter is not None:
-            description = filter("description", description)
+            description = filter("description", description, None)
 
         return Change(
             number=number,

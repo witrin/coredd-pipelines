@@ -316,7 +316,7 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                 factory = KnowledgeGraphToolFactory(
                     repository=repository,
                     source=path,
-                    filter=lambda kind, value: (
+                    filter=lambda kind, value, identifier: (
                         value.replace("secret", "<redacted>")
                         if kind == "message"
                         else value

@@ -87,7 +87,7 @@ class KnowledgeGraphStore:
 
     def __init__(
         self,
-        filter: Callable[[str, str], str] | None = None,
+        filter: Callable[[str, str, str | None], str] | None = None,
     ) -> None:
         self._graph = nx.MultiDiGraph()
         self._base = ""
@@ -112,7 +112,7 @@ class KnowledgeGraphStore:
     def load(
         cls,
         data: dict[str, object],
-        filter: Callable[[str, str], str] | None = None,
+        filter: Callable[[str, str, str | None], str] | None = None,
     ) -> KnowledgeGraphStore:
         store = cls(filter=filter)
         store.base = str(data["base"])
@@ -190,8 +190,23 @@ class KnowledgeGraphStore:
         key = self.resolve(node)
         payload = dict(self._graph.nodes[key]["payload"])
         if self._filter is not None and isinstance(payload.get("message"), str):
-            payload["message"] = self._filter("message", payload["message"])
+            payload["message"] = self._message(payload)
         return payload
+
+    def _message(
+        self,
+        payload: dict[str, Any],
+    ) -> str:
+        filter = self._filter
+        message = str(payload["message"])
+        if filter is None:
+            return message
+        identifier = payload.get("sha")
+        return filter(
+            "message",
+            message,
+            identifier if isinstance(identifier, str) else None,
+        )
 
     def nodes(self, kind: str) -> list[str]:
         return [
