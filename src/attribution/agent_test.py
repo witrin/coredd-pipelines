@@ -948,12 +948,12 @@ class TestKnowledgeGraphTool(unittest.TestCase):
         self.assertEqual([tool.name for tool in tools], ["candidates", "neighbors", "meta", "content"])
         self.assertTrue(all(isinstance(tool, BaseTool) for tool in tools))
         self.assertIn("top-ranked commit candidates", tools[0].description)
-        self.assertIn("touched by that commit", tools[0].description)
-        self.assertIn("entity", tools[1].description)
-        self.assertIn("touched files", tools[1].description)
-        self.assertIn("Inspect one commit", tools[2].description)
-        self.assertIn("entity overlap between", tools[2].description)
-        self.assertIn("commit SHA, optional path", tools[3].description)
+        self.assertIn("inspect the search space", tools[0].description)
+        self.assertIn("structurally related commit candidates", tools[1].description)
+        self.assertIn("same files or entities", tools[1].description)
+        self.assertIn("Query one commit", tools[2].description)
+        self.assertIn("inspect commit metadata", tools[2].description)
+        self.assertIn("causal verification", tools[3].description)
 
     def test_budget(self) -> None:
         repository = Mock(spec_set=["parents"])
@@ -1140,10 +1140,47 @@ class TestRepositoryTool(unittest.TestCase):
             )
 
             result = tool.grep("needle", commit=after)
-            self.assertEqual(len(result), 1)
-            self.assertEqual(result[0]["path"], "foo.py")
-            self.assertEqual(result[0]["line"], 1)
-            self.assertEqual(result[0]["text"], "needle")
+            self.assertEqual(
+                result,
+                [
+                    {
+                        "path": "foo.py",
+                        "matches": [{"line": 1, "text": "needle"}],
+                    }
+                ],
+            )
+
+    def test_grep_groups_matches_by_file(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree(
+                {
+                    "foo.py": "needle\nother\nneedle\n",
+                    "bar.py": "needle\n",
+                }
+            )
+            after = fixture.commit(tree, [], "base")
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            result = tool.grep("needle", commit=after)
+            self.assertEqual(
+                result,
+                [
+                    {
+                        "path": "bar.py",
+                        "matches": [{"line": 1, "text": "needle"}],
+                    },
+                    {
+                        "path": "foo.py",
+                        "matches": [
+                            {"line": 1, "text": "needle"},
+                            {"line": 3, "text": "needle"},
+                        ],
+                    },
+                ],
+            )
 
     def test_grep_respects_path_filter(self) -> None:
         with HistoryFixture() as fixture:
@@ -1160,7 +1197,125 @@ class TestRepositoryTool(unittest.TestCase):
             )
 
             result = tool.grep("needle", commit=after, path="bar.py")
-            self.assertEqual([entry["path"] for entry in result], ["bar.py"])
+            self.assertEqual(
+                result,
+                [
+                    {
+                        "path": "bar.py",
+                        "matches": [{"line": 1, "text": "needle"}],
+                    }
+                ],
+            )
+
+    def test_grep_respects_path_prefix_pattern(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree(
+                {
+                    "foo.py": "needle\n",
+                    "pkg/bar.py": "needle\n",
+                    "pkg/nested/baz.py": "needle\n",
+                }
+            )
+            after = fixture.commit(tree, [], "base")
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            result = tool.grep("needle", commit=after, path="pkg")
+            self.assertEqual(
+                [entry["path"] for entry in result],
+                ["pkg/bar.py", "pkg/nested/baz.py"],
+            )
+
+    def test_grep_respects_path_glob_pattern(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree(
+                {
+                    "foo.py": "needle\n",
+                    "pkg/bar.py": "needle\n",
+                    "pkg/nested/baz.py": "needle\n",
+                    "pkg/nested/qux.txt": "needle\n",
+                }
+            )
+            after = fixture.commit(tree, [], "base")
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            result = tool.grep("needle", commit=after, path="pkg/**/*.py")
+            self.assertEqual(
+                [entry["path"] for entry in result],
+                ["pkg/bar.py", "pkg/nested/baz.py"],
+            )
+
+    def test_grep_treats_needle_as_regex(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "needle\nneedful\n"})
+            after = fixture.commit(tree, [], "base")
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            result = tool.grep("need.*", commit=after)
+            self.assertEqual(
+                result,
+                [
+                    {
+                        "path": "foo.py",
+                        "matches": [
+                            {"line": 1, "text": "needle"},
+                            {"line": 2, "text": "needful"},
+                        ],
+                    }
+                ],
+            )
+
+    def test_grep_rejects_invalid_regex(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "needle\n"})
+            after = fixture.commit(tree, [], "base")
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            with self.assertRaises(ValueError):
+                tool.grep("(", commit=after)
+
+    def test_grep_applies_global_match_limit(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree(
+                {
+                    "foo.py": "needle\nneedle\nneedle\n",
+                    "bar.py": "needle\nneedle\n",
+                }
+            )
+            after = fixture.commit(tree, [], "base")
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            result = tool.grep("needle", commit=after, max=3)
+            self.assertEqual(
+                result,
+                [
+                    {
+                        "path": "bar.py",
+                        "matches": [
+                            {"line": 1, "text": "needle"},
+                            {"line": 2, "text": "needle"},
+                        ],
+                    },
+                    {
+                        "path": "foo.py",
+                        "matches": [{"line": 1, "text": "needle"}],
+                    },
+                ],
+            )
 
     def test_tools_exposes_five_entries(self) -> None:
         with HistoryFixture() as fixture:

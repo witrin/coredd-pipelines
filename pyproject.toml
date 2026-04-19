@@ -23,6 +23,7 @@ dependencies = [
     "jpype1>=1.5.0",
     "optuna==4.7.0",
     "pygam==0.12.0",
+    "pathspec==1.0.4",
     "pygit2==1.19.1",
     "openai==2.20.0",
     "networkx==3.6.1",

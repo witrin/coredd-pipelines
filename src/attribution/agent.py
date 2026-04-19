@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, cast
 
 from langchain_core.tools import BaseTool, tool
+from pathspec import PathSpec
 import pygit2
 
 from benchmark.attribution.diff.entity import EntityPath
@@ -42,7 +43,7 @@ class DiffRenderer:
 
 
 class KnowledgeGraphTool:
-    """Tool-oriented interface over the in-memory graph."""
+    """Tool-oriented interface for temporal knowledge graph search."""
 
     def __init__(
         self,
@@ -71,11 +72,9 @@ class KnowledgeGraphTool:
         ]
 
     def candidates(self, limit: int = 20) -> list[dict[str, Any]]:
-        """List the top-ranked commit candidates for the prepared correction graph.
+        """List the top-ranked commit candidates.
 
-        Use this first to inspect the ranked search space. Each item returns one
-        candidate commit with its ordinal score, commit metadata, and the entities
-        (programs, classes, methods, functions) touched by that commit.
+        Use this first to inspect the search space.
         """
         result: list[dict[str, Any]] = []
         for node in self.store.nodes("commit"):
@@ -94,11 +93,9 @@ class KnowledgeGraphTool:
         return result[:limit]
 
     def neighbors(self, sha: str) -> list[dict[str, Any]]:
-        """Traverse from one commit to structurally related commit candidates.
+        """Traverse to structurally related commit candidates.
 
-        Use this to find structurally related candidate commits. Each item returns a
-        related commit together with its type, touched files, and the entity
-        overlap between the queried commit and that neighbor.
+        Use this to find commits that changed the same files or entities.
         """
         result: dict[str, dict[str, Any]] = {}
         source = self.store.resolve(sha)
@@ -131,21 +128,20 @@ class KnowledgeGraphTool:
         )
         return values
 
-    def meta(self, node: str) -> dict[str, Any]:
-        """Inspect one commit.
+    def meta(self, sha: str) -> dict[str, Any]:
+        """Query one commit.
 
-        Returns commit metadata, the entities (programs, classes, methods, functions)
-        touched by the commit, and the entity overlap between the commit and the correction commit.
+        Use this to inspect commit metadata.
         """
-        key = self.store.resolve(node)
+        key = self.store.resolve(sha)
         kind = self.store.kind(key)
         return {"kind": kind} | self._meta(key, kind)
 
     def content(self, sha: str, path: str | None = None) -> dict[str, Any]:
-        """Read one commit patch, optionally limited to a single path, for deep inspection.
+        """Read one commit patch for causal verification.
 
-        Use this for causal verification. It returns the commit SHA, optional path
-        scope, and the commit diff.
+        Use this to check whether a candidate commit introduced the code that
+        the fix later changes.
         """
         if self._reads >= self._budget:
             raise ValueError("Diff read budget exhausted.")
@@ -413,12 +409,7 @@ class KnowledgeGraphToolFactory:
 
 
 class RepositoryTool:
-    """Repository-native tool surface paralleling AgentSZZ's git-CLI toolset.
-
-    Exposes ``show``, ``blame``, ``pickaxe``, ``trace`` and ``grep`` over a
-    :class:`VersionControl` instance so the search agent can operate on the
-    repository without a prebuilt knowledge graph.
-    """
+    """Repository-native tool surface for commit and code-history search."""
 
     def __init__(
         self,
@@ -447,11 +438,10 @@ class RepositoryTool:
         return str(node.peel(pygit2.Commit).id)
 
     def show(self, commit: str, path: str | None = None) -> dict[str, Any]:
-        """Return commit metadata and its unified diff against the first parent.
+        """Show one commit and its patch.
 
-        Accepts any git revision expression (``<sha>``, ``<sha>^``, ``<sha>~1``,
-        ``HEAD``, branch names, …). Use this to read the exact change introduced
-        by a commit. Optionally restrict the diff to a single ``path``.
+        Use this to inspect what a commit changed. Optionally restrict the diff
+        to one path.
         """
         commit = self._resolve(commit)
         meta = self._repository.meta(commit)
@@ -477,12 +467,9 @@ class RepositoryTool:
         start: int,
         end: int,
     ) -> dict[str, Any]:
-        """Blame one contiguous line range in a file at a given commit.
+        """Blame a line range in one file at a commit.
 
-        Accepts any git revision expression for ``commit``. Returns ``blame``
-        as a string with one ``L<n>: <sha> | <origin_path> | <code>`` entry per
-        line and ``commits`` as a map from each referenced SHA to the first
-        line of its commit message.
+        Use this to see which commit last changed specific lines.
         """
         commit = self._resolve(commit)
         raw = self._repository.blame(path, commit, [(start, end)])
@@ -518,14 +505,10 @@ class RepositoryTool:
         path: str | None = None,
         max: int = 20,
     ) -> list[dict[str, Any]]:
-        """Find commits that added or removed occurrences of ``needle``.
+        """Find commits that added or removed a string.
 
-        When ``path`` is given, walks the file history of that path from the
-        correction commit backward with rename tracking.  When ``path`` is
-        ``None``, searches repository-wide across all files.
-
-        Emits at most ``max`` commits, newest first, where the occurrence count
-        of ``needle`` changed between the parent and the commit.
+        Use this to trace when text first appeared, disappeared, or changed in
+        one file or across the repository.
         """
         self._consume()
         if not needle:
@@ -558,11 +541,10 @@ class RepositoryTool:
         path: str,
         max: int = 10,
     ) -> list[dict[str, Any]]:
-        """Track commits that modified any entity whose URN matches ``pattern``.
+        """Trace commits that changed matching entities in one file.
 
-        ``pattern`` is a regular expression applied to tree-sitter entity URNs
-        (e.g. ``entity:function=parse`` or ``entity:class=Parser:method=read``)
-        via :func:`re.search`. Entries whose sources fail to parse are skipped.
+        Use this to follow the history of functions, methods, or classes when
+        line-based blame is not enough.
         """
         self._consume()
         try:
@@ -606,20 +588,32 @@ class RepositoryTool:
         path: str | None = None,
         max: int = 50,
     ) -> list[dict[str, Any]]:
-        """Substring search over the repository tree at a given commit.
+        """Search repository files at a commit with a regex.
 
-        Accepts any git revision expression for ``commit``. Returns up to
-        ``max`` matches, each carrying ``path``, 1-based ``line``, 0-based
-        ``column`` and the full line text. Restrict the search with ``path``
-        (exact path, not glob).
+        Use this to find definitions, call sites, and references in one
+        snapshot. Optionally restrict the search with a path pattern.
         """
         self._consume()
         if not needle:
             raise ValueError("grep needle must not be empty.")
 
+        try:
+            pattern = re.compile(needle)
+        except re.error as error:
+            raise ValueError(f"Invalid grep regex: {error}") from error
+
         commit = self._resolve(commit)
-        paths = [path] if path is not None else self._repository.tree(commit)
+        paths = self._repository.tree(commit)
+        if path is not None:
+            patterns = [path]
+            if not any(token in path for token in "*?[]!"):
+                prefix = path.rstrip("/")
+                if prefix:
+                    patterns.append(f"{prefix}/**")
+            spec = PathSpec.from_lines("gitignore", patterns)
+            paths = [current for current in paths if spec.match_file(current)]
         result: list[dict[str, Any]] = []
+        total = 0
         for current in paths:
             try:
                 data = self._repository.blob(commit, current)
@@ -629,20 +623,19 @@ class RepositoryTool:
                 text = data.decode("utf-8")
             except UnicodeDecodeError:
                 continue
+            matches: list[dict[str, Any]] = []
             for index, line in enumerate(text.splitlines(), start=1):
-                column = line.find(needle)
-                if column < 0:
+                if pattern.search(line) is None:
                     continue
-                result.append(
-                    {
-                        "path": current,
-                        "line": index,
-                        "column": column,
-                        "text": line,
-                    }
-                )
-                if len(result) >= max:
-                    return result
+                matches.append({"line": index, "text": line})
+                if len(matches) >= max - total:
+                    break
+            if not matches:
+                continue
+            result.append({"path": current, "matches": matches})
+            total += len(matches)
+            if total >= max:
+                break
         return result
 
     def _pickaxe_delta(self, entry: Any, needle: str) -> int | None:

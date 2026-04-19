@@ -301,6 +301,8 @@ pandas==2.3.3
     #   db-dtypes
 pathlib-abc==0.5.2
     # via universal-pathlib
+pathspec==1.0.4
+    # via benchmark (pyproject.toml)
 pillow==12.2.0
     # via argilla
 platformdirs==4.5.1

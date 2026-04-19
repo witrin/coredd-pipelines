@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import tempfile
 import time
+from typing import Any
 
 import pygit2
 
@@ -49,14 +50,33 @@ class HistoryFixture:
         Values are cleaned via ``inspect.cleandoc`` and a trailing newline
         is ensured so that file content behaves like normal source files.
         """
-        builder = self.repository.TreeBuilder()
         for name, content in files.items():
-            cleaned = inspect.cleandoc(content)
-            if not cleaned.endswith("\n"):
-                cleaned += "\n"
-            blob_id = self.repository.create_blob(cleaned.encode("utf-8"))
-            builder.insert(name, blob_id, pygit2.GIT_FILEMODE_BLOB)
-        return builder.write()
+            if not name:
+                raise ValueError("tree entry name must not be empty")
+
+        tree: dict[str, Any] = {}
+        for name, content in files.items():
+            node = tree
+            parts = name.split("/")
+            for part in parts[:-1]:
+                node = node.setdefault(part, {})
+            node[parts[-1]] = content
+
+        def build(files: dict[str, Any]) -> pygit2.Oid:
+            builder = self.repository.TreeBuilder()
+            for name, content in sorted(files.items()):
+                if isinstance(content, dict):
+                    tree_id = build(content)
+                    builder.insert(name, tree_id, pygit2.GIT_FILEMODE_TREE)
+                    continue
+                cleaned = inspect.cleandoc(content)
+                if not cleaned.endswith("\n"):
+                    cleaned += "\n"
+                blob_id = self.repository.create_blob(cleaned.encode("utf-8"))
+                builder.insert(name, blob_id, pygit2.GIT_FILEMODE_BLOB)
+            return builder.write()
+
+        return build(tree)
 
     def commit(
         self,
