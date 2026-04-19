@@ -871,10 +871,10 @@ class TestPlatformCache(unittest.TestCase):
             "body": "bar",
         }])
         change = cache.resolve(self.sha_qux)
-        self.assertEqual(change.number, 10)
-        self.assertEqual(change.after, self.sha_qux)
-        self.assertEqual(change.base, self.sha_bar)
-        self.assertEqual(change.description, "foo\n\nbar")
+        self.assertEqual(change["number"], 10)
+        self.assertEqual(change["after"], self.sha_qux)
+        self.assertEqual(change["base"], self.sha_bar)
+        self.assertEqual(change["description"], "foo\n\nbar")
 
     def test_resolve_missing(self) -> None:
         cache = self._make_cache([{
@@ -900,9 +900,9 @@ class TestPlatformCache(unittest.TestCase):
             "body": "",
         }])
         change = cache.load(42)
-        self.assertEqual(change.number, 42)
-        self.assertEqual(change.after, self.sha_qux)
-        self.assertEqual(change.description, "baz")
+        self.assertEqual(change["number"], 42)
+        self.assertEqual(change["after"], self.sha_qux)
+        self.assertEqual(change["description"], "baz")
 
     def test_load_missing(self) -> None:
         cache = self._make_cache([{

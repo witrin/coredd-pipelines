@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextvars
+import dataclasses
 import json
 import uuid
 from datetime import datetime, timezone
@@ -124,9 +125,11 @@ class Trace:
         return json.dumps(payload, default=cls._json_default, sort_keys=True)
 
     @staticmethod
-    def _json_default(value: object) -> str:
+    def _json_default(value: object) -> object:
         if isinstance(value, datetime):
             return value.isoformat()
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            return dataclasses.asdict(value)
         return str(value)
 
 
@@ -184,12 +187,7 @@ class TracingCallbackHandler(BaseCallbackHandler):
             parent=self._parent(parent_run_id),
             event="node_start",
             payload={
-                "input_type": type(inputs).__name__,
-                "input_keys": (
-                    sorted(str(key) for key in inputs.keys())
-                    if isinstance(inputs, dict)
-                    else None
-                ),
+                "inputs": inputs,
             },
         )
 
@@ -211,12 +209,7 @@ class TracingCallbackHandler(BaseCallbackHandler):
             parent=self._parent(parent_run_id),
             event="node_end",
             payload={
-                "output_type": type(outputs).__name__,
-                "output_keys": (
-                    sorted(str(key) for key in outputs.keys())
-                    if isinstance(outputs, dict)
-                    else None
-                ),
+                "outputs": outputs,
                 "duration": self._duration(started_at),
             },
         )

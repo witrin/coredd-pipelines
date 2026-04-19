@@ -3,6 +3,10 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, TypedDict
+
+JsonValue = str | int | float | bool | None | list[Any] | dict[str, Any]
+JsonDict = dict[str, JsonValue]
 
 
 class OperationType(enum.Enum):
@@ -67,8 +71,7 @@ class Slice:
     anchors: list[Anchor]
 
 
-@dataclass(frozen=True)
-class Change:
+class Change(TypedDict):
     number: int
     description: str
     base: str

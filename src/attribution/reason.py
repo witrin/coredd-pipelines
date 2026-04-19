@@ -4,7 +4,7 @@ from typing import TypedDict
 
 from pydantic import BaseModel, ValidationError
 
-from benchmark.attribution.domain import Anchor, Change, FileOperation, OperationType, Slice
+from benchmark.attribution.domain import Anchor, Change, FileOperation, JsonDict, OperationType, Slice
 from benchmark.attribution.diff.context import PatchScope
 from benchmark.attribution.diff.reference import PatchFactory, PatchView
 
@@ -142,8 +142,8 @@ class RefineOutput(TypedDict, total=False):
 
 
 class VerifyOutput(TypedDict, total=False):
-    base: dict[str, object]
-    after: dict[str, object]
+    base: JsonDict
+    after: JsonDict
     verified: bool
 
 
@@ -160,24 +160,24 @@ class BlameInput(TypedDict, total=False):
 
 
 class BlameOutput(TypedDict):
-    candidates: list[dict[str, object]]
+    candidates: list[JsonDict]
 
 
 class CompareInput(TypedDict, total=False):
     rationale: str
     causes: list[HintItemState]
-    candidates: list[dict[str, object]]
+    candidates: list[JsonDict]
     index: int
 
 
 class CompareOutput(TypedDict):
     index: int
-    candidate: dict[str, object]
-    parent: dict[str, object]
+    candidate: JsonDict
+    parent: JsonDict
 
 
 class SelectInput(TypedDict, total=False):
-    compare: dict[str, object]
+    compare: JsonDict
 
 
 class SelectOutput(TypedDict, total=False):
@@ -214,12 +214,12 @@ class SummarizeNode:
             raise ValueError("SummarizeNode requires correction, factory, and llm.")
 
         operations = self._factory.repository.manifest(
-            correction.base,
-            correction.after,
+            correction["base"],
+            correction["after"],
         )
         patch = self._factory.create(
-            correction.base,
-            correction.after,
+            correction["base"],
+            correction["after"],
             files=operations,
             n=self._context,
         )
@@ -307,15 +307,15 @@ class ExplainNode:
         if samples is None or samples < 1:
             raise ValueError("ExplainNode requires positive samples.")
         operations = self._factory.repository.manifest(
-            correction.base,
-            correction.after,
+            correction["base"],
+            correction["after"],
         )
         orders = self._file_orders(operations, samples)
         selected = orders[len(runs)]
         patch = str(
             self._factory.create(
-                correction.base,
-                correction.after,
+                correction["base"],
+                correction["after"],
                 files=selected,
                 n=self._context,
             )
@@ -323,7 +323,7 @@ class ExplainNode:
         commit_messages = self._commit_messages(correction)
         prompt = self._build_prompt(
             summary=summary,
-            description=correction.description,
+            description=correction["description"],
             commit_messages=commit_messages,
             patch_text=patch,
         )
@@ -412,11 +412,11 @@ class ExplainNode:
         return orders
 
     def _commit_messages(self, correction: Change) -> list[str]:
-        shas = [correction.after]
+        shas = [correction["after"]]
         shas.extend(
             self._factory.repository.log(
-                correction.base,
-                correction.after,
+                correction["base"],
+                correction["after"],
                 merge=True,
             )
         )
@@ -615,15 +615,15 @@ class ExpandNode:
         operations = [
             operation
             for operation in self._factory.repository.manifest(
-                correction.base,
-                correction.after,
+                correction["base"],
+                correction["after"],
             )
             if (operation.after or operation.base) in selected_paths
         ]
 
         expansion = self._factory.expand(
-            correction.base,
-            correction.after,
+            correction["base"],
+            correction["after"],
             files=operations,
             level=self._level,
             n=self._context,
@@ -808,8 +808,8 @@ class HintNode:
             operation = self._file(file)
             paths[file] = scope.bind(
                 operation,
-                self._factory.read(correction.base, operation.base),
-                self._factory.read(correction.after, operation.after),
+                self._factory.read(correction["base"], operation.base),
+                self._factory.read(correction["after"], operation.after),
             )
         return paths[file]
 
@@ -880,8 +880,8 @@ class RefineNode:
                 "base",
             )
             refinement = self._factory.refine(
-                correction.base,
-                correction.after,
+                correction["base"],
+                correction["after"],
                 slices,
                 "base",
                 force=True,
@@ -1084,7 +1084,7 @@ class BlameNode:
                 for anchor in current.anchors
                 if anchor.base != (0, 0)
             ]
-            blamed = self._factory.repository.blame(path, correction.base, entries)
+            blamed = self._factory.repository.blame(path, correction["base"], entries)
 
             for commit, _, origin in blamed:
                 if commit is None or origin is None:

@@ -121,7 +121,7 @@ class TestValidationExecutor(unittest.TestCase):
         executor.run([ValidationCase(repository="repo/a", correction="after-sha")])
 
         change = graph.invoke.call_args.args[0]
-        self.assertEqual(change.base, "after-sha")
+        self.assertEqual(change["base"], "after-sha")
 
     def test_run_order(self) -> None:
         repository_a = Mock(spec_set=["parents", "meta"])

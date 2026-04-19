@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Protocol, TypedDict, runtime_checkable
+from typing import Any, Callable, Protocol, TypeAlias, TypedDict, runtime_checkable
 
-from benchmark.attribution.domain import Change
+from benchmark.attribution.domain import Change, JsonDict
 from benchmark.attribution.history import VersionControl
 from benchmark.attribution.reason import (
     AbortNode,
@@ -15,7 +15,7 @@ from benchmark.attribution.search import SeedItem
 from benchmark.attribution.tracing import AttributionRunnable, Trace
 
 
-NodeState = dict[str, object]
+NodeState: TypeAlias = JsonDict
 
 
 class AttributionResult(TypedDict, total=False):

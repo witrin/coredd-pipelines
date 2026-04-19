@@ -62,8 +62,8 @@ class KnowledgeGraphSeedNode:
         if correction is None or self._repository is None:
             raise ValueError("KnowledgeGraphSeedNode requires correction and repository.")
 
-        base = correction.base
-        after = correction.after
+        base = correction["base"]
+        after = correction["after"]
         seed: list[SeedItem] = [{"title": "Correction Commit", "body": after}]
 
         message = self._repository.meta(after).message.strip()
@@ -302,8 +302,8 @@ class RepositorySeedNode:
         if correction is None or self._repository is None:
             raise ValueError("RepositorySeedNode requires correction and repository.")
 
-        base = correction.base
-        after = correction.after
+        base = correction["base"]
+        after = correction["after"]
         seed: list[SeedItem] = [{"title": "Correction Commit", "body": after}]
 
         message = self._repository.meta(after).message.strip()
