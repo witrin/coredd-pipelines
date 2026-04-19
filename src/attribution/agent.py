@@ -55,7 +55,7 @@ class KnowledgeGraphTool:
         self._reads = 0
         self._budget = budget
         self._target: dict[str, list[str]] = {}
-        self._scopes: dict[str, set[tuple[str, ...]]] = {}
+        self._scopes: dict[str, tuple[str, ...]] = {}
         self._renderer = DiffRenderer()
 
     @property
@@ -74,8 +74,8 @@ class KnowledgeGraphTool:
         """List the top-ranked commit candidates for the prepared correction graph.
 
         Use this first to inspect the ranked search space. Each item returns one
-        candidate commit with its ordinal score, commit metadata, and the symbols
-        (classes, methods, functions) touched by that commit.
+        candidate commit with its ordinal score, commit metadata, and the entities
+        (programs, classes, methods, functions) touched by that commit.
         """
         result: list[dict[str, Any]] = []
         for node in self.store.nodes("commit"):
@@ -97,8 +97,8 @@ class KnowledgeGraphTool:
         """Traverse from one commit to structurally related commit candidates.
 
         Use this to find structurally related candidate commits. Each item returns a
-        related commit together with the shared symbols (classes, methods, functions)
-        between the queried commit and that neighbor.
+        related commit together with its type, touched files, and the entity
+        overlap between the queried commit and that neighbor.
         """
         result: dict[str, dict[str, Any]] = {}
         source = self.store.resolve(sha)
@@ -110,19 +110,21 @@ class KnowledgeGraphTool:
                 payload = self.store.payload(node)
                 if payload["type"] == "correction":
                     continue
-                item = result.setdefault(payload["sha"], self._commit(node))
+                item = result.setdefault(payload["sha"], self._neighbor(node))
 
         values = list(result.values())
-        scope = self._scope(source_targets)
+        source = self._paths(source_targets)
         for item in values:
-            item["symbols"] = self._entities(
-                scope,
-                self._scope(self._targets(self.store.resolve(cast(str, item["sha"])))),
+            item["overlap"] = self._shared(
+                source,
+                self._paths(self._targets(self.store.resolve(cast(str, item["sha"])))),
             )
         values.sort(
             key=lambda value: (
-                -value["score"],
-                -self._precision(cast(list[str], value["symbols"])),
+                -self._score(
+                    self._category(self.store.payload(cast(str, value["sha"])))
+                ),
+                -self._precision(cast(list[str], value["overlap"])),
                 -self.store.payload(value["sha"])["timestamp"].timestamp(),
                 value["sha"],
             )
@@ -130,21 +132,20 @@ class KnowledgeGraphTool:
         return values
 
     def meta(self, node: str) -> dict[str, Any]:
-        """Inspect one commit or code symbol.
+        """Inspect one commit.
 
-        For commits, this returns commit metadata, the symbols (classes, methods,
-        functions) touched by the commit, and the shared symbols between the commit
-        and the Correction.
+        Returns commit metadata, the entities (programs, classes, methods, functions)
+        touched by the commit, and the entity overlap between the commit and the correction commit.
         """
         key = self.store.resolve(node)
         kind = self.store.kind(key)
-        return {"key": key, "kind": kind} | self._meta(key, kind)
+        return {"kind": kind} | self._meta(key, kind)
 
     def content(self, sha: str, path: str | None = None) -> dict[str, Any]:
         """Read one commit patch, optionally limited to a single path, for deep inspection.
 
-        Use this for causal verification. It returns the commit diff, optionally
-        limited to one path.
+        Use this for causal verification. It returns the commit SHA, optional path
+        scope, and the commit diff.
         """
         if self._reads >= self._budget:
             raise ValueError("Diff read budget exhausted.")
@@ -167,9 +168,6 @@ class KnowledgeGraphTool:
                 )
         return {
             "sha": payload["sha"],
-            "type": self._category(payload),
-            "score": self._score(self._category(payload)),
-            "message": payload["message"],
             "path": path,
             "patch": patch,
         }
@@ -188,7 +186,7 @@ class KnowledgeGraphTool:
                 "message": payload["message"],
                 "timestamp": self._timestamp(payload["timestamp"]),
                 "files": self._files(payload),
-                "symbols": self._touched(key),
+                "entities": self._change(key),
                 "overlap": self._overlap(key),
             }
 
@@ -211,7 +209,15 @@ class KnowledgeGraphTool:
             "message": payload["message"],
             "timestamp": self._timestamp(payload["timestamp"]),
             "files": self._files(payload),
-            "symbols": self._touched(key),
+            "entities": self._change(key),
+        }
+
+    def _neighbor(self, key: str) -> dict[str, Any]:
+        payload = self.store.payload(key)
+        return {
+            "sha": payload["sha"],
+            "type": self._category(payload),
+            "files": self._files(payload),
         }
 
     def _category(self, payload: dict[str, Any]) -> str:
@@ -223,46 +229,53 @@ class KnowledgeGraphTool:
     def _files(self, payload: dict[str, Any]) -> list[str]:
         return list(cast(tuple[str, ...] | list[str], payload.get("files", ())))
 
-    def _touched(self, key: str) -> list[str]:
+    def _change(self, key: str) -> list[str]:
         grouped: dict[str, set[str]] = {}
         for edge in ("ADD", "EDIT", "DELETE"):
             for target in self.store.targets(key, edge):
                 if target.startswith("file:"):
                     continue
                 value = self.store.payload(target)
-                if value.get("urn") == "entity:program":
-                    continue
                 path = str(value["path"])
-                name = self._symbol(value)
+                name = self._entity(value)
                 if name is not None:
                     grouped.setdefault(path, set()).add(name)
-        return self._grouped(grouped)[:10]
+        return self._format(grouped)[:10]
 
     @staticmethod
-    def _symbol(payload: dict[str, Any]) -> str | None:
+    def _entity(payload: dict[str, Any]) -> str | None:
         urn = str(payload.get("urn", "")).removeprefix("entity:")
-        if not urn or urn == "program":
+        if not urn:
             return None
+        if urn == "program":
+            return "program"
         parts = urn.split(":")
         return ".".join(part.split("=", 1)[-1] for part in parts)
 
-    @staticmethod
-    def _grouped(grouped: dict[str, set[str]]) -> list[str]:
+    def _format(self, grouped: dict[str, set[str]]) -> list[str]:
         result: list[str] = []
         for path in sorted(grouped):
-            names = sorted(grouped[path])
+            names = self._names(grouped[path])
             result.append(f"{path}: {', '.join(names)}")
         return result
+
+    def _names(self, values: set[str]) -> list[str]:
+        return sorted(
+            values,
+            key=lambda value: (
+                value != "program",
+                value.count("."),
+                value,
+            ),
+        )
 
     def _overlap(self, key: str) -> list[str]:
         if self.store.after is None:
             return []
         correction = self.store.resolve(self.store.after)
-        if key == correction:
-            return []
-        return self._entities(
-            self._scope(self._targets(correction)),
-            self._scope(self._targets(key)),
+        return self._shared(
+            self._paths(self._targets(correction)),
+            self._paths(self._targets(key)),
         )
 
     def _score(self, category: str) -> float:
@@ -304,28 +317,32 @@ class KnowledgeGraphTool:
                 result.append(source)
         return result
 
-    def _entities(
+    def _shared(
         self,
         source: set[tuple[str, ...]],
         target: set[tuple[str, ...]],
     ) -> list[str]:
-        trimmed = self._trim(source & target)
         grouped: dict[str, set[str]] = {}
         file_only: list[str] = []
-        for tup in trimmed:
-            if len(tup) == 1:
-                file_only.append(tup[0].removeprefix("file="))
-            else:
-                path = tup[0].removeprefix("file=")
-                name = ".".join(part.split("=", 1)[-1] for part in tup[1:])
+        for left in source:
+            for right in target:
+                current = self._common(left, right)
+                if current is None:
+                    continue
+                if len(current) == 1:
+                    file_only.append(current[0].removeprefix("file="))
+                    continue
+                path = current[0].removeprefix("file=")
+                name = ".".join(part.split("=", 1)[-1] for part in current[1:])
                 grouped.setdefault(path, set()).add(name)
-        items = self._grouped(grouped)
-        return items or sorted(file_only)
+        items = self._format(grouped)
+        files = sorted(path for path in set(file_only) if path not in grouped)
+        return items + files
 
     def _precision(self, values: list[str]) -> int:
         return 1 if any(":" in value for value in values) else 0
 
-    def _scope(
+    def _paths(
         self,
         nodes: list[str],
     ) -> set[tuple[str, ...]]:
@@ -334,9 +351,9 @@ class KnowledgeGraphTool:
         for node in nodes:
             current = self._scopes.get(node)
             if current is None:
-                current = self._expand(self._path(node))
+                current = self._path(node)
                 self._scopes[node] = current
-            result.update(current)
+            result.add(current)
 
         return result
 
@@ -348,40 +365,26 @@ class KnowledgeGraphTool:
         path = str(payload["path"])
         urn = str(payload["urn"]).removeprefix("entity:")
         if urn == "program":
-            return (f"file={path}",)
+            return (f"file={path}", "program")
         return (f"file={path}", *tuple(urn.split(":")))
 
-    def _expand(
+    def _common(
         self,
-        value: tuple[str, ...],
-    ) -> set[tuple[str, ...]]:
-        return {value[:index] for index in range(1, len(value) + 1)}
-
-    def _trim(
-        self,
-        values: set[tuple[str, ...]],
-    ) -> list[tuple[str, ...]]:
-        result: list[tuple[str, ...]] = []
-
-        for current in sorted(values, key=lambda value: (-len(value), value)):
-            if any(self._starts(current, item) for item in result):
-                continue
-            result.append(current)
-
-        return sorted(result)
+        left: tuple[str, ...],
+        right: tuple[str, ...],
+    ) -> tuple[str, ...] | None:
+        if not left or not right or left[0] != right[0]:
+            return None
+        result: list[str] = [left[0]]
+        for a, b in zip(left[1:], right[1:]):
+            if a != b:
+                break
+            result.append(a)
+        return tuple(result)
 
     @staticmethod
     def _timestamp(value: object) -> str:
         return value.isoformat() if hasattr(value, "isoformat") else str(value)
-
-    def _starts(
-        self,
-        prefix: tuple[str, ...],
-        value: tuple[str, ...],
-    ) -> bool:
-        if len(prefix) >= len(value):
-            return False
-        return value[: len(prefix)] == prefix
 
 
 class KnowledgeGraphToolFactory:

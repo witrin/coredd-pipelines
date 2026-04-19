@@ -224,11 +224,11 @@ $$
 The current prototype exposes these tools as `candidates`, `neighbors`, `meta`, and `content`.
 `candidates` is the ranked entry point and returns ranked commits together with message, timestamp, files, and touched entities.
 In `candidates`, `entities` means the entities touched by that candidate commit.
-`neighbors` returns direct structural neighbors with the same ranked commit summary plus the shared entity overlap.
-In `neighbors`, `entities` means the shared entities between the queried commit and that neighbor.
+`neighbors` returns direct structural neighbors with commit type, touched files, and shared entity overlap.
+In `neighbors`, `overlap` means the shared entities between the queried commit and that neighbor.
 `meta` inspects one commit or code entity.
-For commits, `meta` returns commit metadata, touched entities, and shared entities with the correction as flat top-level fields.
-`content(sha, path=None)` loads the candidate patch only when the agent needs a causal comparison, with a three-read budget per case.
+For commits, `meta` returns commit metadata, touched entities under `entities`, and shared entities with the correction under `overlap`.
+`content(sha, path=None)` loads the candidate patch only when the agent needs a causal comparison and returns the commit SHA, optional path scope, and patch, with a three-read budget per case.
 This keeps the graph itself lightweight while still exposing the same functional tool surface described in the paper.
 
 > “The Agentic BIC Search phase navigates the TKG to identify the most likely BIC through structural reasoning and causality verification. The search agent receives context about the BFC (modified files, extracted functions, commit message) and produces a prediction identifying the BIC commit with a reasoning chain.”

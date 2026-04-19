@@ -394,7 +394,7 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                     "message": "foo",
                     "timestamp": "2024-01-03T00:00:00+00:00",
                     "files": ["a.py"],
-                    "symbols": ["a.py: foo"],
+                    "entities": ["a.py: foo"],
                 },
                 {
                     "sha": "bar",
@@ -403,7 +403,7 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                     "message": "bar",
                     "timestamp": "2024-01-02T00:00:00+00:00",
                     "files": ["a.py"],
-                    "symbols": ["a.py: foo"],
+                    "entities": ["a.py: foo"],
                 },
                 {
                     "sha": "baz",
@@ -412,7 +412,7 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                     "message": "baz",
                     "timestamp": "2024-01-01T00:00:00+00:00",
                     "files": ["b.py"],
-                    "symbols": [],
+                    "entities": [],
                 },
             ],
         )
@@ -467,14 +467,13 @@ class TestKnowledgeGraphTool(unittest.TestCase):
         self.assertEqual(
             agent.meta("bar"),
             {
-                "key": "commit:bar",
                 "kind": "commit",
                 "sha": "bar",
                 "type": "blame-ancestor",
                 "message": "bar",
                 "timestamp": "2024-01-02T00:00:00+00:00",
                 "files": ["a.py"],
-                "symbols": ["a.py: foo"],
+                "entities": ["a.py: foo"],
                 "overlap": ["a.py: foo"],
             },
         )
@@ -482,6 +481,101 @@ class TestKnowledgeGraphTool(unittest.TestCase):
         self.assertNotIn("parents", agent.meta("bar"))
         self.assertNotIn("score", agent.meta("bar"))
         self.assertNotIn("predecessors", agent.meta("bar"))
+
+    def test_meta_reports_prefix_overlap_with_correction(self) -> None:
+        repository = Mock(spec_set=["parents"])
+        store = KnowledgeGraphStore()
+        store.after = "foo"
+        store.add("file", {"path": "a.py"})
+        store.add(
+            "class",
+            {
+                "kind": "class",
+                "path": "a.py",
+                "urn": "entity:class=Outer",
+                "name": "Outer",
+                "source": "gumtree",
+            },
+        )
+        store.add(
+            "method",
+            {
+                "kind": "method",
+                "path": "a.py",
+                "urn": "entity:class=Outer:method=bar",
+                "name": "bar",
+                "source": "gumtree",
+            },
+        )
+        store.add(
+            "commit",
+            {
+                "sha": "foo",
+                "type": "correction",
+                "message": "foo",
+                "timestamp": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                "parents": (),
+                "files": ("a.py",),
+            },
+        )
+        store.add(
+            "commit",
+            {
+                "sha": "bar",
+                "type": "blame-ancestor",
+                "message": "bar",
+                "timestamp": datetime(2024, 1, 2, tzinfo=timezone.utc),
+                "parents": (),
+                "files": ("a.py",),
+            },
+        )
+        store.link("MODIFIES", "commit:foo", "file:a.py")
+        store.link("EDIT", "commit:foo", "entity:a.py:class=Outer:method=bar")
+        store.link("MODIFIES", "commit:bar", "file:a.py")
+        store.link("EDIT", "commit:bar", "entity:a.py:class=Outer")
+
+        agent = KnowledgeGraphTool(
+            repository=repository,
+            store=store,
+        )
+
+        self.assertEqual(agent.meta("bar")["overlap"], ["a.py: Outer"])
+
+    def test_meta_reports_self_overlap_for_correction(self) -> None:
+        repository = Mock(spec_set=["parents"])
+        store = KnowledgeGraphStore()
+        store.after = "foo"
+        store.add("file", {"path": "a.py"})
+        store.add(
+            "function",
+            {
+                "kind": "function",
+                "path": "a.py",
+                "urn": "entity:function=foo",
+                "name": "foo",
+                "source": "gumtree",
+            },
+        )
+        store.add(
+            "commit",
+            {
+                "sha": "foo",
+                "type": "correction",
+                "message": "foo",
+                "timestamp": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                "parents": (),
+                "files": ("a.py",),
+            },
+        )
+        store.link("MODIFIES", "commit:foo", "file:a.py")
+        store.link("EDIT", "commit:foo", "entity:a.py:function=foo")
+
+        agent = KnowledgeGraphTool(
+            repository=repository,
+            store=store,
+        )
+
+        self.assertEqual(agent.meta("foo")["overlap"], ["a.py: foo"])
 
     def test_neighbors_prefer_entity_overlap_and_map_type(self) -> None:
         repository = Mock(spec_set=["parents"])
@@ -536,25 +630,19 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                 {
                     "sha": "bar",
                     "type": "blame-ancestor",
-                    "score": 0.6,
-                    "message": "bar",
-                    "timestamp": "2024-01-07T00:00:00+00:00",
                     "files": [],
-                    "symbols": ["a.py: foo"],
+                    "overlap": ["a.py: foo"],
                 },
                 {
                     "sha": "baz",
                     "type": "correction-ancestor",
-                    "score": 0.3,
-                    "message": "baz",
-                    "timestamp": "2024-01-04T00:00:00+00:00",
                     "files": [],
-                    "symbols": ["a.py"],
+                    "overlap": ["a.py"],
                 },
             ],
         )
 
-    def test_neighbors_collapse_to_longest_shared_prefix(self) -> None:
+    def test_neighbors_fall_back_to_file_when_levels_differ(self) -> None:
         repository = Mock(spec_set=["parents"])
         store = KnowledgeGraphStore()
         store.add("file", {"path": "a.py"})
@@ -615,11 +703,134 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                 {
                     "sha": "bar",
                     "type": "blame-ancestor",
-                    "score": 0.6,
-                    "message": "bar",
-                    "timestamp": "2024-01-07T00:00:00+00:00",
                     "files": [],
-                    "symbols": ["a.py: Outer"],
+                    "overlap": ["a.py: Outer"],
+                },
+            ],
+        )
+
+    def test_neighbors_preserve_program_and_function_levels(self) -> None:
+        repository = Mock(spec_set=["parents"])
+        store = KnowledgeGraphStore()
+        store.add("file", {"path": "a.py"})
+        store.add(
+            "program",
+            {
+                "kind": "program",
+                "path": "a.py",
+                "urn": "entity:program",
+                "name": "program",
+                "source": "gumtree",
+            },
+        )
+        store.add(
+            "function",
+            {
+                "kind": "function",
+                "path": "a.py",
+                "urn": "entity:function=foo",
+                "name": "foo",
+                "source": "gumtree",
+            },
+        )
+        for sha, category, day in (
+            ("foo", "blame", 11),
+            ("bar", "blame-ancestor", 7),
+        ):
+            store.add(
+                "commit",
+                {
+                    "sha": sha,
+                    "type": category,
+                    "message": sha,
+                    "timestamp": datetime(
+                        2024,
+                        1,
+                        day,
+                        tzinfo=timezone.utc,
+                    ),
+                    "parents": (),
+                    "files": (),
+                },
+            )
+
+        store.link("MODIFIES", "commit:foo", "file:a.py")
+        store.link("EDIT", "commit:foo", "entity:a.py:program")
+        store.link("EDIT", "commit:foo", "entity:a.py:function=foo")
+        store.link("MODIFIES", "commit:bar", "file:a.py")
+        store.link("EDIT", "commit:bar", "entity:a.py:program")
+        store.link("EDIT", "commit:bar", "entity:a.py:function=foo")
+
+        agent = KnowledgeGraphTool(
+            repository=repository,
+            store=store,
+        )
+
+        self.assertEqual(
+            agent.neighbors("foo"),
+            [
+                {
+                    "sha": "bar",
+                    "type": "blame-ancestor",
+                    "files": [],
+                    "overlap": ["a.py: program, foo"],
+                },
+            ],
+        )
+
+    def test_candidates_include_program_entities(self) -> None:
+        repository = Mock(spec_set=["parents"])
+        store = KnowledgeGraphStore()
+        store.add(
+            "program",
+            {
+                "kind": "program",
+                "path": "a.py",
+                "urn": "entity:program",
+                "name": "program",
+                "source": "gumtree",
+            },
+        )
+        store.add(
+            "function",
+            {
+                "kind": "function",
+                "path": "a.py",
+                "urn": "entity:function=foo",
+                "name": "foo",
+                "source": "gumtree",
+            },
+        )
+        store.add(
+            "commit",
+            {
+                "sha": "foo",
+                "type": "blame",
+                "message": "foo",
+                "timestamp": datetime(2024, 1, 3, tzinfo=timezone.utc),
+                "parents": (),
+                "files": ("a.py",),
+            },
+        )
+        store.link("EDIT", "commit:foo", "entity:a.py:program")
+        store.link("EDIT", "commit:foo", "entity:a.py:function=foo")
+
+        agent = KnowledgeGraphTool(
+            repository=repository,
+            store=store,
+        )
+
+        self.assertEqual(
+            agent.candidates(),
+            [
+                {
+                    "sha": "foo",
+                    "type": "blame",
+                    "score": 1.0,
+                    "message": "foo",
+                    "timestamp": "2024-01-03T00:00:00+00:00",
+                    "files": ["a.py"],
+                    "entities": ["a.py: program, foo"],
                 },
             ],
         )
@@ -675,7 +886,7 @@ class TestKnowledgeGraphTool(unittest.TestCase):
                     "message": "foo",
                     "timestamp": "2024-01-03T00:00:00+00:00",
                     "files": ["a.py"],
-                    "symbols": ["a.py: Outer.bar"],
+                    "entities": ["a.py: Outer.bar"],
                 },
             ],
         )
@@ -722,6 +933,9 @@ class TestKnowledgeGraphTool(unittest.TestCase):
             self.assertIn("diff --git a/a.py b/a.py", result["patch"])
             self.assertIn("@@", result["patch"])
             self.assertNotIn("index ", result["patch"])
+            self.assertNotIn("type", result)
+            self.assertNotIn("score", result)
+            self.assertNotIn("message", result)
 
     def test_tools(self) -> None:
         agent = KnowledgeGraphTool(
@@ -735,10 +949,11 @@ class TestKnowledgeGraphTool(unittest.TestCase):
         self.assertTrue(all(isinstance(tool, BaseTool) for tool in tools))
         self.assertIn("top-ranked commit candidates", tools[0].description)
         self.assertIn("touched by that commit", tools[0].description)
-        self.assertIn("shared symbols", tools[1].description)
-        self.assertIn("Inspect one commit or code symbol", tools[2].description)
-        self.assertIn("shared symbols between the commit", tools[2].description)
-        self.assertIn("It returns the commit diff", tools[3].description)
+        self.assertIn("entity", tools[1].description)
+        self.assertIn("touched files", tools[1].description)
+        self.assertIn("Inspect one commit", tools[2].description)
+        self.assertIn("entity overlap between", tools[2].description)
+        self.assertIn("commit SHA, optional path", tools[3].description)
 
     def test_budget(self) -> None:
         repository = Mock(spec_set=["parents"])

@@ -2797,8 +2797,9 @@ class TestLLM4SZZGraph(unittest.TestCase):
                    logic. A commit that merely exposes or triggers a pre-existing bug is
                    not the introducer.
 
-                Each candidate lists modified files and symbols (classes, methods,
-                functions). Use these to assess structural overlap with the correction.
+                Each candidate lists modified files and entities (programs, classes,
+                methods, functions). Use these to assess structural overlap with the
+                correction.
 
                 ## Constraints
                 - Limit content to 3 calls per case. Use it to verify, not to explore.
