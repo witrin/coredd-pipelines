@@ -1145,7 +1145,7 @@ class TestRepositoryTool(unittest.TestCase):
                 [
                     {
                         "path": "foo.py",
-                        "matches": [{"line": 1, "text": "needle"}],
+                        "matches": "L1: needle",
                     }
                 ],
             )
@@ -1170,14 +1170,11 @@ class TestRepositoryTool(unittest.TestCase):
                 [
                     {
                         "path": "bar.py",
-                        "matches": [{"line": 1, "text": "needle"}],
+                        "matches": "L1: needle",
                     },
                     {
                         "path": "foo.py",
-                        "matches": [
-                            {"line": 1, "text": "needle"},
-                            {"line": 3, "text": "needle"},
-                        ],
+                        "matches": "L1: needle\nL3: needle",
                     },
                 ],
             )
@@ -1202,7 +1199,7 @@ class TestRepositoryTool(unittest.TestCase):
                 [
                     {
                         "path": "bar.py",
-                        "matches": [{"line": 1, "text": "needle"}],
+                        "matches": "L1: needle",
                     }
                 ],
             )
@@ -1265,10 +1262,7 @@ class TestRepositoryTool(unittest.TestCase):
                 [
                     {
                         "path": "foo.py",
-                        "matches": [
-                            {"line": 1, "text": "needle"},
-                            {"line": 2, "text": "needful"},
-                        ],
+                        "matches": "L1: needle\nL2: needful",
                     }
                 ],
             )
@@ -1305,14 +1299,11 @@ class TestRepositoryTool(unittest.TestCase):
                 [
                     {
                         "path": "bar.py",
-                        "matches": [
-                            {"line": 1, "text": "needle"},
-                            {"line": 2, "text": "needle"},
-                        ],
+                        "matches": "L1: needle\nL2: needle",
                     },
                     {
                         "path": "foo.py",
-                        "matches": [{"line": 1, "text": "needle"}],
+                        "matches": "L1: needle",
                     },
                 ],
             )

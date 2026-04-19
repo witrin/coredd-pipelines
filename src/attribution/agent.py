@@ -623,16 +623,16 @@ class RepositoryTool:
                 text = data.decode("utf-8")
             except UnicodeDecodeError:
                 continue
-            matches: list[dict[str, Any]] = []
+            matches: list[str] = []
             for index, line in enumerate(text.splitlines(), start=1):
                 if pattern.search(line) is None:
                     continue
-                matches.append({"line": index, "text": line})
+                matches.append(f"L{index}: {line}")
                 if len(matches) >= max - total:
                     break
             if not matches:
                 continue
-            result.append({"path": current, "matches": matches})
+            result.append({"path": current, "matches": "\n".join(matches)})
             total += len(matches)
             if total >= max:
                 break
