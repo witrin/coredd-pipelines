@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 from typing import Any, TypedDict
 
 from langchain_core.messages import HumanMessage
@@ -60,7 +61,9 @@ class KnowledgeGraphSeedNode:
     def run(self, input: SeedInput) -> SeedOutput:
         correction = input.get("correction")
         if correction is None or self._repository is None:
-            raise ValueError("KnowledgeGraphSeedNode requires correction and repository.")
+            raise ValueError(
+                "KnowledgeGraphSeedNode requires correction and repository."
+            )
 
         base = correction["base"]
         after = correction["after"]
@@ -238,7 +241,7 @@ class KnowledgeGraphSearchNode:
               candidate is conclusive.
             - Do not inspect all candidates exhaustively. Focus on the most plausible.
 
-            Return the full 40-character introducer SHA, or null if no justified
+            Return ONLY the full 40-character introducer SHA, or null if no justified
             decision can be made.
             """
         )
@@ -286,7 +289,8 @@ class SearchNormalizer:
             else structured["introducer"]
         )
         if isinstance(introducer, str):
-            introducer = introducer.strip() or None
+            match = re.search(r"[0-9a-f]{7,40}", introducer)
+            introducer = match.group(0) if match else None
         return {"introducer": introducer}
 
 
@@ -422,9 +426,9 @@ class RepositorySearchNode:
             the codebase at a snapshot. Do not exhaust the tool budget exploring alternatives
             once you have a confirmed candidate.
 
-            Return the full 40-character introducer SHA. Once evidence points to a candidate,
-            return it — uncertainty alone is not a reason to return null. Return null only if
-            no evidence was found at all.
+            Return ONLY the full 40-character introducer SHA. Once evidence points to a
+            candidate, return it — uncertainty alone is not a reason to return null.
+            Return null only if no evidence was found at all.
             """
         )
         graph = create_react_agent(
