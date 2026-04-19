@@ -29,6 +29,7 @@ from benchmark.attribution.validation import (
 )
 from benchmark.scope.cohort import ChangeCollector, IssueCollector
 from benchmark.attribution.ingestion import ValidationExtractor
+from benchmark.attribution.reference import ValidationPartitionReport
 from benchmark.scope.ingestion import ChangeExtractor, IssueExtractor, SourceExtractor
 from components.io import BlobStream
 
@@ -1016,6 +1017,55 @@ def ingest_validation_context_index(
     table = pa.Table.from_pylist(rows, schema=schema)
 
     context.log.info("Indexed %d validation context cases.", table.num_rows)
+
+    return table
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    group_name="ingest",
+    ins={"ingest_validation_set": dg.AssetIn()},
+)
+def ingest_validation_sources_health(
+    context: dg.AssetExecutionContext,
+    ingest_validation_set: pa.Table,
+) -> pa.Table:
+    """Report broken and missing validation source partitions."""
+    import polars as pl
+
+    instance = context.instance
+    df = pl.from_arrow(ingest_validation_set)
+    names = sorted(df["repository"].unique().to_list())
+    keys = {partitions.Shard.to_space(names, name) for name in names}
+
+    report = ValidationPartitionReport(context, instance)
+    entries = []
+    cursor = None
+
+    while True:
+        batch, cursor = report.query(keys, cursor)
+        entries.extend(batch)
+        if not batch:
+            break
+
+    rows = []
+    for entry in entries:
+        try:
+            repository = partitions.Shard.from_space(entry["partition"], names)
+        except (ValueError, IndexError):
+            repository = entry["partition"]
+
+        rows.append({
+            "repository": repository,
+            "partition": entry["partition"],
+            "status": entry["status"],
+            "error": entry["error"],
+        })
+
+    rows.sort(key=lambda row: (row["status"], row["repository"]))
+    table = pa.Table.from_pylist(rows)
+
+    context.log.info("Found %d broken/missing partitions.", len(rows))
 
     return table
 

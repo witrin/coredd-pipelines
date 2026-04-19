@@ -5,9 +5,12 @@ from datetime import date, datetime
 from components.decorator import asset_sensor
 from components.io import TableAssetStorage
 from benchmark.definitions.partitions import Shard
+from benchmark.attribution.reference import ValidationPartitionReport
 
 import dagster as dg
 import pyarrow.compute as pc
+
+
 
 
 @asset_sensor(
@@ -276,3 +279,29 @@ def ingest_validation_sources_partition_sensor(
     )
 
     return None
+
+
+@dg.sensor()
+def ingest_validation_sources_partition_prune_sensor(context: dg.SensorEvaluationContext):
+    """Remove dynamic partitions that have failed materialization under the current asset version."""
+    instance = context.instance
+    existing = set(instance.get_dynamic_partitions("ingest_validation_sources"))
+
+    if not existing:
+        return
+
+    cursor = None
+    if context.cursor:
+        cursor = datetime.fromisoformat(context.cursor)
+
+    report = ValidationPartitionReport(context, instance)
+    entries, watermark = report.query(existing, cursor)
+    broken = {entry["partition"] for entry in entries}
+
+    if broken:
+        for key in sorted(broken):
+            instance.delete_dynamic_partition("ingest_validation_sources", key)
+        context.log.info("Pruned %d broken partitions", len(broken))
+
+    if watermark is not None:
+        context.update_cursor(watermark.isoformat())
