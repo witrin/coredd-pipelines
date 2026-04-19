@@ -53,7 +53,7 @@ def snapshot_op(context: dg.OpExecutionContext, config: SnapshotConfig) -> dg.Ou
     format: str | None = None
 
     for partition in keys:
-        normalized = partition.replace("|", ";").replace("/", "-").replace("_", "-")
+        normalized = partition.replace("|", ":").replace("/", "-").replace("_", "-")
         places = [location.current]
 
         if location.current != location.default:
@@ -153,7 +153,7 @@ def snapshot_op(context: dg.OpExecutionContext, config: SnapshotConfig) -> dg.Ou
                 resolver.key,
                 version,
                 location.current,
-                config.partition.replace("|", ";").replace("/", "-").replace("_", "-"),
+                config.partition.replace("|", ":").replace("/", "-").replace("_", "-"),
             )
             storage.store(blob=blob, file=temporary.name)
     if format == "tar.gz":
@@ -163,7 +163,7 @@ def snapshot_op(context: dg.OpExecutionContext, config: SnapshotConfig) -> dg.Ou
                 resolver.key,
                 version,
                 location.current,
-                config.partition.replace("|", ";").replace("/", "-").replace("_", "-"),
+                config.partition.replace("|", ":").replace("/", "-").replace("_", "-"),
             )
             + "data.tar.gz"
         )
@@ -246,7 +246,7 @@ def evaluation_demo_op(
     location = Location.load()
     resolver = AssetResolver(context, "ingest-validation-context")
     version = resolver.version()
-    normalized = config.partition.replace("|", ";").replace("/", "-").replace("_", "-")
+    normalized = config.partition.replace("|", ":").replace("/", "-").replace("_", "-")
     prefix = storage.prefix(resolver.key, version, location.current, normalized)
 
     client = cloud_storage.Client(project=os.environ.get("CLOUD_PROJECT"))

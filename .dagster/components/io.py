@@ -130,7 +130,7 @@ class AssetCloudStorage:
         if partition is None:
             return "default"
 
-        return partition.replace("|", ";").replace("/", "-").replace("_", "-")
+        return partition.replace("|", ":").replace("/", "-").replace("_", "-")
 
     def _version_from_context(
         self,
@@ -240,7 +240,7 @@ class AssetCloudStorage:
         version = self._version(context, None, asset_key)
 
         if partition is not None:
-            norm = partition.replace("|", ";").replace("/", "-").replace("_", "-")
+            norm = partition.replace("|", ":").replace("/", "-").replace("_", "-")
         else:
             norm = self._partition(context, None)
 
@@ -309,7 +309,7 @@ class TableAssetStorage(AssetCloudStorage):
         key = self._key(context=context, event=event, location=location)
 
         if partition is not None:
-            partition = partition.replace("|", ";").replace("/", "-").replace("_", "-")
+            partition = partition.replace("|", ":").replace("/", "-").replace("_", "-")
         else:
             partition = self._partition(context=context, event=event)
 
