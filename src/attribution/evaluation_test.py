@@ -11,6 +11,7 @@ from benchmark.attribution.evaluation import (
     Metrics,
     RepositoryTraceProcessor,
     Span,
+    TraceMonitor,
     TokenProcessor,
     TraceProcessor,
     TraceSerializer,
@@ -340,7 +341,67 @@ class TestMessageProcessor(unittest.TestCase):
             document["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
         )
         self.assertNotIn("llm.messages", attributes)
-        self.assertNotIn("llm.generation", attributes)
+
+
+class TestTraceMonitor(unittest.TestCase):
+    def test_llm_output_reads_nested_cached_tokens(self) -> None:
+        lines: list[str] = []
+        monitor = TraceMonitor(sink=lines.append)
+
+        monitor({
+            "event": {
+                "event": "llm_end",
+                "node": "agent",
+                "payload": {
+                    "llm_output": {
+                        "token_usage": {
+                            "prompt_tokens": 100,
+                            "completion_tokens": 50,
+                            "prompt_tokens_details": {
+                                "cached_tokens": 10,
+                            },
+                        }
+                    }
+                },
+            }
+        })
+        monitor({
+            "event": {
+                "event": "node_end",
+                "node": "LangGraph",
+                "parent": None,
+                "payload": {},
+            }
+        })
+
+        self.assertEqual(lines[0], "Thinking #1 | input=100 output=50 cached=10")
+        self.assertEqual(lines[1], "Final | turns=1 input=100 output=50 cached=10")
+
+    def test_generation_usage_reads_nested_cached_tokens(self) -> None:
+        lines: list[str] = []
+        monitor = TraceMonitor(sink=lines.append)
+
+        monitor({
+            "event": {
+                "event": "llm_end",
+                "node": "agent",
+                "payload": {
+                    "generations": [[{
+                        "message": {
+                            "usage_metadata": {
+                                "input_tokens": 80,
+                                "output_tokens": 20,
+                                "input_token_details": {
+                                    "cache_read": 12,
+                                },
+                            }
+                        }
+                    }]],
+                },
+            }
+        })
+
+        self.assertEqual(lines[0], "Thinking #1 | input=80 output=20 cached=12")
 
 
 class TestRepositoryTraceProcessor(unittest.TestCase):

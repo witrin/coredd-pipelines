@@ -553,15 +553,40 @@ class TraceMonitor:
             result = result[:80] + "..."
         self._sink(f"  Calling #{self._turn} | tool={node} result={result}")
 
+    def _pick(self, usage: Mapping[str, object], *keys: str) -> int:
+        for key in keys:
+            value = usage.get(key)
+            if isinstance(value, int):
+                return value
+        return 0
+
+    def _cached(self, usage: Mapping[str, object]) -> int:
+        for key in ("cached_tokens", "cache_read_input_tokens", "prompt_cache_hit_tokens"):
+            value = usage.get(key)
+            if isinstance(value, int):
+                return value
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict):
+            value = details.get("cached_tokens")
+            if isinstance(value, int):
+                return value
+        details = usage.get("input_token_details")
+        if isinstance(details, dict):
+            for key in ("cache_read", "cached"):
+                value = details.get(key)
+                if isinstance(value, int):
+                    return value
+        return 0
+
     def _tokens(self, payload: dict[str, object]) -> dict[str, int]:
         output = payload.get("llm_output")
         if isinstance(output, dict):
             usage = output.get("token_usage")
             if isinstance(usage, dict):
                 return {
-                    "input": usage.get("prompt_tokens", 0),
-                    "output": usage.get("completion_tokens", 0),
-                    "cached": usage.get("cached_tokens", 0),
+                    "input": self._pick(usage, "prompt_tokens", "input_tokens"),
+                    "output": self._pick(usage, "completion_tokens", "output_tokens"),
+                    "cached": self._cached(usage),
                 }
         for batch in payload.get("generations") or []:
             for g in (batch if isinstance(batch, list) else [batch]):
@@ -570,9 +595,9 @@ class TraceMonitor:
                 usage = (g.get("message") or {}).get("usage_metadata")
                 if isinstance(usage, dict):
                     return {
-                        "input": usage.get("input_tokens", 0),
-                        "output": usage.get("output_tokens", 0),
-                        "cached": usage.get("cache_read_input_tokens", 0),
+                        "input": self._pick(usage, "prompt_tokens", "input_tokens"),
+                        "output": self._pick(usage, "completion_tokens", "output_tokens"),
+                        "cached": self._cached(usage),
                     }
         return {}
 
