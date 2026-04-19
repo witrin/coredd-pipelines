@@ -401,12 +401,13 @@ class MessageProcessor:
 
 
 class TokenProcessor:
-    """Extracts prompt, completion, and cached token counts from an LLM
-    span's payload and exposes them as ``llm.tokens.input``,
-    ``llm.tokens.output``, and ``llm.tokens.cached`` attributes. Handles the
-    shape differences between LangChain's ``token_usage`` summaries and the
-    per-generation ``usage_metadata`` format so callers do not have to care
-    which one the underlying model returned."""
+    """Extracts prompt, completion, cached, and reasoning token counts from
+    an LLM span's payload and exposes them as ``llm.tokens.input``,
+    ``llm.tokens.output``, ``llm.tokens.cached``, and
+    ``llm.tokens.reasoning`` attributes. Handles the shape differences
+    between LangChain's ``token_usage`` summaries and the per-generation
+    ``usage_metadata`` format so callers do not have to care which one the
+    underlying model returned."""
 
     def process(self, span: Span) -> Mapping[str, object]:
         if span.kind != "llm":
@@ -418,6 +419,7 @@ class TokenProcessor:
             "llm.tokens.input": usage.get("input", 0),
             "llm.tokens.output": usage.get("output", 0),
             "llm.tokens.cached": usage.get("cached", 0),
+            "llm.tokens.reasoning": usage.get("reasoning", 0),
         }
 
     def _usage(self, payload: Mapping[str, object]) -> Mapping[str, int] | None:
@@ -457,6 +459,7 @@ class TokenProcessor:
             "input": prompt or 0,
             "output": completion or 0,
             "cached": self._cached(usage),
+            "reasoning": self._reasoning(usage),
         }
 
     def _pick(self, usage: Mapping[str, object], *keys: str) -> int | None:
@@ -484,6 +487,24 @@ class TokenProcessor:
                     return value
         return 0
 
+    def _reasoning(self, usage: Mapping[str, object]) -> int:
+        for key in ("reasoning_tokens",):
+            value = usage.get(key)
+            if isinstance(value, int):
+                return value
+        details = usage.get("completion_tokens_details")
+        if isinstance(details, dict):
+            value = details.get("reasoning_tokens")
+            if isinstance(value, int):
+                return value
+        details = usage.get("output_token_details")
+        if isinstance(details, dict):
+            for key in ("reasoning", "reasoning_tokens"):
+                value = details.get(key)
+                if isinstance(value, int):
+                    return value
+        return 0
+
 
 class TraceMonitor:
     """Hook for ``ValidationExecutor`` that emits one-line summaries per
@@ -496,6 +517,7 @@ class TraceMonitor:
         self._total_input = 0
         self._total_output = 0
         self._total_cached = 0
+        self._total_reasoning = 0
 
     def __call__(self, envelope: dict[str, object]) -> None:
         event = envelope["event"]
@@ -521,6 +543,7 @@ class TraceMonitor:
                 f" input={self._total_input}"
                 f" output={self._total_output}"
                 f" cached={self._total_cached}"
+                f" reasoning={self._total_reasoning}"
             )
 
     def _on_llm_end(self, payload: dict[str, object]) -> None:
@@ -529,11 +552,13 @@ class TraceMonitor:
         self._total_input += tokens.get("input", 0)
         self._total_output += tokens.get("output", 0)
         self._total_cached += tokens.get("cached", 0)
+        self._total_reasoning += tokens.get("reasoning", 0)
         self._sink(
             f"Thinking #{self._turn}"
             f" | input={tokens.get('input', 0)}"
             f" output={tokens.get('output', 0)}"
             f" cached={tokens.get('cached', 0)}"
+            f" reasoning={tokens.get('reasoning', 0)}"
         )
         for batch in payload.get("generations") or []:
             for g in (batch if isinstance(batch, list) else [batch]):
@@ -578,6 +603,24 @@ class TraceMonitor:
                     return value
         return 0
 
+    def _reasoning(self, usage: Mapping[str, object]) -> int:
+        for key in ("reasoning_tokens",):
+            value = usage.get(key)
+            if isinstance(value, int):
+                return value
+        details = usage.get("completion_tokens_details")
+        if isinstance(details, dict):
+            value = details.get("reasoning_tokens")
+            if isinstance(value, int):
+                return value
+        details = usage.get("output_token_details")
+        if isinstance(details, dict):
+            for key in ("reasoning", "reasoning_tokens"):
+                value = details.get(key)
+                if isinstance(value, int):
+                    return value
+        return 0
+
     def _tokens(self, payload: dict[str, object]) -> dict[str, int]:
         output = payload.get("llm_output")
         if isinstance(output, dict):
@@ -587,6 +630,7 @@ class TraceMonitor:
                     "input": self._pick(usage, "prompt_tokens", "input_tokens"),
                     "output": self._pick(usage, "completion_tokens", "output_tokens"),
                     "cached": self._cached(usage),
+                    "reasoning": self._reasoning(usage),
                 }
         for batch in payload.get("generations") or []:
             for g in (batch if isinstance(batch, list) else [batch]):
@@ -598,6 +642,7 @@ class TraceMonitor:
                         "input": self._pick(usage, "prompt_tokens", "input_tokens"),
                         "output": self._pick(usage, "completion_tokens", "output_tokens"),
                         "cached": self._cached(usage),
+                        "reasoning": self._reasoning(usage),
                     }
         return {}
 

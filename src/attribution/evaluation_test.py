@@ -113,6 +113,7 @@ class TestTraceSerializer(unittest.TestCase):
                         "prompt_tokens": 100,
                         "completion_tokens": 50,
                         "cached_tokens": 10,
+                        "reasoning_tokens": 7,
                     }
                 }
             },
@@ -129,6 +130,7 @@ class TestTraceSerializer(unittest.TestCase):
         self.assertEqual(attributes["llm.tokens.input"]["intValue"], "100")
         self.assertEqual(attributes["llm.tokens.output"]["intValue"], "50")
         self.assertEqual(attributes["llm.tokens.cached"]["intValue"], "10")
+        self.assertEqual(attributes["llm.tokens.reasoning"]["intValue"], "7")
 
     def test_tool_error_sets_error_status(self) -> None:
         trace = Trace(seed="foo")
@@ -357,6 +359,7 @@ class TestTraceMonitor(unittest.TestCase):
                         "token_usage": {
                             "prompt_tokens": 100,
                             "completion_tokens": 50,
+                            "reasoning_tokens": 7,
                             "prompt_tokens_details": {
                                 "cached_tokens": 10,
                             },
@@ -374,8 +377,8 @@ class TestTraceMonitor(unittest.TestCase):
             }
         })
 
-        self.assertEqual(lines[0], "Thinking #1 | input=100 output=50 cached=10")
-        self.assertEqual(lines[1], "Final | turns=1 input=100 output=50 cached=10")
+        self.assertEqual(lines[0], "Thinking #1 | input=100 output=50 cached=10 reasoning=7")
+        self.assertEqual(lines[1], "Final | turns=1 input=100 output=50 cached=10 reasoning=7")
 
     def test_generation_usage_reads_nested_cached_tokens(self) -> None:
         lines: list[str] = []
@@ -391,6 +394,9 @@ class TestTraceMonitor(unittest.TestCase):
                             "usage_metadata": {
                                 "input_tokens": 80,
                                 "output_tokens": 20,
+                                "output_token_details": {
+                                    "reasoning": 5,
+                                },
                                 "input_token_details": {
                                     "cache_read": 12,
                                 },
@@ -401,7 +407,7 @@ class TestTraceMonitor(unittest.TestCase):
             }
         })
 
-        self.assertEqual(lines[0], "Thinking #1 | input=80 output=20 cached=12")
+        self.assertEqual(lines[0], "Thinking #1 | input=80 output=20 cached=12 reasoning=5")
 
 
 class TestRepositoryTraceProcessor(unittest.TestCase):
