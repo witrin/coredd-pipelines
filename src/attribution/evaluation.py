@@ -189,7 +189,7 @@ class AttributionTraceProcessor:
             self._seen_commits.update(shas)
             attributes["attribution.commits"] = len(new_shas)
             attributes["attribution.commits.total"] = len(shas)
-            attributes["attribution.context.commits"] = sum(1 for sha in new_shas if sha in context_commits)
+            attributes["attribution.context.meta"] = sum(1 for sha in new_shas if sha in context_commits)
         lines = self._lines(span.name, span.inputs)
         if lines is not None:
             new_lines = lines - self._seen_lines

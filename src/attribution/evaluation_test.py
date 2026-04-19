@@ -442,7 +442,7 @@ class TestRepositoryTraceProcessor(unittest.TestCase):
         )
 
         self.assertEqual(attributes["attribution.commits"]["intValue"], "1")
-        self.assertEqual(attributes["attribution.context.commits"]["intValue"], "1")
+        self.assertEqual(attributes["attribution.context.meta"]["intValue"], "1")
         self.assertEqual(attributes["attribution.context.lines"]["intValue"], "3")
         self.assertEqual(attributes["attribution.context.lines.correction"]["intValue"], "1")
         self.assertEqual(attributes["attribution.context.lines.lineage"]["intValue"], "1")
@@ -485,7 +485,7 @@ class TestRepositoryTraceProcessor(unittest.TestCase):
         )
 
         self.assertEqual(attributes["attribution.commits"]["intValue"], "3")
-        self.assertEqual(attributes["attribution.context.commits"]["intValue"], "1")
+        self.assertEqual(attributes["attribution.context.meta"]["intValue"], "1")
         self.assertNotIn("attribution.context.lines", attributes)
 
     def test_repeated_commit_deduplicates(self) -> None:
@@ -560,7 +560,7 @@ class TestRepositoryTraceProcessor(unittest.TestCase):
         )
 
         self.assertEqual(attributes["attribution.commits"]["intValue"], "1")
-        self.assertEqual(attributes["attribution.context.commits"]["intValue"], "0")
+        self.assertEqual(attributes["attribution.context.meta"]["intValue"], "0")
         self.assertNotIn("attribution.context.lines", attributes)
 
 
@@ -598,7 +598,7 @@ class TestKnowledgeGraphTraceProcessor(unittest.TestCase):
         )
 
         self.assertEqual(attributes["attribution.commits"]["intValue"], "3")
-        self.assertEqual(attributes["attribution.context.commits"]["intValue"], "2")
+        self.assertEqual(attributes["attribution.context.meta"]["intValue"], "2")
         self.assertNotIn("attribution.context.lines", attributes)
 
     def test_content_reports_commits_and_lines(self) -> None:
@@ -634,7 +634,7 @@ class TestKnowledgeGraphTraceProcessor(unittest.TestCase):
         )
 
         self.assertEqual(attributes["attribution.commits"]["intValue"], "1")
-        self.assertEqual(attributes["attribution.context.commits"]["intValue"], "1")
+        self.assertEqual(attributes["attribution.context.meta"]["intValue"], "1")
         self.assertEqual(attributes["attribution.context.lines"]["intValue"], "3")
         self.assertEqual(attributes["attribution.context.lines.lineage"]["intValue"], "2")
         self.assertEqual(attributes["attribution.context.lines.cross"]["intValue"], "1")
@@ -672,7 +672,7 @@ class TestKnowledgeGraphTraceProcessor(unittest.TestCase):
         )
 
         self.assertEqual(attributes["attribution.commits"]["intValue"], "2")
-        self.assertEqual(attributes["attribution.context.commits"]["intValue"], "1")
+        self.assertEqual(attributes["attribution.context.meta"]["intValue"], "1")
 
     def test_meta_reports_single_commit(self) -> None:
         trace = Trace(seed="foo")
@@ -707,7 +707,7 @@ class TestKnowledgeGraphTraceProcessor(unittest.TestCase):
         )
 
         self.assertEqual(attributes["attribution.commits"]["intValue"], "1")
-        self.assertEqual(attributes["attribution.context.commits"]["intValue"], "1")
+        self.assertEqual(attributes["attribution.context.meta"]["intValue"], "1")
 
 
 class _FixedProcessor:
