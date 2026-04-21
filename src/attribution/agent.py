@@ -474,7 +474,7 @@ class RepositoryTool:
         parents = self._repository.parents(commit)
         patch = ""
         if parents:
-            diff = self._repository.diff(parents[0], commit)
+            diff = self._repository.diff(parents[0], commit, context=3)
             patch = self._compress_patch(self._renderer.render(diff, path))
         return {
             "sha": commit,
@@ -816,10 +816,27 @@ class RepositoryTool:
         return None
 
     @staticmethod
-    def _compress_patch(patch: str, max_lines: int = 80) -> str:
+    def _compress_patch(
+        patch: str,
+        max_lines: int = 200,
+        max_chars: int = 3000,
+        max_stripped_lines: int = 80,
+    ) -> str:
         lines = patch.split("\n")
-        kept: list[str] = []
-        for line in lines:
+        if len(lines) > max_lines:
+            half = max_lines // 2
+            omitted = len(lines) - max_lines
+            lines = (
+                lines[:half]
+                + [f"... [{omitted} diff lines omitted] ..."]
+                + lines[-half:]
+            )
+        patch = "\n".join(lines)
+        if len(patch) <= max_chars:
+            return patch
+        kept = [
+            line
+            for line in lines
             if (
                 line.startswith("diff --git")
                 or line.startswith("---")
@@ -827,13 +844,15 @@ class RepositoryTool:
                 or line.startswith("@@")
                 or line.startswith("+")
                 or line.startswith("-")
-            ):
-                kept.append(line)
-        if len(kept) > max_lines:
-            half = max_lines // 2
-            omitted = len(kept) - max_lines
+            )
+        ]
+        if len(kept) > max_stripped_lines:
+            half = max_stripped_lines // 2
+            omitted = len(kept) - max_stripped_lines
             kept = (
-                kept[:half] + [f"... [{omitted} diff lines omitted] ..."] + kept[-half:]
+                kept[:half]
+                + [f"... [{omitted} diff lines omitted] ..."]
+                + kept[-half:]
             )
         return "\n".join(kept)
 

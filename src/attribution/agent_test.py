@@ -1374,28 +1374,62 @@ class TestRepositoryTool(unittest.TestCase):
             shas = {entry["sha"] for entry in result}
             self.assertNotIn(after, shas)
 
-    def test_show_compresses_large_patch(self) -> None:
-        lines = ["+" + f"line{i}" for i in range(120)]
+    def test_compress_patch_truncates_at_max_lines(self) -> None:
+        lines = ["+" + f"line{i}" for i in range(250)]
         patch = "\n".join(
-            ["diff --git a/f.py b/f.py", "--- a/f.py", "+++ b/f.py", "@@ -0,0 +1,120 @@"]
+            ["diff --git a/f.py b/f.py", "--- a/f.py", "+++ b/f.py", "@@ -0,0 +1,250 @@"]
             + lines
         )
         compressed = RepositoryTool._compress_patch(patch)
         self.assertIn("diff lines omitted", compressed)
-        output_lines = compressed.split("\n")
-        self.assertLessEqual(len(output_lines), 85)
+        self.assertLessEqual(len(compressed.split("\n")), 205)
 
-    def test_show_preserves_short_patch(self) -> None:
+    def test_compress_patch_strips_context_over_char_threshold(self) -> None:
+        changed = ["+added_line"] * 40 + ["-removed_line"] * 40
+        context = [" context_padding_" + "x" * 40] * 60
+        interleaved: list[str] = []
+        for i in range(40):
+            interleaved.append(context[i])
+            interleaved.append(changed[i])
+        interleaved.extend(changed[40:])
+        interleaved.extend(context[40:])
+        patch = "\n".join(
+            ["diff --git a/f.py b/f.py", "--- a/f.py", "+++ b/f.py", "@@ -1,100 +1,100 @@"]
+            + interleaved
+        )
+        self.assertGreater(len(patch), 3000)
+        self.assertLessEqual(len(patch.split("\n")), 200)
+        compressed = RepositoryTool._compress_patch(patch)
+        self.assertNotIn("context_padding", compressed)
+        self.assertIn("+added_line", compressed)
+        self.assertIn("-removed_line", compressed)
+
+    def test_compress_patch_strips_context_and_truncates(self) -> None:
+        changed = ["+" + "a" * 50] * 120
+        context = [" " + "b" * 50] * 80
+        all_lines = context[:40] + changed + context[40:]
+        patch = "\n".join(
+            ["diff --git a/f.py b/f.py", "--- a/f.py", "+++ b/f.py", "@@ -1,200 +1,200 @@"]
+            + all_lines
+        )
+        self.assertGreater(len(patch), 3000)
+        compressed = RepositoryTool._compress_patch(patch)
+        self.assertIn("diff lines omitted", compressed)
+        self.assertLessEqual(len(compressed.split("\n")), 85)
+
+    def test_compress_patch_preserves_short_patch(self) -> None:
         patch = "\n".join([
             "diff --git a/f.py b/f.py",
             "--- a/f.py",
             "+++ b/f.py",
-            "@@ -1 +1 @@",
+            "@@ -1,3 +1,3 @@",
+            " context",
             "-old",
             "+new",
         ])
         compressed = RepositoryTool._compress_patch(patch)
         self.assertNotIn("omitted", compressed)
+        self.assertIn(" context", compressed)
         self.assertIn("-old", compressed)
         self.assertIn("+new", compressed)
 
