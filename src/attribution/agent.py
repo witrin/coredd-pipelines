@@ -547,10 +547,11 @@ class RepositoryTool:
         path: str | None = None,
         max: int = 20,
     ) -> list[dict[str, Any]]:
-        """Find commits that added or removed a string.
+        """Find commits that added or removed a literal string.
 
         Use this to trace when text first appeared, disappeared, or changed in
-        one file or across the repository.
+        one file or across the repository. The needle is matched exactly —
+        pass plain text like ``parse_config``.
         """
         self._consume()
         if not needle:
