@@ -535,8 +535,7 @@ class TraceMonitor:
         elif kind == "tool_end":
             self._on_tool_end(node, payload)
         elif kind in {"llm_error", "tool_error"}:
-            label = "LLM" if kind == "llm_error" else f"TOOL {node}"
-            self._sink(f"Error #{self._turn} | {label}: {payload.get('error_type')}: {payload.get('error')}")
+            self._sink(f"  Error #{self._turn} | {payload.get('error')}")
         elif kind == "node_end" and node == "LangGraph" and not event.get("parent"):
             self._sink(
                 f"Final | turns={self._turn}"
@@ -713,7 +712,7 @@ class TraceSerializer:
                 status = "error" if kind.endswith("_error") else "ok"
                 error = None
                 if status == "error":
-                    error = f"{payload.get('error_type')}: {payload.get('error')}"
+                    error = payload.get("error")
                 output = payload.get("output") if status == "ok" else None
                 if start is None:
                     result.append(
