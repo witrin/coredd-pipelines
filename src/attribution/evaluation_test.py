@@ -153,7 +153,7 @@ class TestTraceSerializer(unittest.TestCase):
 
         spans = document["resourceSpans"][0]["scopeSpans"][0]["spans"]
         self.assertEqual(spans[0]["status"]["code"], "STATUS_CODE_ERROR")
-        self.assertIn("KeyError", spans[0]["status"]["message"])
+        self.assertIn("missing", spans[0]["status"]["message"])
 
     def test_resource_attributes_include_trace_metadata(self) -> None:
         trace = Trace(seed="foo", metadata={"repository": "baz"})
