@@ -1341,19 +1341,6 @@ class TestRepositoryTool(unittest.TestCase):
             for entry in entries:
                 self.assertIsInstance(entry, BaseTool)
 
-    def test_budget_blocks_over_budget_pickaxe(self) -> None:
-        with HistoryFixture() as fixture:
-            tree = fixture.tree({"foo.py": "needle\n"})
-            after = fixture.commit(tree, [], "base")
-            tool = RepositoryTool(
-                repository=VersionControl(fixture.repository),
-                after=after,
-                budget=1,
-            )
-            tool.pickaxe("needle", path="foo.py")
-            with self.assertRaises(ValueError):
-                tool.pickaxe("needle", path="foo.py")
-
     def test_pickaxe_without_path_searches_across_files(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"a.py": "pass\n", "b.py": "pass\n"})

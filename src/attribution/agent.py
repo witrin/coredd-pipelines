@@ -415,13 +415,9 @@ class RepositoryTool:
         self,
         repository: VersionControl,
         after: str,
-        *,
-        budget: int = 15,
     ) -> None:
         self._repository = repository
         self._after = after
-        self._budget = budget
-        self._reads = 0
         self._renderer = DiffRenderer()
 
     def tools(self) -> list[BaseTool]:
@@ -553,7 +549,6 @@ class RepositoryTool:
         one file or across the repository. The needle is matched exactly —
         pass plain text like ``parse_config``.
         """
-        self._consume()
         if not needle:
             raise ValueError("pickaxe needle must not be empty.")
 
@@ -594,7 +589,6 @@ class RepositoryTool:
         Use this to follow the history of functions, methods, or classes when
         line-based blame is not enough.
         """
-        self._consume()
         try:
             matcher = re.compile(pattern)
         except re.error as error:
@@ -646,7 +640,6 @@ class RepositoryTool:
         Use this to find definitions, call sites, and references in one
         snapshot. Optionally restrict the search with a path pattern.
         """
-        self._consume()
         if not needle:
             raise ValueError("grep needle must not be empty.")
 
@@ -852,20 +845,14 @@ class RepositoryTool:
         omitted = len(lines) - max_lines
         return lines[:half] + [f"... [{omitted} lines omitted] ..."] + lines[-half:]
 
-    def _consume(self) -> None:
-        if self._reads >= self._budget:
-            raise ValueError("Tool read budget exhausted.")
-        self._reads += 1
 
 
 class RepositoryToolFactory:
-    def __init__(self, repository: VersionControl, budget: int = 15) -> None:
+    def __init__(self, repository: VersionControl) -> None:
         self._repository = repository
-        self._budget = budget
 
     def create(self, base: str, after: str) -> RepositoryTool:
         return RepositoryTool(
             repository=self._repository,
             after=after,
-            budget=self._budget,
         )
