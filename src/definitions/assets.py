@@ -1138,6 +1138,7 @@ def attribution_agentic_szz_evaluation(
         api_key=os.getenv("TOGETHER_AI_API_KEY"),
         base_url="https://api.together.xyz/v1",
         temperature=config.temperature,
+        max_tokens=4096,
     )
 
     tables: list[pa.Table] = []
@@ -1285,6 +1286,7 @@ def attribution_agent_szz_evaluation(
         api_key=os.getenv("TOGETHER_AI_API_KEY"),
         base_url="https://api.together.xyz/v1",
         temperature=config.temperature,
+        max_tokens=4096,
     )
 
     tables: list[pa.Table] = []
