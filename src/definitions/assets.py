@@ -1075,7 +1075,7 @@ def ingest_validation_sources_health(
 class AttributionEvaluationConfig(dg.Config):
     model: str = "MiniMaxAI/MiniMax-M2.7"
     temperature: float = 0.0
-    steps: int = 20
+    steps: int = 15
 
 
 @asset(
