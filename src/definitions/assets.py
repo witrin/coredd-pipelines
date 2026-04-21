@@ -1057,12 +1057,14 @@ def ingest_validation_sources_health(
         except (ValueError, IndexError):
             repository = entry["partition"]
 
-        rows.append({
-            "repository": repository,
-            "partition": entry["partition"],
-            "status": entry["status"],
-            "error": entry["error"],
-        })
+        rows.append(
+            {
+                "repository": repository,
+                "partition": entry["partition"],
+                "status": entry["status"],
+                "error": entry["error"],
+            }
+        )
 
     rows.sort(key=lambda row: (row["status"], row["repository"]))
     table = pa.Table.from_pylist(rows)
@@ -1147,10 +1149,12 @@ def attribution_agentic_szz_evaluation(
         setup = KnowledgeGraphSetup.build(
             case,
             context=archive,
-            redaction=TrailerRedaction(GitHubRedaction(
-                correction=case.correction,
-                defects=case.defects,
-            )),
+            redaction=TrailerRedaction(
+                GitHubRedaction(
+                    correction=case.correction,
+                    defects=case.defects,
+                )
+            ),
         )
 
         class _EmptyCache:
@@ -1216,7 +1220,7 @@ def attribution_agentic_szz_evaluation(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "1.0.1"},
     partitions_def=partitions.attribution_evaluation_partition,
     group_name="attribution",
     pool="default",
@@ -1296,10 +1300,12 @@ def attribution_agent_szz_evaluation(
             case,
             context=context_archive,
             sources=sources_archive,
-            redaction=TrailerRedaction(GitHubRedaction(
-                correction=case.correction,
-                defects=case.defects,
-            )),
+            redaction=TrailerRedaction(
+                GitHubRedaction(
+                    correction=case.correction,
+                    defects=case.defects,
+                )
+            ),
         )
 
         class _EmptyCache:
