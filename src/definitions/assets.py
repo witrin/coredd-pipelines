@@ -22,8 +22,10 @@ from benchmark.attribution.search import (
     RepositorySeedNode,
 )
 from benchmark.attribution.validation import (
+    GitHubRedaction,
     KnowledgeGraphSetup,
     RepositorySetup,
+    TrailerRedaction,
     ValidationCase,
     ValidationExecutor,
 )
@@ -1141,7 +1143,14 @@ def attribution_agentic_szz_evaluation(
     tables: list[pa.Table] = []
 
     for case in cases:
-        setup = KnowledgeGraphSetup.build(case, context=archive)
+        setup = KnowledgeGraphSetup.build(
+            case,
+            context=archive,
+            redaction=TrailerRedaction(GitHubRedaction(
+                correction=case.correction,
+                defects=case.defects,
+            )),
+        )
 
         class _EmptyCache:
             def resolve(self, correction):
@@ -1282,7 +1291,13 @@ def attribution_agent_szz_evaluation(
 
     for case in cases:
         setup = RepositorySetup.build(
-            case, context=context_archive, sources=sources_archive,
+            case,
+            context=context_archive,
+            sources=sources_archive,
+            redaction=TrailerRedaction(GitHubRedaction(
+                correction=case.correction,
+                defects=case.defects,
+            )),
         )
 
         class _EmptyCache:

@@ -454,7 +454,6 @@ class RepositoryTool:
             "sha": commit,
             "message": meta.message,
             "timestamp": self._timestamp(meta.time),
-            "author": meta.author,
             "parents": parents,
             "path": path,
             "patch": patch,
@@ -656,7 +655,6 @@ class RepositoryTool:
             "sha": sha,
             "message": meta.message,
             "timestamp": self._timestamp(meta.time),
-            "author": meta.author,
             "delta": delta,
         }
 

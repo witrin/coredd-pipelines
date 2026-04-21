@@ -68,6 +68,42 @@ class ValidationRedaction:
         return value
 
 
+class TrailerRedaction(ValidationRedaction):
+    """Strip author-revealing trailers from commit messages.
+
+    Wraps an optional inner redaction: applies it first, then removes
+    trailer lines and normalizes whitespace.
+    """
+
+    _TRAILER = re.compile(
+        r"^\s*("
+        r"Signed-off-by|Reported-by|Reviewed-by|Acked-by|"
+        r"Cc|Tested-by|Co-developed-by|Suggested-by|"
+        r"Reported-and-tested-by|Reviewed-and-tested-by|"
+        r"Author|Message-Id|Message-ID"
+        r"):\s.*$",
+        re.MULTILINE,
+    )
+
+    def __init__(
+        self,
+        inner: ValidationRedaction | None = None,
+    ) -> None:
+        self._inner = inner
+
+    def message(
+        self,
+        value: str,
+        identifier: str | None = None,
+    ) -> str:
+        current = value
+        if self._inner is not None:
+            current = self._inner.message(current, identifier)
+        current = self._TRAILER.sub("", current)
+        current = re.sub(r"\n{3,}", "\n\n", current)
+        return current.strip()
+
+
 class GitHubRedaction(ValidationRedaction):
     """Case-aware validation redaction for GitHub-style commit metadata.
 

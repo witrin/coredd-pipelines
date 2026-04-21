@@ -14,6 +14,7 @@ from benchmark.attribution.tracing import Trace
 from benchmark.attribution.validation import (
     GitHubRedaction,
     RepositorySetup,
+    TrailerRedaction,
     ValidationCase,
     ValidationExecutor,
 )
@@ -282,6 +283,36 @@ class TestValidationExecutor(unittest.TestCase):
         self.assertEqual(payload["partition"], "p1")
         self.assertIsInstance(payload["trace"], str)
         self.assertEqual(payload["event"]["event"], "node_start")
+
+
+class TestTrailerRedaction(unittest.TestCase):
+    def test_strips_trailer_lines(self) -> None:
+        redaction = TrailerRedaction()
+        value = "fix bug\n\nSigned-off-by: Alice <a@b>\nReviewed-by: Bob <b@c>"
+        self.assertEqual(
+            redaction("message", value),
+            "fix bug",
+        )
+
+    def test_preserves_non_message(self) -> None:
+        redaction = TrailerRedaction()
+        value = "Signed-off-by: Alice <a@b>"
+        self.assertEqual(redaction("description", value), value)
+
+    def test_applies_inner_then_strips(self) -> None:
+        inner = GitHubRedaction(
+            correction="after-sha",
+            defects=("abcdef1234567890",),
+        )
+        redaction = TrailerRedaction(inner)
+        value = "fix\nFixes: abcdef1234567890\nReviewed-by: Bob <b@c>"
+        result = redaction("message", value, "after-sha")
+        self.assertEqual(result, "fix")
+
+    def test_normalizes_blank_lines(self) -> None:
+        redaction = TrailerRedaction()
+        value = "first\n\nSigned-off-by: Alice <a@b>\n\n\nlast"
+        self.assertEqual(redaction("message", value), "first\n\nlast")
 
 
 class TestValidationSetup(unittest.TestCase):
