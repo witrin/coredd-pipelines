@@ -13,13 +13,15 @@ from benchmark.attribution.domain import (
 )
 from benchmark.attribution.history import VersionControl
 from benchmark.attribution.search import (
+    DuplicateCallGuard,
     KnowledgeGraphSearchNode,
     KnowledgeGraphSeedNode,
     RepositorySearchNode,
     RepositorySeedNode,
     SearchResult,
+    TurnBudget,
 )
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
 
@@ -178,8 +180,9 @@ class TestKnowledgeGraphSearchNode(unittest.TestCase):
             )
 
         args, kwargs = agent.invoke.call_args
-        self.assertEqual(kwargs, {"config": {"recursion_limit": 7}})
-        self.assertEqual(args[0]["remaining_steps"], 7)
+        limit = (7 + 3) * 3 + 4
+        self.assertEqual(kwargs, {"config": {"recursion_limit": limit}})
+        self.assertEqual(args[0]["remaining_steps"], limit)
 
     def test_search_steps_invalid(self) -> None:
         tool = Mock(spec_set=["tools"])
@@ -270,53 +273,19 @@ class TestKnowledgeGraphSearchNode(unittest.TestCase):
             kwargs["handle_tool_errors"](RuntimeError("boom")),
             "boom",
         )
-        factory.assert_called_once_with(
-            llm,
-            tools=tool_node,
-            prompt=inspect.cleandoc(
-                """
-                Identify which commit first introduced the bug fixed by the given correction.
-
-                ## Commit Types (Priority Order)
-                1. blame (score 1.0): Code deleted or modified by the correction was last
-                   touched by this commit. Highest priority.
-                2. blame-ancestor (score 0.6): Commit before the blame commit in file
-                   history. Lower priority.
-                3. correction-ancestor (score 0.3): Commit after blame but before the
-                   correction. Lowest priority.
-
-                ## Workflow
-                1. Call candidates first. Use the fitness ranking as initial guidance, but
-                   override it if tool evidence supports a different commit.
-                2. Verify the top-ranked candidate using content before deciding:
-                   - Does it ADD the code that the correction REMOVES?
-                   - Does it introduce the LOGIC that exhibits the bug?
-                3. If the top candidate is refactoring, cleanup, or import churn, reject it
-                   and inspect related commits via neighbors or ancestors instead.
-                4. Before selecting a candidate, confirm a direct causal link to the buggy
-                   logic. A commit that merely exposes or triggers a pre-existing bug is
-                   not the introducer.
-
-                Each candidate lists modified files and entities (programs, classes,
-                methods, functions). Use these to assess structural overlap with the
-                correction.
-
-                ## Constraints
-                - Limit content to 3 calls per case. Use it to verify, not to explore.
-                - If content fails, decide with the evidence you already have.
-                - Make at least one investigation step before deciding unless a single
-                  candidate is conclusive.
-                - Do not inspect all candidates exhaustively. Focus on the most plausible.
-
-                Return ONLY the full 40-character introducer SHA, or null if no justified
-                decision can be made.
-                """
-            ),
-            response_format=SearchResult,
-        )
+        factory.assert_called_once()
+        factory_args, factory_kwargs = factory.call_args
+        self.assertEqual(factory_args, (llm,))
+        self.assertIs(factory_kwargs["tools"], tool_node)
+        self.assertIs(factory_kwargs["response_format"], SearchResult)
+        self.assertIsInstance(factory_kwargs["post_model_hook"], TurnBudget)
+        self.assertIn("blame", factory_kwargs["prompt"])
+        self.assertIn("candidates", factory_kwargs["prompt"])
+        self.assertIn("full 40-character", factory_kwargs["prompt"])
         args, kwargs = agent.invoke.call_args
-        self.assertEqual(kwargs, {"config": {"recursion_limit": 20}})
-        self.assertEqual(args[0]["remaining_steps"], 20)
+        limit = (20 + 3) * 3 + 4
+        self.assertEqual(kwargs, {"config": {"recursion_limit": limit}})
+        self.assertEqual(args[0]["remaining_steps"], limit)
         self.assertEqual(len(args[0]["messages"]), 1)
         self.assertIsInstance(args[0]["messages"][0], HumanMessage)
         self.assertEqual(
@@ -472,8 +441,9 @@ class TestRepositorySearchNode(unittest.TestCase):
             )
 
         args, kwargs = agent.invoke.call_args
-        self.assertEqual(kwargs, {"config": {"recursion_limit": 11}})
-        self.assertEqual(args[0]["remaining_steps"], 11)
+        limit = (11 + 3) * 3 + 4
+        self.assertEqual(kwargs, {"config": {"recursion_limit": limit}})
+        self.assertEqual(args[0]["remaining_steps"], limit)
 
     @patch("benchmark.attribution.search.ToolNode")
     @patch("benchmark.attribution.search.create_react_agent")
@@ -521,13 +491,15 @@ class TestRepositorySearchNode(unittest.TestCase):
         self.assertEqual(factory_args, (llm,))
         self.assertIs(factory_kwargs["tools"], tool_node)
         self.assertIs(factory_kwargs["response_format"], SearchResult)
+        self.assertIsInstance(factory_kwargs["post_model_hook"], TurnBudget)
         self.assertIn("blame", factory_kwargs["prompt"])
         self.assertIn("pickaxe", factory_kwargs["prompt"])
         self.assertIn("trace", factory_kwargs["prompt"])
         self.assertIn("full 40-character", factory_kwargs["prompt"])
         invoke_args, invoke_kwargs = agent.invoke.call_args
-        self.assertEqual(invoke_kwargs, {"config": {"recursion_limit": 30}})
-        self.assertEqual(invoke_args[0]["remaining_steps"], 30)
+        limit = (30 + 3) * 3 + 4
+        self.assertEqual(invoke_kwargs, {"config": {"recursion_limit": limit}})
+        self.assertEqual(invoke_args[0]["remaining_steps"], limit)
         self.assertEqual(len(invoke_args[0]["messages"]), 1)
         self.assertIsInstance(invoke_args[0]["messages"][0], HumanMessage)
         self.assertEqual(
@@ -542,3 +514,130 @@ class TestRepositorySearchNode(unittest.TestCase):
             ),
         )
         self.assertEqual(result, {"introducer": "deadbeef"})
+
+
+class TestTurnBudget(unittest.TestCase):
+    def test_counts_only_successful_turns(self) -> None:
+        budget = TurnBudget(turns=3)
+
+        # First call — no prior tools, nothing counted.
+        state = {"messages": [AIMessage(content="", tool_calls=[{"name": "a", "args": {}, "id": "1"}])]}
+        result = budget(state)
+        self.assertEqual(result, {"messages": []})
+
+        # Successful turn — budget decrements.
+        state = {
+            "messages": [
+                AIMessage(content="", tool_calls=[{"name": "a", "args": {}, "id": "1"}]),
+                ToolMessage(content="ok", tool_call_id="1"),
+                AIMessage(content="", tool_calls=[{"name": "b", "args": {}, "id": "2"}]),
+            ]
+        }
+        result = budget(state)
+        self.assertEqual(result, {"messages": []})
+        self.assertEqual(budget._turns, 2)
+
+        # Error turn — turn budget unchanged, error budget decrements.
+        state = {
+            "messages": [
+                AIMessage(content="", tool_calls=[{"name": "b", "args": {}, "id": "2"}]),
+                ToolMessage(content="fail", tool_call_id="2", status="error"),
+                AIMessage(content="", tool_calls=[{"name": "c", "args": {}, "id": "3"}]),
+            ]
+        }
+        result = budget(state)
+        self.assertEqual(result, {"messages": []})
+        self.assertEqual(budget._turns, 2)
+        self.assertEqual(budget._errors, 2)
+
+    def test_terminates_on_turn_budget_exhaustion(self) -> None:
+        budget = TurnBudget(turns=1)
+
+        # First call — passes through.
+        state = {"messages": [AIMessage(content="", tool_calls=[{"name": "a", "args": {}, "id": "1"}])]}
+        budget(state)
+
+        # Successful turn consumes last budget.
+        state = {
+            "messages": [
+                AIMessage(content="", tool_calls=[{"name": "a", "args": {}, "id": "1"}]),
+                ToolMessage(content="ok", tool_call_id="1"),
+                AIMessage(content="", tool_calls=[{"name": "b", "args": {}, "id": "2"}]),
+            ]
+        }
+        result = budget(state)
+        self.assertEqual(len(result["messages"]), 1)
+        msg = result["messages"][0]
+        self.assertIsInstance(msg, AIMessage)
+        self.assertFalse(msg.tool_calls)
+        self.assertIn("budget exhausted", msg.content.lower())
+
+    def test_terminates_on_error_budget_exhaustion(self) -> None:
+        budget = TurnBudget(turns=10, max_errors=1)
+
+        # First call.
+        state = {"messages": [AIMessage(content="", tool_calls=[{"name": "a", "args": {}, "id": "1"}])]}
+        budget(state)
+
+        # Error turn consumes error budget.
+        state = {
+            "messages": [
+                AIMessage(content="", tool_calls=[{"name": "a", "args": {}, "id": "1"}]),
+                ToolMessage(content="fail", tool_call_id="1", status="error"),
+                AIMessage(content="", tool_calls=[{"name": "b", "args": {}, "id": "2"}]),
+            ]
+        }
+        result = budget(state)
+        self.assertEqual(len(result["messages"]), 1)
+        self.assertIsInstance(result["messages"][0], AIMessage)
+        self.assertFalse(result["messages"][0].tool_calls)
+
+    def test_no_termination_when_model_stops(self) -> None:
+        budget = TurnBudget(turns=0)
+
+        # Model does not request tools — hook should not interfere.
+        state = {"messages": [AIMessage(content="done")]}
+        result = budget(state)
+        self.assertEqual(result, {"messages": []})
+
+    def test_mixed_turn_counts_as_success(self) -> None:
+        budget = TurnBudget(turns=2)
+
+        # First call.
+        state = {"messages": [AIMessage(content="", tool_calls=[{"name": "a", "args": {}, "id": "1"}])]}
+        budget(state)
+
+        # Mixed: one success + one error → counts as successful turn.
+        state = {
+            "messages": [
+                AIMessage(content="", tool_calls=[
+                    {"name": "a", "args": {}, "id": "1"},
+                    {"name": "b", "args": {}, "id": "2"},
+                ]),
+                ToolMessage(content="ok", tool_call_id="1"),
+                ToolMessage(content="fail", tool_call_id="2", status="error"),
+                AIMessage(content="", tool_calls=[{"name": "c", "args": {}, "id": "3"}]),
+            ]
+        }
+        result = budget(state)
+        self.assertEqual(budget._turns, 1)
+        self.assertEqual(budget._errors, 3)  # unchanged
+
+
+class TestDuplicateCallGuardStatus(unittest.TestCase):
+    def test_duplicate_returns_error_status(self) -> None:
+        guard = DuplicateCallGuard()
+        execute = Mock(return_value=ToolMessage(content="ok", tool_call_id="1"))
+        request = Mock()
+        request.tool_call = {"name": "show", "args": {"commit": "abc"}, "id": "1"}
+
+        # First call — executes.
+        result = guard(request, execute)
+        execute.assert_called_once()
+        self.assertEqual(result.status, "success")
+
+        # Second call — duplicate, error status.
+        request.tool_call = {"name": "show", "args": {"commit": "abc"}, "id": "2"}
+        result = guard(request, execute)
+        self.assertEqual(result.status, "error")
+        self.assertIn("already called", result.content)

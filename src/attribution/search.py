@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any, TypedDict
 
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.prebuilt import ToolNode, create_react_agent
 from pydantic import BaseModel
 
@@ -247,18 +247,21 @@ class KnowledgeGraphSearchNode:
             decision can be made.
             """
         )
+        budget = TurnBudget(steps)
+        limit = (steps + budget.max_errors) * 3 + 4
         graph = create_react_agent(
             self._llm,
             tools=node,
             prompt=prompt,
             response_format=SearchResult,
+            post_model_hook=budget,
         )
         return graph.invoke(
             {
                 "messages": [HumanMessage(content=self._prompt(seed))],
-                "remaining_steps": steps,
+                "remaining_steps": limit,
             },
-            config={"recursion_limit": steps},
+            config={"recursion_limit": limit},
         )
 
     def _prompt(self, seed: list[SeedItem]) -> str:
@@ -308,9 +311,67 @@ class DuplicateCallGuard:
             return ToolMessage(
                 content="You already called this tool with the same arguments. Try a different approach or return your final answer.",
                 tool_call_id=request.tool_call["id"],
+                status="error",
             )
         self._seen.add(key)
         return execute(request)
+
+
+class TurnBudget:
+    """Count only successful turns toward a fixed budget.
+
+    Used as ``post_model_hook`` on ``create_react_agent``.  The hook
+    inspects the ToolMessages that arrived since the last model call
+    and increments the turn counter only when at least one tool call
+    succeeded.  When the budget is exhausted and the model still
+    requests tool calls, the hook replaces the response with a
+    plain AIMessage so the agent terminates gracefully.
+
+    A separate error budget caps all-error turns to prevent infinite
+    error loops.
+    """
+
+    def __init__(self, turns: int, max_errors: int = 3) -> None:
+        self._turns = turns
+        self._errors = max_errors
+        self.max_errors = max_errors
+
+    def __call__(self, state: dict) -> dict:
+        messages = state["messages"]
+
+        responses: list[ToolMessage] = []
+        for message in reversed(messages[:-1]):
+            if isinstance(message, ToolMessage):
+                responses.append(message)
+            else:
+                break
+
+        if responses:
+            success = any(
+                getattr(message, "status", "success") != "error"
+                for message in responses
+            )
+            if success:
+                self._turns -= 1
+            else:
+                self._errors -= 1
+
+        head = messages[-1]
+        if (
+            (self._turns <= 0 or self._errors <= 0)
+            and isinstance(head, AIMessage)
+            and head.tool_calls
+        ):
+            return {
+                "messages": [
+                    AIMessage(
+                        id=head.id,
+                        content="Turn budget exhausted. Return your best answer now.",
+                    )
+                ]
+            }
+
+        return {"messages": []}
 
 
 class RepositorySeedNode:
@@ -451,16 +512,19 @@ class RepositorySearchNode:
             Return null only if no evidence was found at all.
             """
         )
+        budget = TurnBudget(steps)
+        limit = (steps + budget.max_errors) * 3 + 4
         graph = create_react_agent(
             self._llm,
             tools=node,
             prompt=prompt,
             response_format=SearchResult,
+            post_model_hook=budget,
         )
         return graph.invoke(
             {
                 "messages": [HumanMessage(content=SearchPrompt().render(seed))],
-                "remaining_steps": steps,
+                "remaining_steps": limit,
             },
-            config={"recursion_limit": steps},
+            config={"recursion_limit": limit},
         )
