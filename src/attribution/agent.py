@@ -434,11 +434,24 @@ class RepositoryTool:
         ]
 
     def _resolve(self, commit: str) -> str:
-        node = self._repository.handle.revparse_single(commit)
-        return str(node.peel(pygit2.Commit).id)
+        handle = self._repository.handle
+        try:
+            node = handle.revparse_single(commit)
+            return str(node.peel(pygit2.Commit).id)
+        except KeyError:
+            pass
+        for length in range(len(commit) - 1, 4, -1):
+            try:
+                node = handle.revparse_single(commit[:length])
+                sha = str(node.peel(pygit2.Commit).id)
+                raise ValueError(
+                    f"Commit {commit!r} does not exist. Did you mean {sha}?"
+                )
+            except KeyError:
+                continue
+        raise ValueError(f"Commit {commit!r} does not exist.")
 
     def _is_ancestor(self, commit: str) -> bool:
-        """Return True if commit is a strict ancestor of the correction."""
         repo = self._repository.handle
         oid = pygit2.Oid(hex=commit)
         after_oid = pygit2.Oid(hex=self._after)
@@ -454,13 +467,13 @@ class RepositoryTool:
         """
         commit = self._resolve(commit)
         if commit == self._after:
-            return {
-                "error": "This is the correction commit. Its full diff is already provided in your initial message. Inspect candidates before the correction instead."
-            }
+            raise ValueError(
+                "This is the correction commit. Its full diff is already provided in your initial message. Inspect candidates before the correction instead."
+            )
         if not self._is_ancestor(commit):
-            return {
-                "error": f"Commit {commit[:12]} is not before the correction. The introducer must predate the correction."
-            }
+            raise ValueError(
+                f"Commit {commit[:12]} is not before the correction. The introducer must predate the correction."
+            )
         meta = self._repository.meta(commit)
         parents = self._repository.parents(commit)
         patch = ""
@@ -489,17 +502,22 @@ class RepositoryTool:
         """
         commit = self._resolve(commit)
         if commit == self._after:
-            return {
-                "error": f"Cannot blame at the correction commit — it shows lines after the fix, not before. Use {commit[:12]}~1 to blame at the parent of the correction."
-            }
+            raise ValueError(
+                f"Cannot blame at the correction commit — it shows lines after the fix, not before. Use {commit[:12]}~1 to blame at the parent of the correction."
+            )
         if not self._is_ancestor(commit):
-            return {
-                "error": f"Commit {commit[:12]} is not before the correction. The introducer must predate the correction. Use {self._after[:12]}~1 to start."
-            }
-        raw = self._repository.blame(path, commit, [(start, end)])
+            raise ValueError(
+                f"Commit {commit[:12]} is not before the correction. The introducer must predate the correction. Use {self._after[:12]}~1 to start."
+            )
+        try:
+            raw = self._repository.blame(path, commit, [(start, end)])
+        except KeyError:
+            raise ValueError(
+                f"The path {path!r} does not exist at commit {commit[:12]}."
+            )
         try:
             data = self._repository.blob(commit, path).decode("utf-8", errors="replace")
-        except (FileNotFoundError, ValueError):
+        except (FileNotFoundError, KeyError, ValueError):
             data = ""
         source = data.splitlines()
 
@@ -541,12 +559,17 @@ class RepositoryTool:
         if path is None:
             return self._pickaxe_repository(needle, max)
 
-        walker = VersionControlPathWalker(
-            self._repository.handle,
-            self._after,
-            path,
-            depth=max * 5 + 5,
-        )
+        try:
+            walker = VersionControlPathWalker(
+                self._repository.handle,
+                self._after,
+                path,
+                depth=max * 5 + 5,
+            )
+        except FileNotFoundError:
+            raise ValueError(
+                f"The path {path!r} does not exist at commit {self._after[:12]}."
+            )
         result: list[dict[str, Any]] = []
         for entry in walker.entries():
             if entry.commit == self._after:
@@ -580,12 +603,17 @@ class RepositoryTool:
         if language is None:
             raise ValueError(f"Unsupported language for path {path!r}.")
 
-        walker = VersionControlPathWalker(
-            self._repository.handle,
-            self._after,
-            path,
-            depth=max * 5 + 5,
-        )
+        try:
+            walker = VersionControlPathWalker(
+                self._repository.handle,
+                self._after,
+                path,
+                depth=max * 5 + 5,
+            )
+        except FileNotFoundError:
+            raise ValueError(
+                f"The path {path!r} does not exist at commit {self._after[:12]}."
+            )
         result: list[dict[str, Any]] = []
         for entry in walker.entries():
             if entry.commit == self._after:
@@ -627,18 +655,10 @@ class RepositoryTool:
             raise ValueError(f"Invalid grep regex: {error}") from error
 
         commit = self._resolve(commit)
-        if commit == self._after:
-            return [
-                {
-                    "error": f"Cannot grep at the correction commit — its diff is already in your initial message. Use {commit[:12]}~1 to search the pre-fix state."
-                }
-            ]
-        if not self._is_ancestor(commit):
-            return [
-                {
-                    "error": f"Commit {commit[:12]} is not before the correction. Use {self._after[:12]}~1 to search the pre-fix state."
-                }
-            ]
+        if commit != self._after and not self._is_ancestor(commit):
+            raise ValueError(
+                f"Commit {commit[:12]} is not before the correction. Use {self._after[:12]}~1 to search the pre-fix state."
+            )
         paths = self._repository.tree(commit)
         if path is not None:
             patterns = [path]
@@ -648,6 +668,10 @@ class RepositoryTool:
                     patterns.append(f"{prefix}/**")
             spec = PathSpec.from_lines("gitignore", patterns)
             paths = [current for current in paths if spec.match_file(current)]
+        if path is not None and not paths:
+            raise ValueError(
+                f"The path {path!r} does not match any file at commit {commit[:12]}."
+            )
         result: list[dict[str, Any]] = []
         total = 0
         for current in paths:

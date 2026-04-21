@@ -205,7 +205,7 @@ class KnowledgeGraphSearchNode:
         tools = tool.tools()
         node = ToolNode(
             tools,
-            handle_tool_errors=lambda error: f"{type(error).__name__}: {error}",
+            handle_tool_errors=lambda error: str(error),
             wrap_tool_call=DuplicateCallGuard(),
         )
         prompt = inspect.cleandoc(
@@ -411,7 +411,7 @@ class RepositorySearchNode:
         tools = tool.tools()
         node = ToolNode(
             tools,
-            handle_tool_errors=lambda error: f"{type(error).__name__}: {error}",
+            handle_tool_errors=lambda error: str(error),
             wrap_tool_call=DuplicateCallGuard(),
         )
         prompt = inspect.cleandoc(

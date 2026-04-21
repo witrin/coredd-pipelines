@@ -268,7 +268,7 @@ class TestKnowledgeGraphSearchNode(unittest.TestCase):
         self.assertTrue(callable(kwargs["handle_tool_errors"]))
         self.assertEqual(
             kwargs["handle_tool_errors"](RuntimeError("boom")),
-            "RuntimeError: boom",
+            "boom",
         )
         factory.assert_called_once_with(
             llm,
