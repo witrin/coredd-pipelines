@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import inspect
+import json
 import re
 from typing import Any, TypedDict
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.prebuilt import ToolNode, create_react_agent
 from pydantic import BaseModel
 
@@ -205,6 +206,7 @@ class KnowledgeGraphSearchNode:
         node = ToolNode(
             tools,
             handle_tool_errors=lambda error: f"{type(error).__name__}: {error}",
+            wrap_tool_call=DuplicateCallGuard(),
         )
         prompt = inspect.cleandoc(
             """
@@ -292,6 +294,23 @@ class SearchNormalizer:
             match = re.search(r"[0-9a-f]{7,40}", introducer)
             introducer = match.group(0) if match else None
         return {"introducer": introducer}
+
+
+class DuplicateCallGuard:
+    """Skip tool execution when the same call was already made with identical arguments."""
+
+    def __init__(self) -> None:
+        self._seen: set[tuple[str, str]] = set()
+
+    def __call__(self, request, execute):
+        key = (request.tool_call["name"], json.dumps(request.tool_call["args"], sort_keys=True))
+        if key in self._seen:
+            return ToolMessage(
+                content="You already called this tool with the same arguments. Try a different approach or return your final answer.",
+                tool_call_id=request.tool_call["id"],
+            )
+        self._seen.add(key)
+        return execute(request)
 
 
 class RepositorySeedNode:
@@ -393,6 +412,7 @@ class RepositorySearchNode:
         node = ToolNode(
             tools,
             handle_tool_errors=lambda error: f"{type(error).__name__}: {error}",
+            wrap_tool_call=DuplicateCallGuard(),
         )
         prompt = inspect.cleandoc(
             """
