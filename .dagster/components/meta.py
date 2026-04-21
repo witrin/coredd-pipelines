@@ -63,18 +63,38 @@ class AssetResolver:
             return
 
         if isinstance(partitions_def, dg.DynamicPartitionsDefinition):
-            existing = set(self._context.instance.get_dynamic_partitions(partitions_def.name))
+            existing = set(
+                self._context.instance.get_dynamic_partitions(partitions_def.name)
+            )
+        elif isinstance(partitions_def, dg.MultiPartitionsDefinition):
+            dimensions = []
+            for dimension in partitions_def.partitions_defs:
+                if isinstance(dimension.partitions_def, dg.DynamicPartitionsDefinition):
+                    dimensions.append(
+                        self._context.instance.get_dynamic_partitions(
+                            dimension.partitions_def.name
+                        )
+                    )
+                else:
+                    dimensions.append(dimension.partitions_def.get_partition_keys())
+            import itertools
+
+            existing = {"|".join(combo) for combo in itertools.product(*dimensions)}
         else:
             existing = set(partitions_def.get_partition_keys())
 
         if partition in existing:
-            raise dg.Failure(description=f"Partition '{partition}' already exists for asset")
+            raise dg.Failure(
+                description=f"Partition '{partition}' already exists for asset"
+            )
 
     def version(self, override: str | None = None) -> str:
         if override:
             return override
         try:
-            meta = self.graph.assets_def_for_key(self._key).metadata_by_key.get(self._key, {})
+            meta = self.graph.assets_def_for_key(self._key).metadata_by_key.get(
+                self._key, {}
+            )
             return meta.get("version", "none")
         except (KeyError, AttributeError):
             return "none"

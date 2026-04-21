@@ -1,3 +1,4 @@
+import itertools
 import json
 import os
 import tarfile
@@ -46,6 +47,18 @@ def snapshot_op(context: dg.OpExecutionContext, config: SnapshotConfig) -> dg.Ou
         keys = ["default"]
     elif isinstance(partitions, dg.DynamicPartitionsDefinition):
         keys = list(context.instance.get_dynamic_partitions(partitions.name))
+    elif isinstance(partitions, dg.MultiPartitionsDefinition):
+        dimensions = []
+        for dimension in partitions.partitions_defs:
+            if isinstance(dimension.partitions_def, dg.DynamicPartitionsDefinition):
+                dimensions.append(
+                    context.instance.get_dynamic_partitions(
+                        dimension.partitions_def.name
+                    )
+                )
+            else:
+                dimensions.append(dimension.partitions_def.get_partition_keys())
+        keys = ["|".join(combo) for combo in itertools.product(*dimensions)]
     else:
         keys = list(partitions.get_partition_keys())
 
@@ -363,9 +376,9 @@ def evaluation_demo_op(
                 title="Code Annotation",
                 template=(
                     '<link rel="stylesheet" href="/annotation/annotation.css">'
-                    '<style>html, body { height: 600px; overflow: hidden; }</style>'
+                    "<style>html, body { height: 600px; overflow: hidden; }</style>"
                     '<script src="/annotation/bundle.js"></script>'
-                    '<code-annotation></code-annotation>'
+                    "<code-annotation></code-annotation>"
                     '<script src="/annotation/adapter.js"></script>'
                 ),
                 advanced_mode=True,
