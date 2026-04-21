@@ -987,14 +987,16 @@ class TestRepositoryTool(unittest.TestCase):
             tree = fixture.tree({"foo.py": "def foo():\n    return 1\n"})
             base = fixture.commit(tree, [], "base")
             tree = fixture.tree({"foo.py": "def foo():\n    return 2\n"})
-            after = fixture.commit(tree, [base], "bump return value")
+            target = fixture.commit(tree, [base], "bump return value")
+            tree = fixture.tree({"foo.py": "def foo():\n    return 2\n"})
+            after = fixture.commit(tree, [target], "correction")
 
             repository = VersionControl(fixture.repository)
             tool = RepositoryTool(repository=repository, after=after)
 
-            result = tool.show(after)
+            result = tool.show(target)
 
-            self.assertEqual(result["sha"], after)
+            self.assertEqual(result["sha"], target)
             self.assertEqual(result["message"], "bump return value")
             self.assertEqual(result["parents"], [base])
             self.assertIn("return 1", result["patch"])
@@ -1015,14 +1017,21 @@ class TestRepositoryTool(unittest.TestCase):
                     "bar.py": "def bar():\n    return 2\n",
                 }
             )
-            after = fixture.commit(tree, [base], "bump both")
+            target = fixture.commit(tree, [base], "bump both")
+            tree = fixture.tree(
+                {
+                    "foo.py": "def foo():\n    return 2\n",
+                    "bar.py": "def bar():\n    return 2\n",
+                }
+            )
+            after = fixture.commit(tree, [target], "correction")
 
             tool = RepositoryTool(
                 repository=VersionControl(fixture.repository),
                 after=after,
             )
 
-            result = tool.show(after, path="foo.py")
+            result = tool.show(target, path="foo.py")
 
             self.assertIn("foo.py", result["patch"])
             self.assertNotIn("bar.py", result["patch"])
@@ -1032,26 +1041,28 @@ class TestRepositoryTool(unittest.TestCase):
             tree = fixture.tree({"foo.py": "alpha\nbeta\n"})
             base = fixture.commit(tree, [], "base")
             tree = fixture.tree({"foo.py": "alpha\ngamma\n"})
-            after = fixture.commit(tree, [base], "replace beta")
+            middle = fixture.commit(tree, [base], "replace beta")
+            tree = fixture.tree({"foo.py": "alpha\ngamma\n"})
+            after = fixture.commit(tree, [middle], "correction")
 
             tool = RepositoryTool(
                 repository=VersionControl(fixture.repository),
                 after=after,
             )
 
-            first = tool.blame("foo.py", after, 1, 1)
+            first = tool.blame("foo.py", middle, 1, 1)
             self.assertEqual(
                 first["blame"],
                 f"L1: {base[:12]} | foo.py | alpha",
             )
             self.assertEqual(first["commits"], {base: "base"})
 
-            second = tool.blame("foo.py", after, 2, 2)
+            second = tool.blame("foo.py", middle, 2, 2)
             self.assertEqual(
                 second["blame"],
-                f"L2: {after[:12]} | foo.py | gamma",
+                f"L2: {middle[:12]} | foo.py | gamma",
             )
-            self.assertEqual(second["commits"], {after: "replace beta"})
+            self.assertEqual(second["commits"], {middle: "replace beta"})
 
     def test_pickaxe_emits_commits_with_changed_count(self) -> None:
         with HistoryFixture() as fixture:
@@ -1133,13 +1144,14 @@ class TestRepositoryTool(unittest.TestCase):
                     "bar.py": "unrelated\n",
                 }
             )
-            after = fixture.commit(tree, [], "base")
+            target = fixture.commit(tree, [], "base")
+            after = fixture.commit(tree, [target], "correction")
             tool = RepositoryTool(
                 repository=VersionControl(fixture.repository),
                 after=after,
             )
 
-            result = tool.grep("needle", commit=after)
+            result = tool.grep("needle", commit=target)
             self.assertEqual(
                 result,
                 [
@@ -1158,13 +1170,14 @@ class TestRepositoryTool(unittest.TestCase):
                     "bar.py": "needle\n",
                 }
             )
-            after = fixture.commit(tree, [], "base")
+            target = fixture.commit(tree, [], "base")
+            after = fixture.commit(tree, [target], "correction")
             tool = RepositoryTool(
                 repository=VersionControl(fixture.repository),
                 after=after,
             )
 
-            result = tool.grep("needle", commit=after)
+            result = tool.grep("needle", commit=target)
             self.assertEqual(
                 result,
                 [
@@ -1187,13 +1200,14 @@ class TestRepositoryTool(unittest.TestCase):
                     "bar.py": "needle\n",
                 }
             )
-            after = fixture.commit(tree, [], "base")
+            target = fixture.commit(tree, [], "base")
+            after = fixture.commit(tree, [target], "correction")
             tool = RepositoryTool(
                 repository=VersionControl(fixture.repository),
                 after=after,
             )
 
-            result = tool.grep("needle", commit=after, path="bar.py")
+            result = tool.grep("needle", commit=target, path="bar.py")
             self.assertEqual(
                 result,
                 [
@@ -1213,13 +1227,14 @@ class TestRepositoryTool(unittest.TestCase):
                     "pkg/nested/baz.py": "needle\n",
                 }
             )
-            after = fixture.commit(tree, [], "base")
+            target = fixture.commit(tree, [], "base")
+            after = fixture.commit(tree, [target], "correction")
             tool = RepositoryTool(
                 repository=VersionControl(fixture.repository),
                 after=after,
             )
 
-            result = tool.grep("needle", commit=after, path="pkg")
+            result = tool.grep("needle", commit=target, path="pkg")
             self.assertEqual(
                 [entry["path"] for entry in result],
                 ["pkg/bar.py", "pkg/nested/baz.py"],
@@ -1235,13 +1250,14 @@ class TestRepositoryTool(unittest.TestCase):
                     "pkg/nested/qux.txt": "needle\n",
                 }
             )
-            after = fixture.commit(tree, [], "base")
+            target = fixture.commit(tree, [], "base")
+            after = fixture.commit(tree, [target], "correction")
             tool = RepositoryTool(
                 repository=VersionControl(fixture.repository),
                 after=after,
             )
 
-            result = tool.grep("needle", commit=after, path="pkg/**/*.py")
+            result = tool.grep("needle", commit=target, path="pkg/**/*.py")
             self.assertEqual(
                 [entry["path"] for entry in result],
                 ["pkg/bar.py", "pkg/nested/baz.py"],
@@ -1250,13 +1266,14 @@ class TestRepositoryTool(unittest.TestCase):
     def test_grep_treats_needle_as_regex(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"foo.py": "needle\nneedful\n"})
-            after = fixture.commit(tree, [], "base")
+            target = fixture.commit(tree, [], "base")
+            after = fixture.commit(tree, [target], "correction")
             tool = RepositoryTool(
                 repository=VersionControl(fixture.repository),
                 after=after,
             )
 
-            result = tool.grep("need.*", commit=after)
+            result = tool.grep("need.*", commit=target)
             self.assertEqual(
                 result,
                 [
@@ -1270,14 +1287,15 @@ class TestRepositoryTool(unittest.TestCase):
     def test_grep_rejects_invalid_regex(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"foo.py": "needle\n"})
-            after = fixture.commit(tree, [], "base")
+            target = fixture.commit(tree, [], "base")
+            after = fixture.commit(tree, [target], "correction")
             tool = RepositoryTool(
                 repository=VersionControl(fixture.repository),
                 after=after,
             )
 
             with self.assertRaises(ValueError):
-                tool.grep("(", commit=after)
+                tool.grep("(", commit=target)
 
     def test_grep_applies_global_match_limit(self) -> None:
         with HistoryFixture() as fixture:
@@ -1287,13 +1305,14 @@ class TestRepositoryTool(unittest.TestCase):
                     "bar.py": "needle\nneedle\n",
                 }
             )
-            after = fixture.commit(tree, [], "base")
+            target = fixture.commit(tree, [], "base")
+            after = fixture.commit(tree, [target], "correction")
             tool = RepositoryTool(
                 repository=VersionControl(fixture.repository),
                 after=after,
             )
 
-            result = tool.grep("needle", commit=after, max=3)
+            result = tool.grep("needle", commit=target, max=3)
             self.assertEqual(
                 result,
                 [
@@ -1428,15 +1447,17 @@ class TestRepositoryTool(unittest.TestCase):
             tree = fixture.tree({"foo.py": "pass\n"})
             base = fixture.commit(tree, [], "base")
             tree = fixture.tree({"foo.py": "x = 1\n"})
-            after = fixture.commit(tree, [base], "edit")
+            target = fixture.commit(tree, [base], "edit")
+            tree = fixture.tree({"foo.py": "x = 1\n"})
+            after = fixture.commit(tree, [target], "correction")
 
             factory = RepositoryToolFactory(
                 repository=VersionControl(fixture.repository),
             )
             tool = factory.create(base, after)
 
-            show = tool.show(after)
-            self.assertEqual(show["sha"], after)
+            show = tool.show(target)
+            self.assertEqual(show["sha"], target)
 
 
 class TestDiffRenderer(unittest.TestCase):

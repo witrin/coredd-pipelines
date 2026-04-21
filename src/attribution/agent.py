@@ -437,6 +437,15 @@ class RepositoryTool:
         node = self._repository.handle.revparse_single(commit)
         return str(node.peel(pygit2.Commit).id)
 
+    def _is_ancestor(self, commit: str) -> bool:
+        """Return True if commit is a strict ancestor of the correction."""
+        repo = self._repository.handle
+        oid = pygit2.Oid(hex=commit)
+        after_oid = pygit2.Oid(hex=self._after)
+        if oid == after_oid:
+            return False
+        return repo.descendant_of(after_oid, oid)
+
     def show(self, commit: str, path: str | None = None) -> dict[str, Any]:
         """Show one commit and its patch.
 
@@ -444,6 +453,14 @@ class RepositoryTool:
         to one path.
         """
         commit = self._resolve(commit)
+        if commit == self._after:
+            return {
+                "error": "This is the correction commit. Its full diff is already provided in your initial message. Inspect candidates before the correction instead."
+            }
+        if not self._is_ancestor(commit):
+            return {
+                "error": f"Commit {commit[:12]} is not before the correction. The introducer must predate the correction."
+            }
         meta = self._repository.meta(commit)
         parents = self._repository.parents(commit)
         patch = ""
@@ -471,6 +488,14 @@ class RepositoryTool:
         Use this to see which commit last changed specific lines.
         """
         commit = self._resolve(commit)
+        if commit == self._after:
+            return {
+                "error": f"Cannot blame at the correction commit — it shows lines after the fix, not before. Use {commit[:12]}~1 to blame at the parent of the correction."
+            }
+        if not self._is_ancestor(commit):
+            return {
+                "error": f"Commit {commit[:12]} is not before the correction. The introducer must predate the correction. Use {self._after[:12]}~1 to start."
+            }
         raw = self._repository.blame(path, commit, [(start, end)])
         try:
             data = self._repository.blob(commit, path).decode("utf-8", errors="replace")
@@ -602,6 +627,18 @@ class RepositoryTool:
             raise ValueError(f"Invalid grep regex: {error}") from error
 
         commit = self._resolve(commit)
+        if commit == self._after:
+            return [
+                {
+                    "error": f"Cannot grep at the correction commit — its diff is already in your initial message. Use {commit[:12]}~1 to search the pre-fix state."
+                }
+            ]
+        if not self._is_ancestor(commit):
+            return [
+                {
+                    "error": f"Commit {commit[:12]} is not before the correction. Use {self._after[:12]}~1 to search the pre-fix state."
+                }
+            ]
         paths = self._repository.tree(commit)
         if path is not None:
             patterns = [path]
