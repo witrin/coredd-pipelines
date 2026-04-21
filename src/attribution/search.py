@@ -254,6 +254,7 @@ class KnowledgeGraphSearchNode:
             tools=node,
             prompt=prompt,
             response_format=SearchResult,
+            pre_model_hook=ResolvedErrorFilter(),
             post_model_hook=budget,
         )
         return graph.invoke(
@@ -315,6 +316,57 @@ class DuplicateCallGuard:
             )
         self._seen.add(key)
         return execute(request)
+
+
+class ResolvedErrorFilter:
+    """Hide resolved error messages from the LLM input.
+
+    Used as ``pre_model_hook`` on ``create_react_agent``.  Error
+    ToolMessages that the model has already reacted to are excluded
+    from the messages passed to the LLM.  The underlying state and
+    trace remain unchanged.
+    """
+
+    def __call__(self, state: dict) -> dict:
+        messages = state["messages"]
+
+        boundary = None
+        for position in range(len(messages) - 1, -1, -1):
+            candidate = messages[position]
+            if isinstance(candidate, AIMessage) and candidate.tool_calls:
+                boundary = position
+                break
+
+        # Collect resolved error tool_call_ids.
+        resolved: set[str] = set()
+        for position, message in enumerate(messages):
+            if (
+                isinstance(message, ToolMessage)
+                and getattr(message, "status", "success") == "error"
+                and boundary is not None
+                and position < boundary
+            ):
+                resolved.add(message.tool_call_id)
+
+        result = []
+        for position, message in enumerate(messages):
+            if isinstance(message, ToolMessage) and message.tool_call_id in resolved:
+                continue
+            if (
+                isinstance(message, AIMessage)
+                and message.tool_calls
+                and boundary is not None
+                and position < boundary
+            ):
+                kept = [c for c in message.tool_calls if c["id"] not in resolved]
+                if not kept:
+                    continue
+                if len(kept) < len(message.tool_calls):
+                    result.append(message.model_copy(update={"tool_calls": kept}))
+                    continue
+            result.append(message)
+
+        return {"llm_input_messages": result}
 
 
 class TurnBudget:
@@ -519,6 +571,7 @@ class RepositorySearchNode:
             tools=node,
             prompt=prompt,
             response_format=SearchResult,
+            pre_model_hook=ResolvedErrorFilter(),
             post_model_hook=budget,
         )
         return graph.invoke(

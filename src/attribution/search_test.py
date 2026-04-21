@@ -18,6 +18,7 @@ from benchmark.attribution.search import (
     KnowledgeGraphSeedNode,
     RepositorySearchNode,
     RepositorySeedNode,
+    ResolvedErrorFilter,
     SearchResult,
     TurnBudget,
 )
@@ -278,6 +279,7 @@ class TestKnowledgeGraphSearchNode(unittest.TestCase):
         self.assertEqual(factory_args, (llm,))
         self.assertIs(factory_kwargs["tools"], tool_node)
         self.assertIs(factory_kwargs["response_format"], SearchResult)
+        self.assertIsInstance(factory_kwargs["pre_model_hook"], ResolvedErrorFilter)
         self.assertIsInstance(factory_kwargs["post_model_hook"], TurnBudget)
         self.assertIn("blame", factory_kwargs["prompt"])
         self.assertIn("candidates", factory_kwargs["prompt"])
@@ -491,6 +493,7 @@ class TestRepositorySearchNode(unittest.TestCase):
         self.assertEqual(factory_args, (llm,))
         self.assertIs(factory_kwargs["tools"], tool_node)
         self.assertIs(factory_kwargs["response_format"], SearchResult)
+        self.assertIsInstance(factory_kwargs["pre_model_hook"], ResolvedErrorFilter)
         self.assertIsInstance(factory_kwargs["post_model_hook"], TurnBudget)
         self.assertIn("blame", factory_kwargs["prompt"])
         self.assertIn("pickaxe", factory_kwargs["prompt"])
@@ -641,3 +644,151 @@ class TestDuplicateCallGuardStatus(unittest.TestCase):
         result = guard(request, execute)
         self.assertEqual(result.status, "error")
         self.assertIn("already called", result.content)
+
+
+class TestResolvedErrorFilter(unittest.TestCase):
+    def test_filters_resolved_error(self) -> None:
+        hook = ResolvedErrorFilter()
+        state = {
+            "messages": [
+                HumanMessage(content="start"),
+                AIMessage(content="", tool_calls=[{"name": "a", "args": {}, "id": "1"}]),
+                ToolMessage(content="bad input", tool_call_id="1", status="error"),
+                AIMessage(content="", tool_calls=[{"name": "b", "args": {}, "id": "2"}]),
+                ToolMessage(content="ok", tool_call_id="2"),
+                AIMessage(content="", tool_calls=[{"name": "c", "args": {}, "id": "3"}]),
+            ]
+        }
+        result = hook(state)
+        messages = result["llm_input_messages"]
+
+        self.assertEqual(len(messages), 4)
+        self.assertNotIn(state["messages"][1], messages)
+        self.assertNotIn(state["messages"][2], messages)
+
+    def test_keeps_unresolved_error(self) -> None:
+        hook = ResolvedErrorFilter()
+        state = {
+            "messages": [
+                HumanMessage(content="start"),
+                AIMessage(content="", tool_calls=[{"name": "a", "args": {}, "id": "1"}]),
+                ToolMessage(content="bad input", tool_call_id="1", status="error"),
+                AIMessage(content="", tool_calls=[{"name": "b", "args": {}, "id": "2"}]),
+                ToolMessage(content="still bad", tool_call_id="2", status="error"),
+            ]
+        }
+        result = hook(state)
+        messages = result["llm_input_messages"]
+
+        self.assertEqual(len(messages), 3)
+        self.assertNotIn(state["messages"][1], messages)
+        self.assertNotIn(state["messages"][2], messages)
+        self.assertIn(state["messages"][3], messages)
+        self.assertIn(state["messages"][4], messages)
+
+    def test_keeps_success_messages(self) -> None:
+        hook = ResolvedErrorFilter()
+        state = {
+            "messages": [
+                HumanMessage(content="start"),
+                AIMessage(content="", tool_calls=[{"name": "a", "args": {}, "id": "1"}]),
+                ToolMessage(content="ok", tool_call_id="1"),
+                AIMessage(content="", tool_calls=[{"name": "b", "args": {}, "id": "2"}]),
+                ToolMessage(content="ok", tool_call_id="2"),
+            ]
+        }
+        result = hook(state)
+        messages = result["llm_input_messages"]
+
+        self.assertEqual(len(messages), 5)
+
+    def test_passthrough_without_errors(self) -> None:
+        hook = ResolvedErrorFilter()
+        state = {
+            "messages": [
+                HumanMessage(content="start"),
+                AIMessage(content="done"),
+            ]
+        }
+        result = hook(state)
+        messages = result["llm_input_messages"]
+
+        self.assertEqual(messages, state["messages"])
+
+    def test_empty_messages(self) -> None:
+        hook = ResolvedErrorFilter()
+        result = hook({"messages": []})
+
+        self.assertEqual(result["llm_input_messages"], [])
+
+    def test_mixed_batch_removes_partial_errors(self) -> None:
+        """AIMessage with mixed results is rewritten to keep only successful tool_calls."""
+        hook = ResolvedErrorFilter()
+        state = {
+            "messages": [
+                HumanMessage(content="start"),
+                AIMessage(content="", tool_calls=[
+                    {"name": "a", "args": {}, "id": "1"},
+                    {"name": "b", "args": {}, "id": "2"},
+                ]),
+                ToolMessage(content="ok", tool_call_id="1"),
+                ToolMessage(content="bad", tool_call_id="2", status="error"),
+                AIMessage(content="", tool_calls=[{"name": "c", "args": {}, "id": "3"}]),
+                ToolMessage(content="also bad", tool_call_id="3", status="error"),
+                AIMessage(content="", tool_calls=[{"name": "d", "args": {}, "id": "4"}]),
+            ]
+        }
+        result = hook(state)
+        messages = result["llm_input_messages"]
+
+        # AIMessage[1] stays but rewritten — only id=1 kept, id=2 removed
+        rewritten = messages[1]
+        self.assertIsInstance(rewritten, AIMessage)
+        self.assertEqual([c["id"] for c in rewritten.tool_calls], ["1"])
+        # Success ToolMessage stays
+        self.assertIn(state["messages"][2], messages)
+        # Error ToolMessage filtered
+        self.assertNotIn(state["messages"][3], messages)
+        # AIMessage[4] (all-error) filtered with its ToolMessage
+        self.assertNotIn(state["messages"][4], messages)
+        self.assertNotIn(state["messages"][5], messages)
+        # Current AIMessage stays
+        self.assertIn(state["messages"][6], messages)
+        self.assertEqual(len(messages), 4)
+
+    def test_preserves_tool_call_invariant(self) -> None:
+        """Every AIMessage with tool_calls must have matching ToolMessages."""
+        hook = ResolvedErrorFilter()
+        state = {
+            "messages": [
+                HumanMessage(content="start"),
+                AIMessage(content="", tool_calls=[{"name": "a", "args": {}, "id": "1"}]),
+                ToolMessage(content="boundary error", tool_call_id="1", status="error"),
+                AIMessage(content="", tool_calls=[{"name": "a", "args": {}, "id": "2"}]),
+                ToolMessage(content="ok", tool_call_id="2"),
+                AIMessage(content="", tool_calls=[{"name": "b", "args": {}, "id": "3"}]),
+            ]
+        }
+        result = hook(state)
+        messages = result["llm_input_messages"]
+
+        # The all-error AIMessage and its ToolMessage are both removed.
+        self.assertNotIn(state["messages"][1], messages)
+        self.assertNotIn(state["messages"][2], messages)
+
+        # Verify invariant: every non-boundary AIMessage with tool_calls
+        # has a matching ToolMessage.  The last AIMessage (boundary) may
+        # not have responses yet.
+        tool_message_ids = {
+            message.tool_call_id
+            for message in messages
+            if isinstance(message, ToolMessage)
+        }
+        for message in messages[:-1]:
+            if isinstance(message, AIMessage) and message.tool_calls:
+                for call in message.tool_calls:
+                    self.assertIn(
+                        call["id"],
+                        tool_message_ids,
+                        f"Orphaned tool_call id: {call['id']}",
+                    )
