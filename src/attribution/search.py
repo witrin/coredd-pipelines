@@ -7,7 +7,7 @@ from typing import Any, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.prebuilt import ToolNode, create_react_agent
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from benchmark.attribution.agent import (
     DiffRenderer,
@@ -47,7 +47,10 @@ class SearchOutput(TypedDict):
 
 
 class SearchResult(BaseModel):
-    introducer: str | None = None
+    introducer: str | None = Field(
+        default=None,
+        description="Full 40-character lowercase hex SHA of the bug-introducing commit, or null.",
+    )
 
 
 class KnowledgeGraphSeedNode:
@@ -248,7 +251,10 @@ class KnowledgeGraphSearchNode:
             """
         )
         budget = TurnBudget(steps)
-        limit = (steps + budget.max_errors) * 3 + 4
+        # Each react-agent cycle traverses 4 graph nodes
+        # (pre_model_hook, agent, post_model_hook, tools) plus a final
+        # cycle of up to 4 nodes to reach generate_structured_response.
+        limit = (steps + budget.max_errors + 1) * 4
         graph = create_react_agent(
             self._llm,
             tools=node,
@@ -307,7 +313,10 @@ class DuplicateCallGuard:
         self._seen: set[tuple[str, str]] = set()
 
     def __call__(self, request, execute):
-        key = (request.tool_call["name"], json.dumps(request.tool_call["args"], sort_keys=True))
+        key = (
+            request.tool_call["name"],
+            json.dumps(request.tool_call["args"], sort_keys=True),
+        )
         if key in self._seen:
             return ToolMessage(
                 content="You already called this tool with the same arguments. Try a different approach or return your final answer.",
@@ -565,7 +574,10 @@ class RepositorySearchNode:
             """
         )
         budget = TurnBudget(steps)
-        limit = (steps + budget.max_errors) * 3 + 4
+        # Each react-agent cycle traverses 4 graph nodes
+        # (pre_model_hook, agent, post_model_hook, tools) plus a final
+        # cycle of up to 4 nodes to reach generate_structured_response.
+        limit = (steps + budget.max_errors + 1) * 4
         graph = create_react_agent(
             self._llm,
             tools=node,

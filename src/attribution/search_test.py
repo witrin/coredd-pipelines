@@ -181,7 +181,7 @@ class TestKnowledgeGraphSearchNode(unittest.TestCase):
             )
 
         args, kwargs = agent.invoke.call_args
-        limit = (7 + 3) * 3 + 4
+        limit = (7 + 3) * 4 + 4
         self.assertEqual(kwargs, {"config": {"recursion_limit": limit}})
         self.assertEqual(args[0]["remaining_steps"], limit)
 
@@ -285,7 +285,7 @@ class TestKnowledgeGraphSearchNode(unittest.TestCase):
         self.assertIn("candidates", factory_kwargs["prompt"])
         self.assertIn("full 40-character", factory_kwargs["prompt"])
         args, kwargs = agent.invoke.call_args
-        limit = (20 + 3) * 3 + 4
+        limit = (20 + 3) * 4 + 4
         self.assertEqual(kwargs, {"config": {"recursion_limit": limit}})
         self.assertEqual(args[0]["remaining_steps"], limit)
         self.assertEqual(len(args[0]["messages"]), 1)
@@ -443,7 +443,7 @@ class TestRepositorySearchNode(unittest.TestCase):
             )
 
         args, kwargs = agent.invoke.call_args
-        limit = (11 + 3) * 3 + 4
+        limit = (11 + 3) * 4 + 4
         self.assertEqual(kwargs, {"config": {"recursion_limit": limit}})
         self.assertEqual(args[0]["remaining_steps"], limit)
 
@@ -500,7 +500,7 @@ class TestRepositorySearchNode(unittest.TestCase):
         self.assertIn("trace", factory_kwargs["prompt"])
         self.assertIn("full 40-character", factory_kwargs["prompt"])
         invoke_args, invoke_kwargs = agent.invoke.call_args
-        limit = (30 + 3) * 3 + 4
+        limit = (30 + 3) * 4 + 4
         self.assertEqual(invoke_kwargs, {"config": {"recursion_limit": limit}})
         self.assertEqual(invoke_args[0]["remaining_steps"], limit)
         self.assertEqual(len(invoke_args[0]["messages"]), 1)
