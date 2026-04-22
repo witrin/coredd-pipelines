@@ -418,7 +418,7 @@ class AgenticSZZGraph:
         self,
         seed: Any | None = None,
         search: Any | None = None,
-        steps: int = 50,
+        steps: int = 10,
     ) -> None:
         if seed is None or search is None:
             raise ValueError("AgenticSZZGraph requires explicit seed and search nodes.")
@@ -572,7 +572,7 @@ class AgenticSZZGraphBuilder:
         self,
         seed: Callable[[VersionControl], Any] | None = None,
         search: Callable[[VersionControl], Any] | None = None,
-        steps: int = 20,
+        steps: int = 10,
     ) -> None:
         if seed is None or search is None:
             raise ValueError("AgenticSZZGraphBuilder requires explicit node builders.")

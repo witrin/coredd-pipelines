@@ -173,7 +173,7 @@ class KnowledgeGraphSearchNode:
         self,
         input: Seed,
         *,
-        steps: int = 20,
+        steps: int = 10,
     ) -> SearchOutput:
         base = input.get("base")
         after = input.get("after")
@@ -250,7 +250,7 @@ class KnowledgeGraphSearchNode:
             decision can be made.
             """
         )
-        budget = TurnBudget(steps)
+        budget = TurnBudget(steps, max_errors=2)
         # Each react-agent cycle traverses 4 graph nodes
         # (pre_model_hook, agent, post_model_hook, tools) plus a final
         # cycle of up to 4 nodes to reach generate_structured_response.
@@ -573,7 +573,7 @@ class RepositorySearchNode:
             Return null only if no evidence was found at all.
             """
         )
-        budget = TurnBudget(steps)
+        budget = TurnBudget(steps, max_errors=5)
         # Each react-agent cycle traverses 4 graph nodes
         # (pre_model_hook, agent, post_model_hook, tools) plus a final
         # cycle of up to 4 nodes to reach generate_structured_response.
