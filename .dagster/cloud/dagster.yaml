@@ -34,6 +34,13 @@ run_coordinator:
     dequeue_num_workers: 10
     max_concurrent_runs: 50
 
+run_monitoring:
+  enabled: true
+  poll_interval_seconds: 120
+  max_resume_run_attempts: 0
+  start_timeout_seconds: 300
+  cancel_timeout_seconds: 300
+
 telemetry:
   enabled: false
 run_launcher:

@@ -3,7 +3,9 @@ Dagster run launcher that delegates work to a Cloud Run Job.
 
 The launcher keeps the Dagster control plane lean by simply triggering a Cloud Run Jobs execution.
 Each execution starts the worker image and runs ``dagster api execute_run <run_id>`` inside the
-container. Dagster tracks run status in Postgres, so the launcher does not need to poll for state.
+container.  The daemon's run-monitoring loop periodically calls ``check_run_worker_health`` to
+detect executions that failed outside of Python (OOM, SIGBUS, timeout) and marks the
+corresponding Dagster runs as failed.
 """
 
 from __future__ import annotations
@@ -16,7 +18,13 @@ from typing import Mapping, Optional
 import google.auth
 from dagster import DagsterInstance, Field, IntSource, Permissive, StringSource
 from dagster._core.errors import DagsterInvariantViolationError
-from dagster._core.launcher.base import LaunchRunContext, RunLauncher
+from dagster._core.launcher.base import (
+    CheckRunHealthResult,
+    LaunchRunContext,
+    RunLauncher,
+    WorkerStatus,
+)
+from dagster._core.storage.dagster_run import DagsterRun
 from dagster._serdes.config_class import ConfigurableClassData
 from google.auth.transport.requests import AuthorizedSession
 
@@ -152,26 +160,34 @@ class CloudRunJobRunLauncher(RunLauncher):
             instance.report_run_failed(dagster_run, message=message)
             raise DagsterInvariantViolationError(message)
 
-        execution_name = None
+        execution = None
+        logs = None
         try:
-            execution_name = response.json().get("name")
+            body = response.json()
+            metadata = body.get("metadata") or {}
+            execution = metadata.get("name") or body.get("name")
+            logs = metadata.get("logUri")
         except ValueError:
-            execution_name = None
+            pass
 
-        tag_payload = {"cloud_run_execution": execution_name} if execution_name else None
-        if tag_payload:
+        tags: dict[str, str] = {}
+        if execution:
+            tags["cloud_run_execution"] = execution
+        if logs:
+            tags["cloud_run_logs"] = logs
+        if tags:
             try:
-                instance.add_run_tags(run_id, tag_payload)
+                instance.add_run_tags(run_id, tags)
             except Exception:
                 logger.exception("Failed to attach execution metadata to run %s", run_id)
 
-        enqueue_message = (
+        message = (
             f"Triggered Cloud Run Job {job_name} for run {run_id}; "
-            f"execution: {execution_name or 'unknown'}"
+            f"execution: {execution or 'unknown'}"
         )
-        logger.info(enqueue_message)
+        logger.info(message)
         try:
-            instance.report_engine_event(enqueue_message, dagster_run)
+            instance.report_engine_event(message, dagster_run)
             instance.report_run_enqueued(dagster_run)
         except Exception:
             logger.exception("Failed to record enqueue status for run %s", run_id)
@@ -189,11 +205,96 @@ class CloudRunJobRunLauncher(RunLauncher):
 
         return True
 
+    @property
+    def supports_check_run_worker_health(self) -> bool:
+        return True
+
+    def check_run_worker_health(self, run: DagsterRun) -> CheckRunHealthResult:
+        execution = (run.tags or {}).get("cloud_run_execution")
+        if not execution:
+            return CheckRunHealthResult(WorkerStatus.UNKNOWN, "No cloud_run_execution tag")
+
+        try:
+            url = f"https://run.googleapis.com/v2/{execution}"
+            resp = self._authorized_session.get(url, timeout=self._config.timeout)
+        except Exception as exc:
+            logger.warning("Health check request failed for run %s: %s", run.run_id, exc)
+            return CheckRunHealthResult(WorkerStatus.UNKNOWN, str(exc))
+
+        if resp.status_code == 404:
+            return CheckRunHealthResult(WorkerStatus.NOT_FOUND, "Cloud Run execution not found")
+
+        if resp.status_code >= 400:
+            return CheckRunHealthResult(
+                WorkerStatus.UNKNOWN,
+                f"Cloud Run API returned {resp.status_code}",
+            )
+
+        conditions = self._conditions(resp)
+        return self._status(conditions)
+
+    def _conditions(self, resp) -> list[dict]:
+        try:
+            body = resp.json()
+            # Operation response: conditions live inside metadata
+            if "metadata" in body and "conditions" in body["metadata"]:
+                return body["metadata"]["conditions"]
+            # Direct execution response
+            return body.get("conditions") or []
+        except (ValueError, TypeError):
+            return []
+
+    def _status(self, conditions: list[dict]) -> CheckRunHealthResult:
+        for condition in conditions:
+            if condition.get("type") != "Completed":
+                continue
+            state = condition.get("state", "")
+            message = condition.get("message", "")
+            if state == "CONDITION_FAILED":
+                return CheckRunHealthResult(WorkerStatus.FAILED, message)
+            if state == "CONDITION_SUCCEEDED":
+                return CheckRunHealthResult(WorkerStatus.SUCCESS)
+            # CONDITION_PENDING or other transient states
+            return CheckRunHealthResult(WorkerStatus.RUNNING)
+        return CheckRunHealthResult(WorkerStatus.RUNNING)
+
     def can_terminate(self, run_id: str) -> bool:
-        # Cloud Run does not expose a lightweight terminate hook for jobs.
-        return False
+        try:
+            instance = self._require_instance()
+        except DagsterInvariantViolationError:
+            return False
+        run = instance.get_run_by_id(run_id)
+        if not run or run.is_finished:
+            return False
+        return bool((run.tags or {}).get("cloud_run_execution"))
 
     def terminate(self, run_id: str) -> bool:
+        try:
+            instance = self._require_instance()
+        except DagsterInvariantViolationError:
+            return False
+        run = instance.get_run_by_id(run_id)
+        if not run:
+            return False
+
+        execution = (run.tags or {}).get("cloud_run_execution")
+        if not execution:
+            return False
+
+        url = f"https://run.googleapis.com/v2/{execution}:cancel"
+        try:
+            resp = self._authorized_session.post(url, timeout=self._config.timeout)
+        except Exception as exc:
+            logger.exception("Failed to cancel execution for run %s: %s", run_id, exc)
+            return False
+
+        if resp.status_code < 400 or resp.status_code == 404:
+            return True
+
+        logger.error(
+            "Cancel request for run %s returned %s: %s",
+            run_id, resp.status_code, resp.text,
+        )
         return False
 
     def dispose(self) -> None:

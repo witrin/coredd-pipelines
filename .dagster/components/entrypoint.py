@@ -71,11 +71,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         success = _execute_dagster_run(instance, run)
     except Exception:
+        tb = traceback.format_exc()
         instance.report_engine_event(
             "Dagster crashed during execution",
             run,
-            engine_event_data=_metadata_entries({"traceback": traceback.format_exc()}),
+            engine_event_data=_metadata_entries({"traceback": tb}),
         )
+        instance.report_run_failed(run, message=f"Dagster crashed during execution: {tb}")
         instance.report_engine_event("Cloud Run job finished", run)
         raise
 
