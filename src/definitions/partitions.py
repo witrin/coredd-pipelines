@@ -233,14 +233,9 @@ attribution_evaluation_run = dg.DynamicPartitionsDefinition(
     name="attribution_evaluation_run"
 )
 
-attribution_evaluation_parameters = dg.DynamicPartitionsDefinition(
-    name="attribution_evaluation_parameters"
-)
-
 attribution_evaluation_partition = dg.MultiPartitionsDefinition(
     {
         "repository": ingest_validation_sources_partition,
         "run": attribution_evaluation_run,
-        "parameters": attribution_evaluation_parameters,
     }
 )

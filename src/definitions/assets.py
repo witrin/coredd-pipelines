@@ -1124,11 +1124,10 @@ def attribution_agentic_szz_evaluation(
     ]
 
     context.log.info(
-        "Evaluating %d cases for partition %s (run %s, parameters %s)",
+        "Evaluating %d cases for partition %s (run %s)",
         len(cases),
         repository_key,
         keys["run"],
-        keys["parameters"],
     )
 
     archive = Path(tempfile.mktemp(suffix=".tar.gz"))
@@ -1270,11 +1269,10 @@ def attribution_agent_szz_evaluation(
     ]
 
     context.log.info(
-        "Evaluating %d cases for partition %s (run %s, parameters %s)",
+        "Evaluating %d cases for partition %s (run %s)",
         len(cases),
         repository_key,
         keys["run"],
-        keys["parameters"],
     )
 
     context_archive = Path(tempfile.mktemp(suffix=".tar.gz"))
