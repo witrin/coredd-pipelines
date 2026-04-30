@@ -876,4 +876,120 @@ describe("hydrate", () => {
       s.project("x", "f").filter((a) => a.origin === "suggestion")[0].status,
     ).toBe("pending");
   });
+
+  it("two non-adjacent entries on the same file produce two manual annotations", () => {
+    const s = new Selection([]);
+    s.hydrate([
+      { sha: "x", path: "f", lines: [[5, 10]] },
+      { sha: "x", path: "f", lines: [[20, 25]] },
+    ]);
+    const manuals = s.project("x", "f").filter((a) => a.origin === "manual");
+    expect(manuals).toHaveLength(2);
+    const sorted = [...manuals]
+      .map((a) => a.lines)
+      .sort((a, b) => a[0][0] - b[0][0]);
+    expect(sorted).toEqual([[[5, 10]], [[20, 25]]]);
+  });
+});
+
+describe("non-adjacent manual selections", () => {
+  it("two non-adjacent adds produce two manual annotations with distinct identifiers", () => {
+    const s = new Selection([]);
+    s.add("foo", "bar.ts", [[5, 10]]);
+    s.add("foo", "bar.ts", [[20, 25]]);
+    const manuals = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "manual");
+    expect(manuals).toHaveLength(2);
+    expect(manuals[0].identifier).not.toBe(manuals[1].identifier);
+    const sorted = [...manuals]
+      .map((a) => a.lines)
+      .sort((a, b) => a[0][0] - b[0][0]);
+    expect(sorted).toEqual([[[5, 10]], [[20, 25]]]);
+  });
+
+  it("a third add bridging two non-adjacent passages collapses all three into one annotation", () => {
+    const s = new Selection([]);
+    s.add("foo", "bar.ts", [[5, 10]]);
+    s.add("foo", "bar.ts", [[20, 25]]);
+    s.add("foo", "bar.ts", [[10, 20]]);
+    const manuals = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "manual");
+    expect(manuals).toHaveLength(1);
+    expect(manuals[0].lines).toEqual([[5, 25]]);
+  });
+
+  it("preserves the older identifier when adjacent adds merge", () => {
+    const s = new Selection([]);
+    s.add("foo", "bar.ts", [[5, 10]]);
+    const first = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "manual")[0].identifier;
+    s.add("foo", "bar.ts", [[10, 15]]);
+    const manuals = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "manual");
+    expect(manuals).toHaveLength(1);
+    expect(manuals[0].identifier).toBe(first);
+    expect(manuals[0].lines).toEqual([[5, 15]]);
+  });
+
+  it("removing one of two non-adjacent passages leaves the other intact", () => {
+    const s = new Selection([]);
+    s.add("foo", "bar.ts", [[5, 10]]);
+    s.add("foo", "bar.ts", [[20, 25]]);
+    const before = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "manual");
+    const target = before.find((a) => a.lines[0][0] === 5)!.identifier;
+    const survivor = before.find((a) => a.lines[0][0] === 20)!.identifier;
+    s.remove(target);
+    const after = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "manual");
+    expect(after).toHaveLength(1);
+    expect(after[0].identifier).toBe(survivor);
+    expect(after[0].lines).toEqual([[20, 25]]);
+  });
+
+  it("an add fully covered by an existing passage emits no event", () => {
+    const s = new Selection([]);
+    s.add("foo", "bar.ts", [[5, 15]]);
+    const before = s.snapshot();
+    s.add("foo", "bar.ts", [[7, 12]]);
+    expect(s.snapshot()).toBe(before);
+  });
+
+  it("an add covered by two non-adjacent passages combined bridges them into one", () => {
+    const s = new Selection([]);
+    s.add("foo", "bar.ts", [[5, 10]]);
+    s.add("foo", "bar.ts", [[20, 25]]);
+    s.add("foo", "bar.ts", [[5, 25]]);
+    const manuals = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "manual");
+    expect(manuals).toHaveLength(1);
+    expect(manuals[0].lines).toEqual([[5, 25]]);
+  });
+
+  it("an accepted suggestion touching only one of two non-adjacent passages attaches to that passage only", () => {
+    const s = new Selection([
+      { sha: "foo", path: "bar.ts", lines: [[10, 15]], description: "baz" },
+    ]);
+    s.add("foo", "bar.ts", [[15, 20]]);
+    s.add("foo", "bar.ts", [[40, 45]]);
+    s.accept(
+      s.project("foo", "bar.ts").filter((a) => a.origin === "suggestion")[0]
+        .identifier,
+    );
+    const manuals = s
+      .project("foo", "bar.ts")
+      .filter((a) => a.origin === "manual");
+    expect(manuals).toHaveLength(2);
+    const touching = manuals.find((a) => a.lines[0][0] === 10)!;
+    const isolated = manuals.find((a) => a.lines[0][0] === 40)!;
+    expect(touching.lines).toEqual([[10, 20]]);
+    expect(isolated.lines).toEqual([[40, 45]]);
+  });
 });

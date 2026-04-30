@@ -1,7 +1,11 @@
-export function add(a: number, b: number): number {
-  return a + b;
+export function add(left: number, right: number): number {
+  return left + right;
 }
 
-export function subtract(a: number, b: number): number {
-  return a - b;
+export function subtract(left: number, right: number): number {
+  return left - right;
+}
+
+export function multiply(left: number, right: number): number {
+  return left * right;
 }

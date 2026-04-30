@@ -47,7 +47,7 @@ Start the Vite server with hot-reload.
 docker compose --profile annotation up annotation
 ```
 
-Open [http://localhost:5173/test.html](http://localhost:5173/test.html) in a browser.
+Open [http://localhost:5173/tests/demo.html](http://localhost:5173/tests/demo.html) in a browser.
 
 Source files in `src/` are mounted as volumes — changes are reflected immediately without rebuilding the image.
 

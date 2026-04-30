@@ -904,6 +904,105 @@ test.describe("Selection interactions", () => {
     });
   });
 
+  test.describe("when two non-adjacent manual selections are made on the same file", () => {
+    test("renders two manual sidebar entries", async ({ page }) => {
+      await Annotate.mark(page, 1, 2);
+      await Annotate.wait(page);
+      await Annotate.clear(page);
+      await Annotate.mark(page, 7, 8);
+      await Annotate.wait(page);
+      const manualCount = await page.evaluate(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        const container = Array.from(root?.querySelectorAll("*") ?? []).find(
+          (element) => (element as any).annotation,
+        ) as any;
+        return (
+          container?.annotation?.projection?.current?.filter(
+            (a: any) => a.origin === "manual",
+          ).length ?? 0
+        );
+      });
+      expect(manualCount).toBe(2);
+      const visibleEntries = await page.evaluate(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        return Array.from(root?.querySelectorAll(".av-row") ?? [])
+          .map((element) => (element as HTMLElement).innerText?.trim())
+          .filter((t) => t.includes("bar.ts"));
+      });
+      const annotatorEntries = visibleEntries.filter(
+        (t) => t.includes("L1") || t.includes("L7"),
+      );
+      expect(annotatorEntries.length).toBeGreaterThanOrEqual(2);
+    });
+
+    test("renders two Remove lenses at the two start lines", async ({
+      page,
+    }) => {
+      await Annotate.mark(page, 1, 2);
+      await Annotate.wait(page);
+      await Annotate.clear(page);
+      await Annotate.mark(page, 7, 8);
+      await Annotate.wait(page);
+      await page.waitForFunction(
+        () => {
+          const root = document.querySelector("code-annotation")?.shadowRoot;
+          return (
+            Array.from(
+              root?.querySelectorAll(".codelens-decoration a") ?? [],
+            ).filter((a) => a.textContent === "Remove").length === 2
+          );
+        },
+        undefined,
+        { timeout: 5000 },
+      );
+      const removeCount = await page.evaluate(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        return Array.from(
+          root?.querySelectorAll(".codelens-decoration a") ?? [],
+        ).filter((a) => a.textContent === "Remove").length;
+      });
+      expect(removeCount).toBe(2);
+    });
+
+    test("removing one passage leaves the other intact", async ({ page }) => {
+      await Annotate.mark(page, 1, 2);
+      await Annotate.wait(page);
+      await Annotate.clear(page);
+      await Annotate.mark(page, 7, 8);
+      await Annotate.wait(page);
+      await page.waitForFunction(
+        () => {
+          const root = document.querySelector("code-annotation")?.shadowRoot;
+          return (
+            Array.from(
+              root?.querySelectorAll(".codelens-decoration a") ?? [],
+            ).filter((a) => a.textContent === "Remove").length === 2
+          );
+        },
+        undefined,
+        { timeout: 5000 },
+      );
+      await Annotate.clear(page);
+      await Annotate.removeManual(page);
+      await Annotate.wait(page);
+      const detail = await Annotate.last(page);
+      expect(detail).toHaveLength(1);
+      expect(detail[0].lines).toHaveLength(1);
+      await page.waitForFunction(
+        () => {
+          const root = document.querySelector("code-annotation")?.shadowRoot;
+          return (
+            Array.from(
+              root?.querySelectorAll(".codelens-decoration a") ?? [],
+            ).filter((a) => a.textContent === "Remove").length === 1
+          );
+        },
+        undefined,
+        { timeout: 5000 },
+      );
+    });
+  });
+
   test.describe("when clicking an annotation list entry", () => {
     test("file tree navigates to the annotation target file", async ({
       page,

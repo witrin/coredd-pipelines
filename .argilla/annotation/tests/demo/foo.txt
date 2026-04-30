@@ -1,9 +1,11 @@
 import { add } from "./util";
 
-function run() {
-  for (let i = 0; i <= 10; i++) {
-    console.log(add(i, 1));
+export function run(argument: string): void {
+  const start = parseInt(argument, 10);
+  for (let index = start; index < start + 10; index++) {
+    const value = add(index, 1);
+    console.log(value);
   }
 }
 
-run();
+run(process.argv[2]);

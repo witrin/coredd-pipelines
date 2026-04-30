@@ -1,45 +1,50 @@
 {
-  "repository": "foo/bar",
-  "model": "foo",
+  "repository": "acme/numbers-cli",
+  "model": "claude-sonnet-4-5",
   "context": {
-    "sha": "bar",
-    "author": "foo",
-    "message": "foo: base implementation",
-    "time": "2024-01-01T10:00:00+00:00",
-    "labels": ["baz"],
+    "sha": "9a1c4f2",
+    "author": "alice",
+    "message": "Tighten CLI loop boundary and parse start index safely",
+    "time": "2025-09-15T10:00:00+00:00",
+    "labels": ["correction"],
     "changes": {
-      "src/foo.ts": "baz.txt",
-      "src/bar.ts": {
+      "src/util.ts": "baz.txt",
+      "src/cli.ts": {
         "action": "change",
-        "source": "foo.txt",
-        "target": "bar.txt"
+        "source": "bar.txt",
+        "target": "foo.txt"
       }
     }
   },
   "targets": [
     {
-      "sha": "baz",
-      "author": "bar",
-      "message": "baz: introduce defect",
-      "time": "2024-01-02T12:00:00+00:00",
-      "labels": ["qux"],
+      "sha": "d3e7b81",
+      "author": "bob",
+      "message": "Refactor CLI runner before next release",
+      "time": "2025-09-22T12:00:00+00:00",
+      "labels": ["defect"],
       "changes": {
-        "src/foo.ts": "baz.txt",
-        "src/bar.ts": {
+        "src/util.ts": "baz.txt",
+        "src/cli.ts": {
           "action": "change",
           "source": "foo.txt",
           "target": "bar.txt"
         },
-        "src/qux.ts": {
+        "src/version.ts": {
           "action": "add",
           "target": "qux.txt"
         }
       },
       "annotations": [
         {
-          "path": "src/bar.ts",
-          "lines": [[3, 6]],
-          "description": "foo bar baz"
+          "path": "src/cli.ts",
+          "lines": [[5, 6]],
+          "description": "Loop boundary is inclusive; the loop runs 11 times instead of 10."
+        },
+        {
+          "path": "src/cli.ts",
+          "lines": [[7, 8]],
+          "description": "Logging inside a tight loop may slow large runs. Consider buffering output."
         }
       ]
     }
