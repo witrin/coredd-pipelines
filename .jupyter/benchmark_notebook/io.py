@@ -27,19 +27,26 @@ class CloudStorage:
         version: str = "1.0.0",
         location: str = "main",
         partition: str = "default",
-    ) -> pa.Table | Path | Iterator[Path]:
+        columns: list[str] | None = None,
+        filters: list | None = None,
+        batch: int | None = None,
+    ) -> pa.Table | Path | Iterator[Path] | Iterator[pa.RecordBatch]:
         if self._has_wildcard(version):
             raise ValueError("Version wildcards are not supported.")
         if self._has_wildcard(location):
             raise ValueError("Location wildcards are not supported.")
 
         if self._has_wildcard(partition):
+            if batch is not None:
+                raise ValueError("Batch is not supported for wildcard partitions.")
             tables = list(
                 self._list_tables(
                     key=key,
                     version=version,
                     location=location,
                     partition=partition,
+                    columns=columns,
+                    filters=filters,
                 )
             )
             if not tables and location != "main":
@@ -49,6 +56,8 @@ class CloudStorage:
                         version=version,
                         location="main",
                         partition=partition,
+                        columns=columns,
+                        filters=filters,
                     )
                 )
             if tables:
@@ -74,7 +83,7 @@ class CloudStorage:
                 )
             return self._iterate_blobs(key, version, blobs)
 
-        table = self._load_table(key, version, location, partition)
+        table = self._load_table(key, version, location, partition, columns, filters, batch)
 
         if table is not None:
             return table
@@ -84,7 +93,7 @@ class CloudStorage:
             return self._load_blob(blob)
 
         if location != "main":
-            table = self._load_table(key, version, "main", partition)
+            table = self._load_table(key, version, "main", partition, columns, filters, batch)
             if table is not None:
                 return table
             blob = self._latest_blob(key, version, "main", partition)
@@ -127,7 +136,10 @@ class CloudStorage:
         version: str,
         location: str,
         partition: str,
-    ) -> pa.Table | None:
+        columns: list[str] | None = None,
+        filters: list | None = None,
+        batch: int | None = None,
+    ) -> pa.Table | Iterator[pa.RecordBatch] | None:
         name = self._blob_name(
             key=key,
             version=version,
@@ -140,14 +152,26 @@ class CloudStorage:
             return None
         blob.reload()
         path, meta = self._cache_path(blob)
-        if self._is_cache_valid(blob, path, meta):
-            return pq.read_table(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp = path.parent / f".{path.name}.tmp"
-        blob.download_to_filename(str(temp))
-        temp.replace(path)
-        self._write_cache_meta(blob, path, meta)
-        return pq.read_table(path)
+        if not self._is_cache_valid(blob, path, meta):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.parent / f".{path.name}.tmp"
+            blob.download_to_filename(str(temp))
+            temp.replace(path)
+            self._write_cache_meta(blob, path, meta)
+        if batch is not None:
+            return self._iter_batches(path, columns, filters, batch)
+        return pq.read_table(path, columns=columns, filters=filters)
+
+    def _iter_batches(
+        self,
+        path: Path,
+        columns: list[str] | None,
+        filters: list | None,
+        batch: int,
+    ) -> Iterator[pa.RecordBatch]:
+        dataset = pq.ParquetDataset(path, filters=filters)
+        for fragment in dataset.fragments:
+            yield from fragment.to_batches(batch=batch, columns=columns, filter=dataset._filter_expression)
 
     def _list_tables(
         self,
@@ -155,6 +179,8 @@ class CloudStorage:
         version: str,
         location: str,
         partition: str,
+        columns: list[str] | None = None,
+        filters: list | None = None,
     ) -> Iterable[pa.Table]:
         prefix = (
             f"assets/{key}/" f"version={version}/" f"location={location}/" "partition="
@@ -175,14 +201,14 @@ class CloudStorage:
             blob.reload()
             path, meta_path = self._cache_path(blob)
             if self._is_cache_valid(blob, path, meta_path):
-                yield pq.read_table(path)
+                yield pq.read_table(path, columns=columns, filters=filters)
                 continue
             path.parent.mkdir(parents=True, exist_ok=True)
             temp = path.parent / f".{path.name}.tmp"
             blob.download_to_filename(str(temp))
             temp.replace(path)
             self._write_cache_meta(blob, path, meta_path)
-            yield pq.read_table(path)
+            yield pq.read_table(path, columns=columns, filters=filters)
 
     def _list_blobs(
         self,
