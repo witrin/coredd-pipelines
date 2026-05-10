@@ -119,8 +119,8 @@ WITH
       APPROX_QUANTILES(pc.review_count, 2)[OFFSET(1)]
         AS median_reviews_per_change,
       APPROX_QUANTILES(pc.count, 2)[OFFSET(1)] AS median_reviewers_per_change,
-      SAFE_DIVIDE(COUNTIF(pc.is_reviewed), COUNT(*)) AS review_share,
-      SAFE_DIVIDE(COUNTIF(pc.is_audit_only), COUNT(*)) AS audit_only_share
+      COUNTIF(pc.is_reviewed), COUNT(*) AS review_changes,
+      COUNTIF(pc.is_audit_only), COUNT(*) AS audit_changes
     FROM per_change pc
     LEFT JOIN reviews r
       ON pc.repository = r.repository AND pc.change_number = r.change_number
@@ -216,20 +216,18 @@ WITH
   per_merge_review AS (
     SELECT
       m.repository,
-      SAFE_DIVIDE(
-        COUNTIF(
-          EXISTS (
-            SELECT 1
-            FROM reviews r
-            WHERE r.repository = m.repository
-              AND r.change_number = m.change_number
-              AND r.reviewer IS NOT NULL
-              AND r.reviewer != m.change_author
-              AND r.review_created_at <= m.merged_at
-          )
-        ),
-        COUNT(*)
-      ) AS review_share
+      COUNTIF(
+        EXISTS (
+          SELECT 1
+          FROM reviews r
+          WHERE r.repository = m.repository
+            AND r.change_number = m.change_number
+            AND r.reviewer IS NOT NULL
+            AND r.reviewer != m.change_author
+            AND r.review_created_at <= m.merged_at
+        )
+      ),
+      AS review_merges
     FROM merges m
     GROUP BY m.repository
   ),
@@ -285,8 +283,9 @@ SELECT
   r.total_resolutions,
   f.median_reviews_per_change,
   f.median_reviewers_per_change,
-  COALESCE(ms.review_share, 0) AS review_share,
-  f.audit_only_share,
+  f.review_changes,
+  f.audit_changes,
+  COALESCE(ms.review_merges, 0) AS review_merges,
   r.label_share,  
   d.default_target_share,
   l.license,
