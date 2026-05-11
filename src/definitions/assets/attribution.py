@@ -334,7 +334,7 @@ def attribution_agent_szz_evaluation(
 
 @asset(
     metadata={"version": "1.1.1"},
-    group_name="ingest",
+    group_name="attribution",
     kinds={"github"},
     pool="github",
 )
@@ -400,7 +400,7 @@ def ingest_validation_set(
 @asset(
     metadata={"version": "1.0.1"},
     partitions_def=partitions.ingest_validation_sources_partition,
-    group_name="ingest",
+    group_name="attribution",
     kinds={"github"},
     pool="github",
     output_required=False,
@@ -435,7 +435,7 @@ def ingest_validation_sources(
 @asset(
     metadata={"version": "3.2.2"},
     partitions_def=partitions.ingest_validation_sources_partition,
-    group_name="ingest",
+    group_name="attribution",
     pool="default",
 )
 def ingest_validation_context(
@@ -547,7 +547,7 @@ def ingest_validation_context(
 @asset(
     metadata={"version": "2.0.0"},
     partitions_def=partitions.ingest_validation_sources_partition,
-    group_name="ingest",
+    group_name="attribution",
     pool="default",
 )
 def ingest_validation_context_index(
@@ -783,7 +783,7 @@ def ingest_validation_context_index(
 
 @asset(
     metadata={"version": "1.0.0"},
-    group_name="ingest",
+    group_name="attribution",
     ins={"ingest_validation_set": dg.AssetIn()},
 )
 def ingest_validation_sources_health(

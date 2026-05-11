@@ -27,7 +27,8 @@ dependencies = [
     "pygit2==1.19.1",
     "openai==2.20.0",
     "networkx==3.6.1",
-    "argilla>=2.8.0"
+    "argilla>=2.8.0",
+    "statsmodels==0.14.6"
 ]
 
 [project.optional-dependencies]

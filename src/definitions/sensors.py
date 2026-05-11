@@ -14,7 +14,7 @@ import pyarrow.compute as pc
 
 
 @asset_sensor(
-    asset_key="scope_repository_profile",
+    asset_key="scope_repository_signal",
 )
 def scope_repository_partition_sensor(
     context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
@@ -27,7 +27,7 @@ def scope_repository_partition_sensor(
     table = storage.load(context, event=asset_event)
 
     if table is None or table.num_rows == 0:
-        context.log.info("No data found for scope_repository_profile.")
+        context.log.info("No data found for scope_repository_signal.")
         return None
 
     keys = set(table["name"].to_pylist())
@@ -58,7 +58,7 @@ def scope_repository_partition_sensor(
 
 
 @asset_sensor(
-    asset_key="scope_repository_profile",
+    asset_key="scope_repository_signal",
 )
 def scope_repository_batch_sensor(
     context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
@@ -110,10 +110,10 @@ def scope_repository_batch_sensor(
 @asset_sensor(
     asset_key="scope_repository_cohort",
 )
-def scope_repository_cohort_sensor(
+def scope_issue_catalog_sensor(
     context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
 ):
-    """Synchronize cohort partitions with time-based sharding."""
+    """Synchronize issue-catalog partitions with time-based sharding."""
     instance = context.instance
     storage = TableAssetStorage()
 
@@ -158,13 +158,13 @@ def scope_repository_cohort_sensor(
 
 
 @asset_sensor(
-    asset_key="scope_repository_set",
+    asset_key="scope_repository_cohort",
 )
-def scope_repository_set_sensor(
+def scope_repository_cohort_sensor(
     context: dg.SensorEvaluationContext,
     asset_event: dg.EventLogEntry,
 ):
-    """Populate partitions for raw ingestion assets based on scope_repository_set."""
+    """Populate partitions for raw ingestion assets based on scope_repository_cohort."""
     import polars as pl
     from dateutil.relativedelta import relativedelta
 
@@ -172,7 +172,7 @@ def scope_repository_set_sensor(
     table = storage.load(context, event=asset_event)
 
     if table is None or table.num_rows == 0:
-        context.log.info("No data found for scope_repository_set.")
+        context.log.info("No data found for scope_repository_cohort.")
         return None
 
     instance = context.instance

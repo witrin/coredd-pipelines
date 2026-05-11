@@ -226,8 +226,7 @@ WITH
             AND r.reviewer != m.change_author
             AND r.review_created_at <= m.merged_at
         )
-      ),
-      AS review_merges
+      ) AS review_merges
     FROM merges m
     GROUP BY m.repository
   ),
