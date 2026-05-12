@@ -42,7 +42,8 @@ notebooks = [
     "marimo>=0.20",
     "plotly==6.5.2",
     "umap-learn==0.5.11",
-    "tqdm==4.67"
+    "tqdm==4.67",
+    "ipywidgets==8.1"
 ]
 
 [build-system]
