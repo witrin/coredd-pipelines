@@ -24,7 +24,7 @@ class BigQueryQueryConfig(dg.Config):
 
 
 @asset(
-    metadata={"version": "2.0.0"},
+    metadata={"version": "2.0.1"},
     group_name="scope",
     kinds={"bigquery"},
 )
@@ -32,12 +32,12 @@ def scope_repository_candidate(
     context: dg.AssetExecutionContext, config: BigQueryQueryConfig
 ) -> pa.Table:
     """
-    GitHub repositories whose primary language is TypeScript, Python, or
-    JavaScript and that show maintenance activity within the specified time
-    window. Maintenance is defined as at least one pull request opened against
-    the default branch with reviews from at least two distinct reviewers,
-    at least one issue opened, and at least one issue closed during the same
-    period. Only activity performed by human users is considered.
+    GitHub repositories whose primary language is Python, and that show 
+    maintenance activity within the specified time window. Maintenance 
+    is defined as at least one pull request opened against the default 
+    branch with reviews from at least two distinct reviewers, at least 
+    one issue opened, and at least one issue closed during the same period. 
+    Only activity performed by human users is considered.
     """
 
     with open(
@@ -377,6 +377,50 @@ def scope_repository_cohort(
         "Dart",
         "PHP",
         "Ruby",
+
+        "JavaScript",
+        "TypeScript",
+        "CoffeeScript",
+
+        "Groovy",
+        "Clojure",
+        "F#",
+        "Visual Basic",
+        "Visual Basic .NET",
+
+        "Zig",
+        "D",
+        "Nim",
+        "Crystal",
+        "V",
+        "Ada",
+        "Fortran",
+        "Assembly",
+
+        "Haskell",
+        "OCaml",
+        "Erlang",
+        "Elixir",
+        "Elm",
+        "Lisp",
+        "Common Lisp",
+        "Scheme",
+        "Racket",
+        "PureScript",
+        "ReScript",
+        "Haxe",
+
+        "Perl",
+        "Lua",
+        "R",
+        "Julia",
+        "Tcl",
+
+        "Objective-C++",
+
+        "MATLAB",
+        "Mathematica",
+        "Solidity",
     }
 
     catalog = pa.concat_tables(scope_repository_catalog.values())
@@ -415,13 +459,16 @@ def scope_repository_cohort(
             .dt.total_days()
             / 365
         ).alias("age_years"),
+
+        (pl.col("excluded_language_size") / pl.col("size").clip(lower_bound=1))
+        .alias("excluded_language_share"),
     ).filter(
         (pl.col("review_score") >= 0.75)
         & (pl.col("age_years") >= 3)
         & (pl.col("size") >= 300_000)
         & (pl.col("merges") >= 100)
-        & (pl.col("target_language_share") >= 0.95)
-        & (pl.col("excluded_language_size") == 0)
+        & (pl.col("target_language_share") >= 0.90)
+        & (pl.col("excluded_language_share") < 0.10)
         & (pl.col("language").is_in(targets))
         & (pl.col("archive") == False)
         & (

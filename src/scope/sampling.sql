@@ -104,31 +104,34 @@ WITH
       (review_count = 0 AND audit_count = 0) AS is_no_review
     FROM per_change_base
   ),
+  per_repository_reviewers AS (
+    SELECT
+      pc.repository,
+      COUNT(DISTINCT r.reviewer) AS total_reviewers
+    FROM per_change pc
+    LEFT JOIN reviews r
+      ON pc.repository = r.repository
+      AND pc.change_number = r.change_number
+      AND r.reviewer IS NOT NULL
+      AND r.reviewer != pc.change_author
+    GROUP BY pc.repository
+  ),
   per_repository AS (
     SELECT
       pc.repository,
       COUNT(*) AS total_changes,
       SUM(pc.review_count) AS total_reviews,
-      COUNT(
-        DISTINCT
-          CASE
-            WHEN r.reviewer IS NOT NULL AND r.reviewer != pc.change_author
-              THEN r.reviewer
-          END
-      ) AS total_reviewers,
-      APPROX_QUANTILES(pc.review_count, 2)[OFFSET(1)]
-        AS median_reviews_per_change,
+      APPROX_QUANTILES(pc.review_count, 2)[OFFSET(1)] AS median_reviews_per_change,
       APPROX_QUANTILES(pc.count, 2)[OFFSET(1)] AS median_reviewers_per_change,
-      COUNTIF(pc.is_reviewed), COUNT(*) AS review_changes,
-      COUNTIF(pc.is_audit_only), COUNT(*) AS audit_changes
+      COUNTIF(pc.is_reviewed) AS review_changes,
+      COUNTIF(pc.is_audit_only) AS audit_changes
     FROM per_change pc
-    LEFT JOIN reviews r
-      ON pc.repository = r.repository AND pc.change_number = r.change_number
     GROUP BY pc.repository
   ),
   filtered AS (
     SELECT *
     FROM per_repository
+    JOIN per_repository_reviewers USING (repository)
     WHERE total_reviewers >= 2 AND total_changes >= 1 AND total_reviews >= 1
   ),
   resolutions AS (
