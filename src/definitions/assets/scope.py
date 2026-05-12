@@ -181,7 +181,7 @@ def scope_repository_raw(
 
 
 @asset(
-    metadata={"version": "1.4.0"},
+    metadata={"version": "1.5.2"},
     partitions_def=partitions.scope_repository_batch_partition,
     group_name="scope",
     kinds={"github"},
@@ -223,6 +223,7 @@ def scope_repository_catalog(
             "network": raw.get("network_count"),
             "archive": raw.get("archived"),
             "status": "absent",
+            "excerpts": [],
         }
 
         owner, name = row["name"].split("/", 1)
@@ -256,6 +257,17 @@ def scope_repository_catalog(
                                 }
                             }
                         }
+
+                        recent: pullRequests(last: 100, states: [MERGED, CLOSED]) {
+                            nodes {
+                                number
+                                bodyText
+                                author {
+                                    login
+                                    __typename
+                                }
+                            }
+                        }
                     }
                 }
             """
@@ -266,6 +278,21 @@ def scope_repository_catalog(
                     {"owner": owner, "name": name},
                 )
                 result = response[1]["data"]["repository"]
+
+                excerpts: list[dict[str, object]] = []
+                for node in result["recent"]["nodes"]:
+                    body = node.get("bodyText") or ""
+                    author = node.get("author") or {}
+                    if author.get("__typename") != "User":
+                        continue
+                    if len(body) < 50:
+                        continue
+                    excerpts.append({
+                        "kind": "change",
+                        "number": node["number"],
+                        "author": author["login"],
+                        "body": body[:500],
+                    })
 
                 profile |= {
                     "changes": result["pullRequests"]["totalCount"],
@@ -278,6 +305,7 @@ def scope_repository_catalog(
                         {"name": edge["node"]["name"], "size": int(edge["size"])}
                         for edge in result["languages"]["edges"]
                     ],
+                    "excerpts": excerpts,
                 }
             except UnknownObjectException:
                 pass
