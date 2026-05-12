@@ -28,7 +28,8 @@ dependencies = [
     "openai==2.20.0",
     "networkx==3.6.1",
     "argilla>=2.8.0",
-    "statsmodels==0.14.6"
+    "statsmodels==0.14.6",
+    "lingua-language-detector==2.2.0"
 ]
 
 [project.optional-dependencies]

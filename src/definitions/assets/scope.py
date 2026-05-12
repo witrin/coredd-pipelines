@@ -181,7 +181,7 @@ def scope_repository_raw(
 
 
 @asset(
-    metadata={"version": "1.5.2"},
+    metadata={"version": "1.7.0"},
     partitions_def=partitions.scope_repository_batch_partition,
     group_name="scope",
     kinds={"github"},
@@ -193,7 +193,15 @@ def scope_repository_catalog(
     github: GithubResource,
 ) -> pa.Table:
     """Repository profiles from raw payloads and GraphQL counts."""
+    from lingua import LanguageDetectorBuilder
+
     client = github.client()
+
+    detector = (
+        LanguageDetectorBuilder.from_all_languages()
+        .with_preloaded_language_models()
+        .build()
+    )
 
     profiles: list[dict[str, object]] = []
 
@@ -224,6 +232,7 @@ def scope_repository_catalog(
             "archive": raw.get("archived"),
             "status": "absent",
             "excerpts": [],
+            "tongue": [],
         }
 
         owner, name = row["name"].split("/", 1)
@@ -294,6 +303,17 @@ def scope_repository_catalog(
                         "body": body[:500],
                     })
 
+                blob = " ".join(e["body"] for e in excerpts)
+                tongue: list[dict[str, object]] = []
+                if blob:
+                    for c in detector.compute_language_confidence_values(blob):
+                        if c.value <= 0:
+                            continue
+                        tongue.append({
+                            "language": c.language.iso_code_639_1.name.lower(),
+                            "confidence": float(c.value),
+                        })
+
                 profile |= {
                     "changes": result["pullRequests"]["totalCount"],
                     "merges": result["merged"]["totalCount"],
@@ -306,6 +326,7 @@ def scope_repository_catalog(
                         for edge in result["languages"]["edges"]
                     ],
                     "excerpts": excerpts,
+                    "tongue": tongue,
                 }
             except UnknownObjectException:
                 pass
@@ -325,7 +346,7 @@ def scope_repository_catalog(
 
 
 @asset(
-    metadata={"version": "2.0.0"},
+    metadata={"version": "4.0.0"},
     group_name="scope",
     ins={
         "scope_repository_catalog": dg.AssetIn(
@@ -333,37 +354,12 @@ def scope_repository_catalog(
         )
     },
 )
-def scope_repository_pool(
+def scope_repository_cohort(
     context: dg.AssetExecutionContext,
     scope_repository_signal: pa.Table,
     scope_repository_catalog: Dict[str, pa.Table],
 ) -> pa.Table:
-    """Join of signal metrics with catalog metadata. No final filters."""
-    import polars as pl
-
-    catalog = pa.concat_tables(scope_repository_catalog.values())
-    signal = scope_repository_signal
-
-    pool = pl.from_arrow(signal).join(
-        pl.from_arrow(catalog),
-        on="name",
-        how="inner",
-    )
-
-    context.log.info("Pool has %d repositories.", pool.height)
-
-    return pool.to_arrow()
-
-
-@asset(
-    metadata={"version": "3.0.0"},
-    group_name="scope",
-)
-def scope_repository_cohort(
-    context: dg.AssetExecutionContext,
-    scope_repository_pool: pa.Table,
-) -> pa.Table:
-    """Final qualified set: applies signal- and catalog-based filters."""
+    """Final qualified set: joins signal and catalog, applies filters."""
     import polars as pl
 
     targets = {"Python"}
@@ -383,9 +379,11 @@ def scope_repository_cohort(
         "Ruby",
     }
 
-    pool = pl.from_arrow(scope_repository_pool)
+    catalog = pa.concat_tables(scope_repository_catalog.values())
+    signal = pl.from_arrow(scope_repository_signal).drop("language", "license")
+    pool = signal.join(pl.from_arrow(catalog), on="name", how="inner")
 
-    pool = pool.with_columns(
+    cohort = pool.with_columns(
         pl.col("languages")
         .list.eval(
             pl.when(pl.element().struct.field("name").is_in(targets))
@@ -406,19 +404,18 @@ def scope_repository_cohort(
     ).with_columns(
         (pl.col("target_language_size") / pl.col("size").clip(lower_bound=1))
         .alias("target_language_share"),
-    ).with_columns(
-        pl.col("creation")
-        .str.to_datetime(format="%Y-%m-%dT%H:%M:%SZ", time_zone="UTC")
-        .alias("creation_dt")
-    ).with_columns(
+
         (
-            (pl.lit(datetime.now()).dt.replace_time_zone("UTC") - pl.col("creation_dt"))
+            (
+                pl.lit(datetime.now()).dt.replace_time_zone("UTC")
+                - pl.col("creation").str.to_datetime(
+                    format="%Y-%m-%dT%H:%M:%SZ", time_zone="UTC"
+                )
+            )
             .dt.total_days()
             / 365
-        ).alias("age_years")
-    )
-
-    filtered = pool.filter(
+        ).alias("age_years"),
+    ).filter(
         (pl.col("review_score") >= 0.75)
         & (pl.col("age_years") >= 3)
         & (pl.col("size") >= 300_000)
@@ -427,16 +424,21 @@ def scope_repository_cohort(
         & (pl.col("excluded_language_size") == 0)
         & (pl.col("language").is_in(targets))
         & (pl.col("archive") == False)
-    )
-
-    context.log.info("Filtered cohort has %d repositories.", filtered.height)
-
-    cohort = (
-        filtered.select(["name", "creation", "merges", "trunk"])
-        .filter(pl.col("name") == "aws/aws-advanced-nodejs-wrapper")
-        .unique()
-        .sort("name")
-    )
+        & (
+            pl.col("tongue").list.eval(
+                pl.when(pl.element().struct.field("language") == "en")
+                .then(pl.element().struct.field("confidence"))
+                .otherwise(0)
+            ).list.sum() >= 0.95
+        )
+        & (
+            pl.col("tongue").list.eval(
+                pl.when(pl.element().struct.field("language") != "en")
+                .then(pl.element().struct.field("confidence"))
+                .otherwise(0)
+            ).list.sum() < 0.05
+        )
+    ).select(catalog.column_names).unique(subset=["name"]).sort("name")
 
     context.log.info("Repository set contains %d repositories.", cohort.height)
 
