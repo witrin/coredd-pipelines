@@ -1,7 +1,7 @@
 import json
 from typing import Dict
 from pathlib import Path
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pyarrow as pa
 import dagster as dg
@@ -346,7 +346,7 @@ def scope_repository_catalog(
 
 
 @asset(
-    metadata={"version": "4.0.0"},
+    metadata={"version": "4.0.1"},
     group_name="scope",
     ins={
         "scope_repository_catalog": dg.AssetIn(
@@ -450,21 +450,19 @@ def scope_repository_cohort(
         .alias("target_language_share"),
 
         (
-            (
-                pl.lit(datetime.now()).dt.replace_time_zone("UTC")
-                - pl.col("creation").str.to_datetime(
-                    format="%Y-%m-%dT%H:%M:%SZ", time_zone="UTC"
-                )
+            pl.lit(datetime(2025, 9, 1, tzinfo=timezone.utc))
+            - pl.col("creation").str.to_datetime(
+                format="%Y-%m-%dT%H:%M:%SZ", time_zone="UTC"
             )
-            .dt.total_days()
-            / 365
-        ).alias("age_years"),
+        )
+        .dt.total_days()
+        .alias("age"),
 
         (pl.col("excluded_language_size") / pl.col("size").clip(lower_bound=1))
         .alias("excluded_language_share"),
     ).filter(
         (pl.col("review_score") >= 0.75)
-        & (pl.col("age_years") >= 3)
+        & (pl.col("age") >= 365)
         & (pl.col("size") >= 300_000)
         & (pl.col("merges") >= 100)
         & (pl.col("target_language_share") >= 0.90)
