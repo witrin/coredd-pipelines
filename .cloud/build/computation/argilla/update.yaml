@@ -84,8 +84,9 @@ osPolicies:
                 IMAGE_TAG=${IMAGE}
                 EOF
 
-                chmod 600 /etc/argilla/*.env /etc/argilla/oauth.yml /etc/argilla/release.env
-                chmod 644 /etc/argilla/elasticsearch.env
+                chmod 600 /etc/argilla/*.env /etc/argilla/release.env
+                chmod 644 /etc/argilla/elasticsearch.env /etc/argilla/oauth.yml
+                chmod 755 /etc/argilla
                 systemctl daemon-reload
                 systemctl enable --now argilla-release.path || true
                 systemctl restart argilla-release.service || true
