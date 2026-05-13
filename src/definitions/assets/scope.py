@@ -24,20 +24,21 @@ class BigQueryQueryConfig(dg.Config):
 
 
 @asset(
-    metadata={"version": "2.0.1"},
+    metadata={"version": "3.0.0"},
     group_name="scope",
     kinds={"bigquery"},
 )
-def scope_repository_candidate(
+def scope_repository_event(
     context: dg.AssetExecutionContext, config: BigQueryQueryConfig
 ) -> pa.Table:
     """
-    GitHub repositories whose primary language is Python, and that show 
-    maintenance activity within the specified time window. Maintenance 
-    is defined as at least one pull request opened against the default 
-    branch with reviews from at least two distinct reviewers, at least 
-    one issue opened, and at least one issue closed during the same period. 
-    Only activity performed by human users is considered.
+    Repository-level aggregates derived from GH Archive platform events.
+    Includes GitHub repositories whose primary language is Python, and
+    that show maintenance activity within the specified time window.
+    Maintenance is defined as at least one pull request opened against
+    the default branch with reviews from at least two distinct reviewers,
+    at least one issue opened, and at least one issue closed during the
+    same period. Only activity performed by human users is considered.
     """
 
     with open(
@@ -80,12 +81,12 @@ def scope_repository_candidate(
 
 
 @asset(
-    metadata={"version": "1.1.0"},
+    metadata={"version": "1.2.0"},
     group_name="scope",
 )
 def scope_repository_signal(
     context: dg.AssetExecutionContext,
-    scope_repository_candidate: pa.Table,
+    scope_repository_event: pa.Table,
 ) -> pa.Table:
     """
     Enriches the input dataset with aggregated indicators that capture
@@ -95,7 +96,7 @@ def scope_repository_signal(
     import polars as pl
     from statsmodels.stats.proportion import proportion_confint
 
-    df = pl.from_arrow(scope_repository_candidate)
+    df = pl.from_arrow(scope_repository_event)
 
     df = df.with_columns(
         (pl.col("review_merges") / pl.col("total_merges").clip(lower_bound=1))
@@ -135,18 +136,18 @@ def scope_repository_signal(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "2.0.0"},
     partitions_def=partitions.scope_repository_batch_partition,
     group_name="scope",
     kinds={"github"},
     pool="github",
 )
-def scope_repository_raw(
+def scope_repository_snapshot(
     context: dg.AssetExecutionContext,
     scope_repository_signal: pa.Table,
     github: GithubResource,
 ) -> pa.Table:
-    """Ingest raw repository payloads for a single batch partition."""
+    """Ingest repository REST snapshots."""
     client = github.client()
 
     partition = context.partition_key
@@ -181,18 +182,18 @@ def scope_repository_raw(
 
 
 @asset(
-    metadata={"version": "1.7.0"},
+    metadata={"version": "2.0.0"},
     partitions_def=partitions.scope_repository_batch_partition,
     group_name="scope",
     kinds={"github"},
     pool="github",
 )
-def scope_repository_catalog(
+def scope_repository_profile(
     context: dg.AssetExecutionContext,
-    scope_repository_raw: pa.Table,
+    scope_repository_snapshot: pa.Table,
     github: GithubResource,
 ) -> pa.Table:
-    """Repository profiles from raw payloads and GraphQL counts."""
+    """Repository profiles built from REST snapshot and GraphQL counts."""
     from lingua import LanguageDetectorBuilder
 
     client = github.client()
@@ -205,10 +206,10 @@ def scope_repository_catalog(
 
     profiles: list[dict[str, object]] = []
 
-    for i in range(scope_repository_raw.num_rows):
+    for i in range(scope_repository_snapshot.num_rows):
         row = {
-            name: scope_repository_raw[name][i].as_py()
-            for name in scope_repository_raw.schema.names
+            name: scope_repository_snapshot[name][i].as_py()
+            for name in scope_repository_snapshot.schema.names
         }
         raw = json.loads(row["payload"]) if row["payload"] is not None else {}
 
@@ -346,20 +347,20 @@ def scope_repository_catalog(
 
 
 @asset(
-    metadata={"version": "4.0.1"},
+    metadata={"version": "5.0.0"},
     group_name="scope",
     ins={
-        "scope_repository_catalog": dg.AssetIn(
+        "scope_repository_profile": dg.AssetIn(
             partition_mapping=dg.AllPartitionMapping()
         )
     },
 )
-def scope_repository_cohort(
+def scope_repository_pool(
     context: dg.AssetExecutionContext,
     scope_repository_signal: pa.Table,
-    scope_repository_catalog: Dict[str, pa.Table],
+    scope_repository_profile: Dict[str, pa.Table],
 ) -> pa.Table:
-    """Final qualified set: joins signal and catalog, applies filters."""
+    """Pool of repositories that pass the profile filters (Wilson score, metadata, language)."""
     import polars as pl
 
     targets = {"Python"}
@@ -423,11 +424,11 @@ def scope_repository_cohort(
         "Solidity",
     }
 
-    catalog = pa.concat_tables(scope_repository_catalog.values())
+    catalog = pa.concat_tables(scope_repository_profile.values())
     signal = pl.from_arrow(scope_repository_signal).drop("language", "license")
-    pool = signal.join(pl.from_arrow(catalog), on="name", how="inner")
+    profiles = signal.join(pl.from_arrow(catalog), on="name", how="inner")
 
-    cohort = pool.with_columns(
+    pool = profiles.with_columns(
         pl.col("languages")
         .list.eval(
             pl.when(pl.element().struct.field("name").is_in(targets))
@@ -485,28 +486,28 @@ def scope_repository_cohort(
         )
     ).select(catalog.column_names).unique(subset=["name"]).sort("name")
 
-    context.log.info("Repository set contains %d repositories.", cohort.height)
+    context.log.info("Repository pool contains %d repositories.", pool.height)
 
-    return cohort.to_arrow()
+    return pool.to_arrow()
 
 
 @asset(
-    metadata={"version": "2.1.0"},
-    partitions_def=partitions.scope_repository_cohort_partition,
+    metadata={"version": "3.0.0"},
+    partitions_def=partitions.scope_repository_pool_partition,
     group_name="scope",
     kinds={"github"},
     pool="github",
 )
 def scope_issue_catalog(
     context: dg.AssetExecutionContext,
-    scope_repository_cohort: pa.Table,
+    scope_repository_pool: pa.Table,
     github: GithubResource,
 ) -> pa.Table:
-    """Ingest repository cohort metrics."""
+    """Historical change and issue sequence over the full repository lifetime."""
     import polars as pl
 
     partition = context.partition_key
-    df = pl.from_arrow(scope_repository_cohort)
+    df = pl.from_arrow(scope_repository_pool)
 
     shard = partitions.Shard.from_key(partition)
     shards = shard.shards
@@ -516,7 +517,7 @@ def scope_issue_catalog(
 
     matches = df.filter(pl.col("name") == repository)
     if matches.is_empty():
-        raise ValueError(f"Repository '{repository}' not found in cohort")
+        raise ValueError(f"Repository '{repository}' not found in pool")
     row = matches.row(0, named=True)
     creation_str = row["creation"]
     trunk = row["trunk"]
@@ -563,7 +564,34 @@ def scope_issue_catalog(
 
 
 @asset(
-    metadata={"version": "2.2.0"},
+    metadata={"version": "0.0.0"},
+    group_name="scope",
+    ins={
+        "scope_issue_catalog": dg.AssetIn(
+            partition_mapping=dg.AllPartitionMapping()
+        )
+    },
+)
+def scope_repository_cohort(
+    context: dg.AssetExecutionContext,
+    scope_repository_pool: pa.Table,
+    scope_issue_catalog: Dict[str, pa.Table],
+) -> pa.Table:
+    """
+    Final study cohort. Placeholder passthrough of `scope_repository_pool`
+    until trunk reconstruction (Potts) and review discipline profiling
+    (GAM) are implemented on the historical change sequence in
+    `scope_issue_catalog`.
+    """
+    context.log.info(
+        "Cohort placeholder passes through %d repositories from pool.",
+        scope_repository_pool.num_rows,
+    )
+    return scope_repository_pool
+
+
+@asset(
+    metadata={"version": "3.0.0"},
     partitions_def=partitions.ingest_raw_partition,
     group_name="scope",
     kinds={"github"},
@@ -614,7 +642,7 @@ def scope_change_raw(
 
 
 @asset(
-    metadata={"version": "2.1.0"},
+    metadata={"version": "3.0.0"},
     partitions_def=partitions.ingest_raw_partition,
     group_name="scope",
     kinds={"github"},
@@ -665,7 +693,7 @@ def scope_issue_raw(
 
 
 @asset(
-    metadata={"version": "2.1.0"},
+    metadata={"version": "3.0.0"},
     partitions_def=partitions.ingest_source_partition,
     group_name="scope",
     kinds={"github"},

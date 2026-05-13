@@ -94,23 +94,18 @@ Shut the service down with `docker compose stop interface` or remove containers 
 Assets follow a three-part naming scheme:
 
 - **Phase** — methodological step (e.g., `scope`, `extraction`, `backtracing`, `evaluation`)
-- **Entity** — domain object (e.g., `repositories`, `pull_requests`, `reviews`)
-- **Stage** — processing stage (e.g., `raw`, `intermediate`, `final`)
+- **Entity** — domain object in the singular (e.g., `repository`, `change`, `issue`)
+- **Outcome** — what the table contains after the stage, as a noun
 
 Resulting format:
 
 ```
-<phase>_<entity>_<stage>
+<phase>_<entity>_<outcome>
 ```
 
-Logical asset names use snake case with underscores, for example:
+The outcome suffix describes the table content rather than a fixed maturity stage. A phase can have arbitrarily many outcome stages, ordered by data flow. Each outcome is a noun that names what the asset materializes.
 
-```
-scope_repositories_raw
-extraction_pull_requests_raw
-```
-
-Due to a current Dagster limitation, the active branch is prepended as the first path segment of the asset key at registration time (e.g. `main/scope_repositories_raw`). The convention above describes the branchless logical name; the branch prefix is a temporary workaround.
+Due to a current Dagster limitation, the active branch is prepended as the first path segment of the asset key at registration time (e.g. `main/scope_repository_event`). The convention above describes the branchless logical name; the branch prefix is a temporary workaround.
 
 
 ## Asset Storage Projection

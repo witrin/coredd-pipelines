@@ -217,8 +217,8 @@ scope_repository_attainment_partition = dg.DynamicPartitionsDefinition(
     name="scope_repository_attainment",
 )
 
-scope_repository_cohort_partition = dg.DynamicPartitionsDefinition(
-    name="scope_repository_cohort",
+scope_repository_pool_partition = dg.DynamicPartitionsDefinition(
+    name="scope_repository_pool",
 )
 
 ingest_raw_partition = dg.DynamicPartitionsDefinition(name="ingest_raw")

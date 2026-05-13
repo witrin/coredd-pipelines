@@ -108,7 +108,7 @@ def scope_repository_batch_sensor(
 
 
 @asset_sensor(
-    asset_key="scope_repository_cohort",
+    asset_key="scope_repository_pool",
 )
 def scope_issue_catalog_sensor(
     context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
@@ -137,19 +137,19 @@ def scope_issue_catalog_sensor(
         shard = Shard(space=space, shards=n)
         keys.update(shard.keys())
 
-    existing = set(instance.get_dynamic_partitions("scope_repository_cohort"))
+    existing = set(instance.get_dynamic_partitions("scope_repository_pool"))
     to_add = keys - existing
     to_remove = existing - keys
 
     if to_add:
-        instance.add_dynamic_partitions("scope_repository_cohort", list(to_add))
+        instance.add_dynamic_partitions("scope_repository_pool", list(to_add))
 
     if to_remove:
         for key in to_remove:
-            instance.delete_dynamic_partition("scope_repository_cohort", key)
+            instance.delete_dynamic_partition("scope_repository_pool", key)
 
     context.log.info(
-        "Updated cohort partitions with +%d / -%d",
+        "Updated pool partitions with +%d / -%d",
         len(to_add),
         len(to_remove),
     )
