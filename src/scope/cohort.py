@@ -11,6 +11,8 @@ from benchmark.scope.utils import RangeSplitter
 class SearchCursor:
     """Iterator over GitHub search results with cursor pagination."""
 
+    _MIN_PAGE_SIZE = 10
+
     def __init__(
         self,
         client: Any,
@@ -18,12 +20,14 @@ class SearchCursor:
         schema: str,
         kind: str,
         page_size: int = 100,
+        log: Optional[Callable[[str], None]] = None,
     ):
         self.client = client
         self.query = query
         self._schema = schema
         self.kind = kind
         self._page_size = page_size
+        self._log = log or (lambda msg: None)
         self.total_count: int = 0
         self._cursor: Optional[str] = None
         self._buffer: List[Dict[str, Any]] = []
@@ -40,15 +44,28 @@ class SearchCursor:
         return self._buffer.pop(0)
 
     def _fetch_next_page(self) -> None:
-        response = self.client._Github__requester.graphql_query(
-            self._schema,
-            {
-                "q": self.query,
-                "first": self._page_size,
-                "after": self._cursor,
-                "labelLimit": 50,
-            },
-        )
+        try:
+            response = self.client._Github__requester.graphql_query(
+                self._schema,
+                {
+                    "q": self.query,
+                    "first": self._page_size,
+                    "after": self._cursor,
+                    "labelLimit": 50,
+                },
+            )
+        except Exception as e:
+            message = str(e).lower()
+            transient = any(
+                token in message
+                for token in ("502", "bad gateway", "timeout", "complexity")
+            )
+            if transient and self._page_size > self._MIN_PAGE_SIZE:
+                self._page_size = max(self._MIN_PAGE_SIZE, self._page_size // 2)
+                self._log(f"Reduced search page size to {self._page_size}")
+                return
+            raise
+
         search = response[1]["data"]["search"]
         if not self._started:
             self.total_count = int(search["issueCount"])
@@ -472,7 +489,9 @@ class IssueCollector:
 
         for start, end in ranges:
             query = f"repo:{self.repository} is:issue is:closed closed:{start}..{end}"
-            cursor = SearchCursor(self.client, query, schema, "Issue")
+            cursor = SearchCursor(
+                self.client, query, schema, "Issue", log=self._log
+            )
             issues.extend(cursor)
             total += cursor.total_count
 
