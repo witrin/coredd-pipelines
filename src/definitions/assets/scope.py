@@ -13,7 +13,9 @@ from components.infrastructure import GithubResource
 from components.io import BlobStream
 from benchmark.definitions import partitions
 from benchmark.scope.cohort import ChangeCollector, IssueCollector
+from benchmark.scope.filtering import TrunkBatch
 from benchmark.scope.ingestion import ChangeExtractor, IssueExtractor, SourceExtractor
+from benchmark.scope.profiling import Discipline, ReviewBatch
 
 
 class BigQueryQueryConfig(dg.Config):
@@ -564,7 +566,7 @@ def scope_issue_catalog(
 
 
 @asset(
-    metadata={"version": "0.0.0"},
+    metadata={"version": "1.0.0"},
     group_name="scope",
     ins={
         "scope_issue_catalog": dg.AssetIn(
@@ -578,16 +580,87 @@ def scope_repository_cohort(
     scope_issue_catalog: Dict[str, pa.Table],
 ) -> pa.Table:
     """
-    Final study cohort. Placeholder passthrough of `scope_repository_pool`
-    until trunk reconstruction (Potts) and review discipline profiling
-    (GAM) are implemented on the historical change sequence in
-    `scope_issue_catalog`.
+    Final study cohort. Reconstructs the integration branch on the change
+    sequence, fits a logistic GAM of review probability per repository,
+    extracts plateau onset and discipline metrics, and retains repositories
+    whose review discipline is established early, high, and stable.
     """
+    import numpy as np
+    import polars as pl
+
+    changes = pl.from_arrow(pa.concat_tables(scope_issue_catalog.values()))
+    context.log.info("Concatenated %d change and issue records.", changes.height)
+
+    trunk = TrunkBatch().transform(changes, threshold=100)
     context.log.info(
-        "Cohort placeholder passes through %d repositories from pool.",
-        scope_repository_pool.num_rows,
+        "Trunk reconstruction kept %d repositories with segments <= 2.",
+        trunk.filter(pl.col("segments") <= 2).select(pl.col("name").n_unique()).item(),
     )
-    return scope_repository_pool
+
+    reviews = ReviewBatch(progress=False).transform(trunk)
+    fitted = reviews.filter(pl.col("profile").is_not_null())
+    unstable = fitted.filter(
+        ~pl.col("diagnostics").struct.field("converged")
+        | ~pl.col("diagnostics").struct.field("finite")
+        | ~pl.col("diagnostics").struct.field("searched")
+    )
+    context.log.info(
+        "Review batch fitted %d profiles, %d converged with full grid search "
+        "and finite estimates.",
+        fitted.height,
+        fitted.height - unstable.height,
+    )
+    if unstable.height:
+        context.log.warning(
+            "Unstable review profiles: %s",
+            ", ".join(unstable["name"].to_list()),
+        )
+
+    delta = 0.30
+
+    metrics = Discipline(delta=delta).transform(
+        *(
+            np.stack(
+                fitted.select(pl.col("profile").list.get(i)).to_series().to_list()
+            )
+            for i in range(4)
+        )
+    )
+    discipline = pl.DataFrame({"name": fitted["name"].to_list(), **metrics})
+
+    invalid = discipline.filter(~pl.col("valid"))
+    context.log.info(
+        "Discipline metrics computed for %d profiles, %d are invalid and "
+        "carry NaN metrics.",
+        discipline.height,
+        invalid.height,
+    )
+    if invalid.height:
+        context.log.warning(
+            "Invalid discipline profiles: %s",
+            ", ".join(invalid["name"].to_list()),
+        )
+
+    onset_max = 0.20
+    level_min = 0.95
+    spread_max = 0.10
+
+    pool = pl.from_arrow(scope_repository_pool)
+    cohort = (
+        pool.join(discipline, on="name", how="inner")
+        .filter(
+            (pl.col("onset") <= onset_max)
+            & (pl.col("level_median") >= level_min)
+            & (pl.col("spread") <= spread_max)
+        )
+        .select(scope_repository_pool.schema.names)
+        .unique(subset=["name"])
+        .sort("name")
+    )
+
+    context.log.info("Cohort contains %d repositories.", cohort.height)
+
+    return cohort.to_arrow()
 
 
 @asset(
