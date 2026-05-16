@@ -602,8 +602,11 @@ class CloudStorageManager(dg.IOManager):
                         missing.append(key)
 
                 if missing:
-                    raise FileNotFoundError(
-                        f"Missing partitions {missing} for {context.asset_key}"
+                    context.log.warning(
+                        "Skipping %d missing partitions for %s: %s",
+                        len(missing),
+                        context.asset_key,
+                        missing,
                     )
 
                 return result
