@@ -15,7 +15,7 @@ from benchmark.definitions import partitions
 from benchmark.scope.cohort import ChangeCollector, IssueCollector
 from benchmark.scope.filtering import TrunkBatch
 from benchmark.scope.ingestion import ChangeExtractor, IssueExtractor, SourceExtractor
-from benchmark.scope.profiling import Discipline, ReviewBatch
+from benchmark.scope.profiling import ReviewBatch, Stationarity
 
 
 class BigQueryQueryConfig(dg.Config):
@@ -566,7 +566,7 @@ def scope_issue_catalog(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "2.0.0"},
     group_name="scope",
     ins={
         "scope_issue_catalog": dg.AssetIn(
@@ -616,43 +616,23 @@ def scope_repository_cohort(
             ", ".join(unstable["name"].to_list()),
         )
 
-    delta = 0.30
-
-    metrics = Discipline(delta=delta).transform(
-        *(
-            np.stack(
-                fitted.select(pl.col("profile").list.get(i)).to_series().to_list()
-            )
-            for i in range(4)
-        )
+    probability = np.stack(
+        [np.asarray(p[1], float) for p in fitted["profile"].to_list()]
     )
+    metrics = Stationarity(epsilon=0.01, omega=0.10).transform(probability)
     discipline = pl.DataFrame({"name": fitted["name"].to_list(), **metrics})
 
-    invalid = discipline.filter(~pl.col("valid"))
+    counts = discipline.group_by("kind").len().to_dict(as_series=False)
     context.log.info(
-        "Discipline metrics computed for %d profiles, %d are invalid and "
-        "carry NaN metrics.",
-        discipline.height,
-        invalid.height,
+        "Stationarity classes: %s",
+        dict(zip(counts["kind"], counts["len"])),
     )
-    if invalid.height:
-        context.log.warning(
-            "Invalid discipline profiles: %s",
-            ", ".join(invalid["name"].to_list()),
-        )
 
-    onset_max = 0.20
-    level_min = 0.95
-    spread_max = 0.10
+    retained = discipline.filter(pl.col("kind") != "transient")
 
     pool = pl.from_arrow(scope_repository_pool)
     cohort = (
-        pool.join(discipline, on="name", how="inner")
-        .filter(
-            (pl.col("onset") <= onset_max)
-            & (pl.col("level_median") >= level_min)
-            & (pl.col("spread") <= spread_max)
-        )
+        pool.join(retained, on="name", how="inner")
         .select(scope_repository_pool.schema.names)
         .unique(subset=["name"])
         .sort("name")

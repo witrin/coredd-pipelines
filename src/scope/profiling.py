@@ -9,6 +9,7 @@ import numpy as np
 import polars as pl
 
 from pygam import LogisticGAM, s
+from scipy.stats import norm
 from tqdm.auto import tqdm
 
 
@@ -39,6 +40,8 @@ class Review:
         self.lower = None
         self.upper = None
         self.derivative = None
+        self.derivative_lower = None
+        self.derivative_upper = None
         self.target = None
         self.length = 0
         self.diagnostics = None
@@ -59,8 +62,9 @@ class Review:
             domain, target, grid, n_splines, model.lam
         )
 
-        spacing = grid[1, 0] - grid[0, 0]
-        derivative = np.gradient(probability, spacing)
+        derivative, derivative_lower, derivative_upper = self._derivative_band(
+            model, grid
+        )
 
         self.model = model
         self.domain = grid.ravel()
@@ -68,15 +72,41 @@ class Review:
         self.lower = lower
         self.upper = upper
         self.derivative = derivative
+        self.derivative_lower = derivative_lower
+        self.derivative_upper = derivative_upper
         self.target = target
         self.length = len(target)
         self.diagnostics = self._diagnose(model, raw, bootstrap, searched)
 
         return self
 
+    def _derivative_band(
+        self, model, grid: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        n_grid = grid.shape[0]
+        try:
+            with _silenced():
+                basis = model._modelmat(grid).toarray()
+            spacing = grid[1, 0] - grid[0, 0]
+            derivative_basis = (basis[1:] - basis[:-1]) / spacing
+            derivative_basis = np.concatenate(
+                [derivative_basis, derivative_basis[-1:]], axis=0
+            )
+
+            derivative = derivative_basis @ model.coef_
+            cov = np.asarray(model.statistics_["cov"], dtype=float)
+            var = np.einsum(
+                "ij,jk,ik->i", derivative_basis, cov, derivative_basis
+            )
+            se = np.sqrt(np.maximum(var, 0.0))
+
+            z = float(norm.ppf((1 + self.width) / 2))
+            return derivative, derivative - z * se, derivative + z * se
+        except Exception:
+            nan = np.full(n_grid, np.nan)
+            return nan, nan.copy(), nan.copy()
+
     def _fit_model(self, domain, target, n_splines):
-        """Fit via grid search, falling back to a single regularized fit when the
-        whole grid diverges and pygam leaves no best model behind."""
         try:
             model = LogisticGAM(s(0, n_splines=n_splines))
             with _silenced():
@@ -164,6 +194,8 @@ class Review:
             "lower": self.lower,
             "upper": self.upper,
             "derivative": self.derivative,
+            "derivative_lower": self.derivative_lower,
+            "derivative_upper": self.derivative_upper,
             "target": self.target,
             "length": self.length,
             "diagnostics": self.diagnostics,
@@ -180,13 +212,14 @@ class ReviewBatch:
         width: float = 0.95,
         segments: int = 10,
         progress: bool = True,
+        workers: int | None = None,
     ):
         self.splines = splines
         self.grid = grid
         self.width = width
         self.segments = segments
         self.progress = progress
-        self.workers = max(1, (os.cpu_count() or 1) - 1)
+        self.workers = workers or max(1, (os.cpu_count() or 1) - 1)
 
     @staticmethod
     def _failure() -> dict:
@@ -217,6 +250,9 @@ class ReviewBatch:
                     profile["probability"],
                     profile["lower"],
                     profile["upper"],
+                    profile["derivative"],
+                    profile["derivative_lower"],
+                    profile["derivative_upper"],
                 ],
                 "diagnostics": profile["diagnostics"],
             }
@@ -288,39 +324,52 @@ class ReviewBatch:
         return pl.from_dicts(rows, schema=schema)
 
 
-class Discipline:
-    """Plateau onset detection over GAM profiles, based on the flatness of the
-    point estimate rather than the confidence interval width. The plateau begins
-    where the slope of the estimated probability stays below delta. The interval
-    width is reported only as a separate quality metric, not as the onset
-    criterion."""
+class Slope:
+    """Plateau onset detection over GAM profiles, based on the Wood method. A
+    point is flat when the confidence band of the fitted derivative contains
+    zero, so the slope is not significantly different from zero, or when the
+    slope is practically negligible. The practical criterion is required
+    because the derivative band narrows with sample size: for large profiles
+    the whole curve carries a statistically significant slope even where it is
+    practically a plateau, so the significance test alone would never find an
+    onset. A point counts as flat when its probability slope stays below
+    flat_slope, the change in review probability over the full normalized time
+    span considered negligible. The onset is the earliest point from which
+    every sliding window of length window_frac holds a flat share at or above
+    flat_frac. A windowed share rather than a contiguous run tolerates
+    scattered significant points, and a local window rather than the whole
+    suffix prevents a short steep rise from being diluted by a long flat
+    tail."""
 
     def __init__(
         self,
-        delta: float = 0.5,
-        min_run_frac: float = 0.05,
+        flat_slope: float = 0.05,
+        flat_frac: float = 0.90,
+        window_frac: float = 0.10,
         eps: float = 1e-12,
     ):
-        self.delta = delta
-        self.min_run_frac = min_run_frac
+        self.flat_slope = flat_slope
+        self.flat_frac = flat_frac
+        self.window_frac = window_frac
         self.eps = eps
 
     def transform(
         self,
         domain: np.ndarray,
         probability: np.ndarray,
-        low: np.ndarray,
-        high: np.ndarray,
+        derivative_lower: np.ndarray,
+        derivative_upper: np.ndarray,
     ) -> dict[str, np.ndarray]:
         p = np.asarray(probability, dtype=float)
-        lo = np.asarray(low, dtype=float)
-        hi = np.asarray(high, dtype=float)
+        lo = np.asarray(derivative_lower, dtype=float)
+        hi = np.asarray(derivative_upper, dtype=float)
 
         if p.ndim != 2:
             raise ValueError("probability must be 2D: (N, G).")
         if lo.shape != p.shape or hi.shape != p.shape:
             raise ValueError(
-                "low/high must have the same shape as probability: (N, G)."
+                "derivative_lower/derivative_upper must have the same shape as "
+                "probability: (N, G)."
             )
 
         n, g = p.shape
@@ -341,48 +390,47 @@ class Discipline:
 
         with np.errstate(invalid="ignore", all="ignore"):
             spacing = np.maximum(dom[:, 1:] - dom[:, :-1], self.eps)
-            slope = np.concatenate(
+            prob_slope = np.concatenate(
                 [(p[:, 1:] - p[:, :-1]) / spacing, np.zeros((n, 1))], axis=1
             )
 
-            onset_idx = self._plateau_onset_index(
-                slope, delta=self.delta, min_run=self._min_run(g)
-            )
+            insignificant = (lo <= 0) & (hi >= 0)
+            negligible = np.abs(prob_slope) <= self.flat_slope
+            ok = insignificant | negligible
+
+            onset_idx = self._plateau_onset_index(ok)
             onset = self._gather(dom, onset_idx)
 
             level_mean = self._suffix_stat(p, onset_idx, "mean")
             level_median = self._suffix_stat(p, onset_idx, "median")
             level_max = self._suffix_stat(p, onset_idx, "max")
-            level_slope = self._suffix_stat(slope, onset_idx, "mean")
-            spread = self._suffix_spread(p, onset_idx, q_lo=0.05, q_hi=0.95)
-            ci_width = self._suffix_stat(hi - lo, onset_idx, "mean")
 
         return {
             "onset": np.where(valid, onset, np.nan),
             "level_mean": np.where(valid, level_mean, np.nan),
             "level_median": np.where(valid, level_median, np.nan),
             "level_max": np.where(valid, level_max, np.nan),
-            "level_slope": np.where(valid, level_slope, np.nan),
-            "spread": np.where(valid, spread, np.nan),
-            "ci_width": np.where(valid, ci_width, np.nan),
             "valid": valid,
         }
 
-    def _min_run(self, g: int) -> int:
-        return max(3, int(np.ceil(self.min_run_frac * g)))
-
-    def _plateau_onset_index(
-        self, slope: np.ndarray, delta: float, min_run: int
-    ) -> np.ndarray:
-        n, g = slope.shape
-        ok = np.abs(slope) <= delta
+    def _plateau_onset_index(self, ok: np.ndarray) -> np.ndarray:
+        n, g = ok.shape
         out = np.full(n, g - 1, dtype=int)
 
-        win = np.ones(min_run, dtype=int)
+        window = max(3, int(np.ceil(self.window_frac * g)))
+        prefix = np.concatenate(
+            [np.zeros((n, 1)), np.cumsum(ok.astype(float), axis=1)], axis=1
+        )
+        starts = np.arange(g)
+        ends = np.minimum(starts + window, g)
+        window_count = prefix[:, ends] - prefix[:, starts]
+        window_share = window_count / (ends - starts)
+
+        qualifies = window_share >= self.flat_frac
+        sustained = np.cumprod(qualifies[:, ::-1], axis=1)[:, ::-1].astype(bool)
+
         for i in range(n):
-            hits = np.where(
-                np.convolve(ok[i].astype(int), win, mode="valid") == min_run
-            )[0]
+            hits = np.where(sustained[i])[0]
             if hits.size:
                 out[i] = int(hits[0])
         return out
@@ -408,13 +456,142 @@ class Discipline:
                 raise ValueError(f"Unknown stat: {stat}")
         return out
 
-    def _suffix_spread(
-        self, a: np.ndarray, onset_idx: np.ndarray, q_lo: float, q_hi: float
-    ) -> np.ndarray:
-        n, _ = a.shape
-        out = np.empty(n, dtype=float)
 
-        for i in range(n):
-            seg = a[i, onset_idx[i]:]
-            out[i] = float(np.quantile(seg, q_hi) - np.quantile(seg, q_lo))
-        return out
+class Break:
+    """Structural break detection on the raw binary review sequence based on
+    the backward CUSUM test of Otto and Breitung (Econometric Theory, 2020).
+    The sequence is treated as a Bernoulli process with constant success
+    probability under the null. Residuals are cumulated from the end of the
+    sequence; significant deviation from the null indicates a structural
+    break, and its location estimates the onset of a stable tail. A second
+    backward CUSUM on the post-break segment checks whether the tail is
+    itself stationary; only relevant breaks (sufficient jump in mean and
+    sufficient segment size) count against tail stability."""
+
+    _CRIT_K1 = {1: 1.143, 5: 0.945, 10: 0.847}
+
+    def __init__(
+        self,
+        alpha_pct: int = 5,
+        jump_min: float = 0.10,
+        n_min: int = 20,
+    ):
+        self.alpha_pct = alpha_pct
+        self.jump_min = jump_min
+        self.n_min = n_min
+
+    def analyze(self, y: np.ndarray) -> dict:
+        """Analyse a single binary sequence.
+
+        The returned dict contains:
+        kind in {stationary, stable_tail, no_stable_tail, too_short},
+        tau_hat (break position in [0,1] or 0 if stationary),
+        p_left (mean before the break, NaN if stationary),
+        p_right (mean after the break, or full mean if stationary),
+        mean_total, stat (first break test statistic), n."""
+        y = np.asarray(y, dtype=float)
+        n = len(y)
+        if n < 10:
+            return {"kind": "too_short", "tau_hat": float("nan"),
+                    "p_left": float("nan"), "p_right": float("nan"),
+                    "mean_total": float("nan"), "stat": float("nan"), "n": n}
+
+        r1 = self._bcusum_once(y)
+        if not r1["reject"]:
+            return {"kind": "stationary", "tau_hat": 0.0,
+                    "p_left": float("nan"), "p_right": r1["mean_total"],
+                    "mean_total": r1["mean_total"], "stat": r1["stat"], "n": n}
+
+        tail = y[r1["tau_idx"] - 1:]
+        tail_n = len(tail)
+        r2 = self._bcusum_once(tail) if tail_n >= 10 else None
+
+        if r2 is None or not r2["reject"]:
+            return {"kind": "stable_tail", "tau_hat": r1["tau_idx"] / n,
+                    "p_left": r1["p_left"], "p_right": r1["p_right"],
+                    "mean_total": r1["mean_total"], "stat": r1["stat"], "n": n}
+
+        jump = abs(r2["p_right"] - r2["p_left"]) if not np.isnan(r2["p_left"]) else 0.0
+        seg_after = tail_n - r2["tau_idx"] + 1
+        seg_before = r2["tau_idx"] - 1
+        relevant = (
+            jump >= self.jump_min
+            and seg_after >= self.n_min
+            and seg_before >= self.n_min
+        )
+        if not relevant:
+            return {"kind": "stable_tail", "tau_hat": r1["tau_idx"] / n,
+                    "p_left": r1["p_left"], "p_right": r1["p_right"],
+                    "mean_total": r1["mean_total"], "stat": r1["stat"], "n": n}
+
+        return {"kind": "no_stable_tail", "tau_hat": r1["tau_idx"] / n,
+                "p_left": r1["p_left"], "p_right": r1["p_right"],
+                "mean_total": r1["mean_total"], "stat": r1["stat"], "n": n}
+
+    def transform(self, sequences: dict) -> pl.DataFrame:
+        """Apply analyze to a mapping name -> binary sequence."""
+        rows = [{"name": name, **self.analyze(seq)}
+                for name, seq in sequences.items()]
+        return pl.DataFrame(rows)
+
+    def _bcusum_once(self, y: np.ndarray) -> dict:
+        n = len(y)
+        mean = float(y.mean())
+        sigma = float(y.std(ddof=0))
+        if sigma <= 0:
+            return {"stat": 0.0, "reject": False, "tau_idx": 0,
+                    "p_left": float("nan"), "p_right": mean, "mean_total": mean}
+        w = y - mean
+        rev_cs = np.cumsum(w[::-1])[::-1]
+        bq = rev_cs / (sigma * np.sqrt(n))
+        abs_bq = np.abs(bq)
+        idx = np.arange(n)
+        boundary = 1.0 + 2.0 * ((n - idx) / n)
+        stat = float((abs_bq / boundary).max())
+        nrm = np.sqrt(n - idx).astype(float)
+        nrm[-1] = max(nrm[-1], 1.0)
+        tau_idx = int(np.argmax(abs_bq / nrm)) + 1
+        p_left = float(y[:tau_idx - 1].mean()) if tau_idx > 1 else float("nan")
+        p_right = float(y[tau_idx - 1:].mean())
+        crit = self._CRIT_K1[self.alpha_pct]
+        return {"stat": stat, "reject": stat > crit,
+                "tau_idx": tau_idx, "p_left": p_left, "p_right": p_right,
+                "mean_total": mean}
+
+
+class Stationarity:
+    """Classify GAM probability profiles as stationary, stationary tail or
+    transient. A profile is stationary if its range over [0, 1] does not
+    exceed epsilon. It is stationary tail if its range over [omega, 1] does
+    not exceed epsilon. Otherwise it is transient."""
+
+    def __init__(self, epsilon: float = 0.01, omega: float = 0.10):
+        self.epsilon = epsilon
+        self.omega = omega
+
+    def transform(self, probability: np.ndarray) -> dict[str, np.ndarray]:
+        p = np.asarray(probability, dtype=float)
+        n, _ = p.shape
+
+        onset = np.array(
+            [self._onset(p[i]) for i in range(n)],
+            dtype=float,
+        )
+        is_stationary = onset == 0.0
+        is_stationary_tail = (
+            (~is_stationary) & np.isfinite(onset) & (onset <= self.omega)
+        )
+
+        kind = np.full(n, "transient", dtype=object)
+        kind[is_stationary] = "stationary"
+        kind[is_stationary_tail] = "stationary tail"
+
+        return {"onset": onset, "kind": kind}
+
+    def _onset(self, p: np.ndarray) -> float:
+        suffix_max = np.maximum.accumulate(p[::-1])[::-1]
+        suffix_min = np.minimum.accumulate(p[::-1])[::-1]
+        fits = (suffix_max - suffix_min) <= self.epsilon
+        if not fits.any():
+            return float("nan")
+        return float(np.argmax(fits)) / (len(p) - 1)
