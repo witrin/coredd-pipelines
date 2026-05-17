@@ -160,6 +160,56 @@ def scope_issue_catalog_sensor(
 @asset_sensor(
     asset_key="scope_repository_cohort",
 )
+def scope_change_outline_sensor(
+    context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
+):
+    """Synchronize change-outline partitions with merges-based sharding."""
+    instance = context.instance
+    storage = TableAssetStorage()
+
+    table = storage.load(context, event=asset_event)
+    if table is None or table.num_rows == 0:
+        return None
+
+    import polars as pl
+
+    df = pl.from_arrow(table)
+
+    names = sorted(df["name"].to_list())
+
+    keys = set()
+    for row in df.iter_rows(named=True):
+        repo = row["name"]
+        merges = row["merges"] or 0
+
+        n = max(1, min(16, math.ceil(merges / 1000)))
+        space = Shard.to_space(names, repo)
+        shard = Shard(space=space, shards=n)
+        keys.update(shard.keys())
+
+    existing = set(instance.get_dynamic_partitions("scope_change_outline"))
+    to_add = keys - existing
+    to_remove = existing - keys
+
+    if to_add:
+        instance.add_dynamic_partitions("scope_change_outline", list(to_add))
+
+    if to_remove:
+        for key in to_remove:
+            instance.delete_dynamic_partition("scope_change_outline", key)
+
+    context.log.info(
+        "Updated outline partitions with +%d / -%d",
+        len(to_add),
+        len(to_remove),
+    )
+
+    return None
+
+
+@asset_sensor(
+    asset_key="scope_repository_cohort",
+)
 def scope_repository_cohort_sensor(
     context: dg.SensorEvaluationContext,
     asset_event: dg.EventLogEntry,

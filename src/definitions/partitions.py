@@ -221,6 +221,10 @@ scope_repository_pool_partition = dg.DynamicPartitionsDefinition(
     name="scope_repository_pool",
 )
 
+scope_change_outline_partition = dg.DynamicPartitionsDefinition(
+    name="scope_change_outline",
+)
+
 ingest_raw_partition = dg.DynamicPartitionsDefinition(name="ingest_raw")
 
 ingest_source_partition = dg.DynamicPartitionsDefinition(name="ingest_source")

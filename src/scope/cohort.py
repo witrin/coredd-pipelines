@@ -254,7 +254,7 @@ class ReviewCursor:
             )
 
 
-class ChangeCollector:
+class ChangeReviewCollector:
     """Collects merged pull requests with their reviews."""
 
     def __init__(
@@ -432,6 +432,178 @@ class ChangeCollector:
                 ]
             ),
         )
+
+
+class ChangeOutlineCollector:
+    """Collects merged pull request text and changed file metadata."""
+
+    def __init__(
+        self,
+        client: Any,
+        repository: str,
+        log: Optional[Callable[[str], None]] = None,
+    ):
+        self.client = client
+        self.repository = repository
+        self.owner, self.name = repository.split("/", 1)
+        self._log = log or (lambda msg: None)
+
+    def _is_bot_author(self, node: Dict[str, Any]) -> bool:
+        return (node.get("author") or {}).get("__typename") == "Bot"
+
+    def _get_count(self, start: date, end: date) -> int:
+        schema = """
+            query CountSearch($q: String!) {
+                search(type: ISSUE, query: $q, first: 0) { issueCount }
+            }
+        """
+        query = f"repo:{self.repository} is:pr is:merged merged:{start}..{end}"
+        response = self.client._Github__requester.graphql_query(schema, {"q": query})
+        return int(response[1]["data"]["search"]["issueCount"])
+
+    def collect(self, since: date, until: date) -> pa.Table:
+        schema = """
+          query SearchPage($q: String!, $first: Int!, $after: String) {
+            search(type: ISSUE, query: $q, first: $first, after: $after) {
+              issueCount
+              pageInfo { hasNextPage endCursor }
+              nodes {
+                __typename
+                ... on PullRequest {
+                  number
+                  title
+                  bodyText
+                  changedFiles
+                  files(first: 100) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes { path additions deletions changeType }
+                  }
+                }
+              }
+            }
+          }
+        """
+
+        splitter = RangeSplitter(count=self._get_count, log=self._log)
+        ranges = splitter.split(since, until)
+
+        changes: List[Dict[str, Any]] = []
+        for start, end in ranges:
+            query = f"repo:{self.repository} is:pr is:merged merged:{start}..{end}"
+            cursor = SearchCursor(self.client, query, schema, "PullRequest", log=self._log)
+            for change in cursor:
+                if self._is_bot_author(change):
+                    continue
+                changes.append(change)
+
+        numbers = [int(x["number"]) for x in changes]
+        if len(numbers) != len(set(numbers)):
+            duplicates = [n for n in numbers if numbers.count(n) > 1]
+            raise ValueError(f"Duplicate changes {set(duplicates)} found")
+
+        result = []
+        for change in changes:
+            number = int(change["number"])
+            files_response = change.get("files") or {}
+            file_nodes = list(files_response.get("nodes") or [])
+            page_info = files_response.get("pageInfo") or {}
+
+            self._paginate_files(number, file_nodes, page_info)
+
+            result.append(
+                {
+                    "name": self.repository,
+                    "number": number,
+                    "title": change.get("title") or "",
+                    "body": change.get("bodyText") or "",
+                    "files": [
+                        {
+                            "path": node.get("path"),
+                            "additions": int(node.get("additions") or 0),
+                            "deletions": int(node.get("deletions") or 0),
+                            "change": node.get("changeType"),
+                        }
+                        for node in file_nodes
+                    ],
+                }
+            )
+
+        return pa.Table.from_pylist(
+            result,
+            schema=pa.schema(
+                [
+                    ("name", pa.string()),
+                    ("number", pa.int64()),
+                    ("title", pa.string()),
+                    ("body", pa.string()),
+                    (
+                        "files",
+                        pa.list_(
+                            pa.struct(
+                                [
+                                    ("path", pa.string()),
+                                    ("additions", pa.int64()),
+                                    ("deletions", pa.int64()),
+                                    ("change", pa.string()),
+                                ]
+                            )
+                        ),
+                    ),
+                ]
+            ),
+        )
+
+    def _paginate_files(
+        self,
+        number: int,
+        nodes: List[Dict[str, Any]],
+        page_info: Dict[str, Any],
+    ) -> None:
+        pages = 1
+        cursor = page_info.get("endCursor")
+
+        schema = """
+            query FilesPage($owner: String!, $name: String!, $num: Int!, $n: Int!, $cursor: String!) {
+                repository(owner: $owner, name: $name) {
+                    pullRequest(number: $num) {
+                        files(first: $n, after: $cursor) {
+                            pageInfo { hasNextPage endCursor }
+                            nodes { path additions deletions changeType }
+                        }
+                    }
+                }
+            }
+        """
+
+        while page_info.get("hasNextPage") and pages < 20:
+            if not cursor:
+                self._log(f"Missing files cursor for change {number}")
+                break
+
+            response = self.client._Github__requester.graphql_query(
+                schema,
+                {
+                    "owner": self.owner,
+                    "name": self.name,
+                    "num": number,
+                    "n": 100,
+                    "cursor": cursor,
+                },
+            )
+            files_response = (
+                response[1]["data"]["repository"]["pullRequest"].get("files") or {}
+            )
+            next_nodes = files_response.get("nodes") or []
+            nodes.extend(next_nodes)
+
+            page_info = files_response.get("pageInfo") or {}
+            cursor = page_info.get("endCursor")
+            pages += 1
+
+        if page_info.get("hasNextPage"):
+            self._log(
+                f"File pagination limit reached for change {number} with {pages} pages"
+            )
 
 
 class IssueCollector:

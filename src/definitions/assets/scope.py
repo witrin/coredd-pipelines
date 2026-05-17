@@ -12,7 +12,7 @@ from components.decorator import asset
 from components.infrastructure import GithubResource
 from components.io import BlobStream
 from benchmark.definitions import partitions
-from benchmark.scope.cohort import ChangeCollector, IssueCollector
+from benchmark.scope.cohort import ChangeOutlineCollector, ChangeReviewCollector, IssueCollector
 from benchmark.scope.filtering import TrunkBatch
 from benchmark.scope.ingestion import ChangeExtractor, IssueExtractor, SourceExtractor
 from benchmark.scope.profiling import ReviewBatch, Stationarity
@@ -546,7 +546,7 @@ def scope_issue_catalog(
     )
 
     client = github.client()
-    changes = ChangeCollector(client, repository, trunk, log=context.log.info).collect(
+    changes = ChangeReviewCollector(client, repository, trunk, log=context.log.info).collect(
         start, end
     )
     issues = IssueCollector(client, repository, log=context.log.info).collect(
@@ -566,30 +566,19 @@ def scope_issue_catalog(
 
 
 @asset(
-    metadata={"version": "2.0.0"},
+    metadata={"version": "1.0.0"},
+    partitions_def=partitions.scope_repository_pool_partition,
     group_name="scope",
-    ins={
-        "scope_issue_catalog": dg.AssetIn(
-            partition_mapping=dg.AllPartitionMapping()
-        )
-    },
 )
-def scope_repository_cohort(
+def scope_repository_trunk(
     context: dg.AssetExecutionContext,
-    scope_repository_pool: pa.Table,
-    scope_issue_catalog: Dict[str, pa.Table],
+    scope_issue_catalog: pa.Table,
 ) -> pa.Table:
-    """
-    Final study cohort. Reconstructs the integration branch on the change
-    sequence, fits a logistic GAM of review probability per repository,
-    extracts plateau onset and discipline metrics, and retains repositories
-    whose review discipline is established early, high, and stable.
-    """
-    import numpy as np
+    """Reconstruct the integration branch for a single repository shard."""
     import polars as pl
 
-    changes = pl.from_arrow(pa.concat_tables(scope_issue_catalog.values()))
-    context.log.info("Concatenated %d change and issue records.", changes.height)
+    changes = pl.from_arrow(scope_issue_catalog)
+    context.log.info("Loaded %d change and issue records.", changes.height)
 
     trunk = TrunkBatch().transform(changes, threshold=100)
     context.log.info(
@@ -597,6 +586,22 @@ def scope_repository_cohort(
         trunk.filter(pl.col("segments") <= 2).select(pl.col("name").n_unique()).item(),
     )
 
+    return trunk.to_arrow()
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    partitions_def=partitions.scope_repository_pool_partition,
+    group_name="scope",
+)
+def scope_repository_review(
+    context: dg.AssetExecutionContext,
+    scope_repository_trunk: pa.Table,
+) -> pa.Table:
+    """Fit a logistic GAM of review probability for a single repository shard."""
+    import polars as pl
+
+    trunk = pl.from_arrow(scope_repository_trunk)
     reviews = ReviewBatch(progress=False).transform(trunk)
     fitted = reviews.filter(pl.col("profile").is_not_null())
     unstable = fitted.filter(
@@ -615,6 +620,36 @@ def scope_repository_cohort(
             "Unstable review profiles: %s",
             ", ".join(unstable["name"].to_list()),
         )
+
+    return reviews.to_arrow()
+
+
+@asset(
+    metadata={"version": "3.0.0"},
+    group_name="scope",
+    ins={
+        "scope_repository_review": dg.AssetIn(
+            partition_mapping=dg.AllPartitionMapping()
+        )
+    },
+)
+def scope_repository_cohort(
+    context: dg.AssetExecutionContext,
+    scope_repository_pool: pa.Table,
+    scope_repository_review: Dict[str, pa.Table],
+) -> pa.Table:
+    """Final study cohort. Classifies stationarity over per-repository review
+    profiles and retains repositories whose review discipline is stable."""
+    import numpy as np
+    import polars as pl
+
+    reviews = pl.from_arrow(pa.concat_tables(scope_repository_review.values()))
+    fitted = reviews.filter(pl.col("profile").is_not_null())
+    context.log.info(
+        "Aggregated %d fitted profiles across %d review partitions.",
+        fitted.height,
+        len(scope_repository_review),
+    )
 
     probability = np.stack(
         [np.asarray(p[1], float) for p in fitted["profile"].to_list()]
@@ -641,6 +676,70 @@ def scope_repository_cohort(
     context.log.info("Cohort contains %d repositories.", cohort.height)
 
     return cohort.to_arrow()
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    partitions_def=partitions.scope_change_outline_partition,
+    group_name="scope",
+    kinds={"github"},
+    pool="github",
+)
+def scope_change_outline(
+    context: dg.AssetExecutionContext,
+    scope_repository_cohort: pa.Table,
+    github: GithubResource,
+) -> pa.Table:
+    """PR title, body text, and changed files per cohort repository shard."""
+    import polars as pl
+
+    partition = context.partition_key
+    df = pl.from_arrow(scope_repository_cohort)
+    names = sorted(df["name"].to_list())
+
+    shard = partitions.Shard.from_key(partition)
+    repository = partitions.Shard.from_space(shard.space, names)
+
+    matches = df.filter(pl.col("name") == repository)
+    if matches.is_empty():
+        raise ValueError(f"Repository '{repository}' not found in cohort")
+    row = matches.row(0, named=True)
+    creation_str = row["creation"]
+
+    index = shard.keys().index(partition)
+    creation = datetime.fromisoformat(str(creation_str).replace("Z", "+00:00")).date()
+    today = date.today()
+    days = (today - creation).days + 1
+    step = days // shard.shards
+
+    start = creation + timedelta(days=index * step)
+    end = (
+        today
+        if index == shard.shards - 1
+        else creation + timedelta(days=(index + 1) * step - 1)
+    )
+
+    context.log.info(
+        "Collect outline of %s from %s to %s",
+        repository,
+        start,
+        end,
+    )
+
+    client = github.client()
+    table = ChangeOutlineCollector(client, repository, log=context.log.info).collect(
+        start, end
+    )
+
+    context.log.info(
+        "Collected outline of %s from %s to %s with %d changes",
+        repository,
+        start,
+        end,
+        table.num_rows,
+    )
+
+    return table
 
 
 @asset(
