@@ -1,6 +1,6 @@
 -- DECLARE since TIMESTAMP DEFAULT '2025-07-01 00:00:00 UTC';
 -- DECLARE until TIMESTAMP DEFAULT '2025-07-02 00:00:00 UTC';
--- DECLARE languages ARRAY<STRING> DEFAULT ['TypeScript', 'Python', 'JavaScript'];
+-- DECLARE languages ARRAY<STRING> DEFAULT ['Python'];
 
 WITH
   time_window AS (
@@ -301,5 +301,4 @@ LEFT JOIN per_repository_merges m USING (repository)
 LEFT JOIN per_merge_review ms USING (repository)
 LEFT JOIN meta l USING (repository)
 LEFT JOIN contributors c USING (repository)
-LEFT JOIN default_target d USING (repository)
-WHERE i.total_issues >= 1 AND r.total_resolutions >= 1;
+LEFT JOIN default_target d USING (repository);

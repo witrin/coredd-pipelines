@@ -26,7 +26,7 @@ class BigQueryQueryConfig(dg.Config):
 
 
 @asset(
-    metadata={"version": "3.0.0"},
+    metadata={"version": "4.0.0"},
     group_name="scope",
     kinds={"bigquery"},
 )
@@ -83,7 +83,7 @@ def scope_repository_event(
 
 
 @asset(
-    metadata={"version": "1.2.0"},
+    metadata={"version": "2.0.0"},
     group_name="scope",
 )
 def scope_repository_signal(
@@ -138,7 +138,7 @@ def scope_repository_signal(
 
 
 @asset(
-    metadata={"version": "2.0.0"},
+    metadata={"version": "3.0.0"},
     partitions_def=partitions.scope_repository_batch_partition,
     group_name="scope",
     kinds={"github"},
@@ -184,7 +184,7 @@ def scope_repository_snapshot(
 
 
 @asset(
-    metadata={"version": "2.0.0"},
+    metadata={"version": "3.0.0"},
     partitions_def=partitions.scope_repository_batch_partition,
     group_name="scope",
     kinds={"github"},
@@ -349,7 +349,7 @@ def scope_repository_profile(
 
 
 @asset(
-    metadata={"version": "5.0.0"},
+    metadata={"version": "6.0.0"},
     group_name="scope",
     ins={
         "scope_repository_profile": dg.AssetIn(
@@ -494,7 +494,7 @@ def scope_repository_pool(
 
 
 @asset(
-    metadata={"version": "3.0.0"},
+    metadata={"version": "4.0.0"},
     partitions_def=partitions.scope_repository_pool_partition,
     group_name="scope",
     kinds={"github"},
@@ -566,7 +566,7 @@ def scope_issue_catalog(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "2.0.0"},
     partitions_def=partitions.scope_repository_pool_batch_partition,
     group_name="scope",
     ins={
@@ -613,7 +613,7 @@ def scope_repository_trunk(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "2.0.0"},
     partitions_def=partitions.scope_repository_pool_batch_partition,
     group_name="scope",
 )
@@ -648,7 +648,7 @@ def scope_repository_review(
 
 
 @asset(
-    metadata={"version": "3.0.0"},
+    metadata={"version": "4.0.0"},
     group_name="scope",
     ins={
         "scope_repository_review": dg.AssetIn(
@@ -702,7 +702,7 @@ def scope_repository_cohort(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "2.0.0"},
     partitions_def=partitions.scope_change_outline_partition,
     group_name="scope",
     kinds={"github"},
@@ -766,7 +766,7 @@ def scope_change_outline(
 
 
 @asset(
-    metadata={"version": "3.0.0"},
+    metadata={"version": "4.0.0"},
     partitions_def=partitions.ingest_raw_partition,
     group_name="scope",
     kinds={"github"},
@@ -817,7 +817,7 @@ def scope_change_raw(
 
 
 @asset(
-    metadata={"version": "3.0.0"},
+    metadata={"version": "4.0.0"},
     partitions_def=partitions.ingest_raw_partition,
     group_name="scope",
     kinds={"github"},
@@ -868,7 +868,7 @@ def scope_issue_raw(
 
 
 @asset(
-    metadata={"version": "3.0.0"},
+    metadata={"version": "4.0.0"},
     partitions_def=partitions.ingest_source_partition,
     group_name="scope",
     kinds={"github"},
