@@ -567,18 +567,41 @@ def scope_issue_catalog(
 
 @asset(
     metadata={"version": "1.0.0"},
-    partitions_def=partitions.scope_repository_pool_partition,
+    partitions_def=partitions.scope_repository_pool_batch_partition,
     group_name="scope",
+    ins={
+        "scope_issue_catalog": dg.AssetIn(
+            partition_mapping=dg.AllPartitionMapping()
+        )
+    },
 )
 def scope_repository_trunk(
     context: dg.AssetExecutionContext,
-    scope_issue_catalog: pa.Table,
+    scope_repository_pool: pa.Table,
+    scope_issue_catalog: Dict[str, pa.Table],
 ) -> pa.Table:
-    """Reconstruct the integration branch for a single repository shard."""
+    """Reconstruct integration branches for one batch of repositories."""
     import polars as pl
 
-    changes = pl.from_arrow(scope_issue_catalog)
-    context.log.info("Loaded %d change and issue records.", changes.height)
+    pool = pl.from_arrow(scope_repository_pool)
+    names = sorted(pool["name"].to_list())
+    shard = partitions.Shard.fixed_size(
+        space=partitions.Shard.to_space(names),
+        population=len(names),
+        size=50,
+    )
+    batch_repos = {
+        name for name in names if shard.key(name) == context.partition_key
+    }
+
+    changes = pl.from_arrow(pa.concat_tables(scope_issue_catalog.values()))
+    changes = changes.filter(pl.col("name").is_in(batch_repos))
+    context.log.info(
+        "Batch %s: %d repos, %d change/issue records.",
+        context.partition_key,
+        len(batch_repos),
+        changes.height,
+    )
 
     trunk = TrunkBatch().transform(changes, threshold=100)
     context.log.info(
@@ -591,14 +614,14 @@ def scope_repository_trunk(
 
 @asset(
     metadata={"version": "1.0.0"},
-    partitions_def=partitions.scope_repository_pool_partition,
+    partitions_def=partitions.scope_repository_pool_batch_partition,
     group_name="scope",
 )
 def scope_repository_review(
     context: dg.AssetExecutionContext,
     scope_repository_trunk: pa.Table,
 ) -> pa.Table:
-    """Fit a logistic GAM of review probability for a single repository shard."""
+    """Fit logistic GAMs of review probability for one batch of repositories."""
     import polars as pl
 
     trunk = pl.from_arrow(scope_repository_trunk)

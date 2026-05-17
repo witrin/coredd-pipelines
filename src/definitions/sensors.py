@@ -110,6 +110,48 @@ def scope_repository_batch_sensor(
 @asset_sensor(
     asset_key="scope_repository_pool",
 )
+def scope_repository_pool_batch_sensor(
+    context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
+):
+    """Synchronize pool batch partitions (~50 repos per batch)."""
+    instance = context.instance
+    storage = TableAssetStorage()
+
+    table = storage.load(context, event=asset_event)
+    if table is None or table.num_rows == 0:
+        return None
+
+    names = sorted(table["name"].to_pylist())
+    batches = set(
+        Shard.fixed_size(
+            size=50,
+            population=len(names),
+            space=Shard.to_space(names),
+        ).keys()
+    )
+
+    existing = set(instance.get_dynamic_partitions("scope_repository_pool_batch"))
+    to_add = batches - existing
+    to_remove = existing - batches
+
+    if to_add:
+        instance.add_dynamic_partitions("scope_repository_pool_batch", list(to_add))
+    if to_remove:
+        for key in to_remove:
+            instance.delete_dynamic_partition("scope_repository_pool_batch", key)
+
+    context.log.info(
+        "Updated pool batch partitions with +%d / -%d",
+        len(to_add),
+        len(to_remove),
+    )
+
+    return None
+
+
+@asset_sensor(
+    asset_key="scope_repository_pool",
+)
 def scope_issue_catalog_sensor(
     context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
 ):
