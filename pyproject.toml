@@ -39,11 +39,14 @@ development = [
 notebooks = [
     "ruff==0.6.4",
     "ipykernel==6.29.5",
-    "marimo>=0.20",
     "plotly==6.5.2",
     "umap-learn==0.5.11",
-    "tqdm==4.67",
-    "ipywidgets==8.1"
+    "tqdm==4.67.1",
+    "ipywidgets==8.1.7",
+    "nbformat==5.10.4",
+    "widgetsnbextension==4.0.15",
+    "jupyterlab_widgets==3.0.16",
+    "anywidget==7.6.0"
 ]
 
 [build-system]
