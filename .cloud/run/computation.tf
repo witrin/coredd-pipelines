@@ -177,19 +177,6 @@ resource "google_compute_address" "engine" {
   region = local.region
 }
 
-resource "google_compute_resource_policy" "engine_stop" {
-  name   = "engine-stop-4am"
-  region = local.region
-
-  instance_schedule_policy {
-    time_zone = "Europe/Berlin"
-
-    vm_stop_schedule {
-      schedule = "0 4 * * *"
-    }
-  }
-}
-
 resource "google_compute_instance" "engine" {
   name         = "engine"
   machine_type = "e2-medium"
@@ -276,10 +263,6 @@ resource "google_compute_instance" "engine" {
       image = local.evaluation_image_repository
     }))
   }
-  resource_policies = [
-    google_compute_resource_policy.engine_stop.id
-  ]
-
   depends_on = [
     google_project_iam_member.roles["compute_default-roles_artifactregistry.reader"]
   ]
