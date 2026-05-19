@@ -714,7 +714,7 @@ def scope_repository_stationary(
 
 
 @asset(
-    metadata={"version": "2.0.0"},
+    metadata={"version": "3.0.0"},
     partitions_def=partitions.scope_change_outline_partition,
     group_name="scope",
     kinds={"github"},
@@ -778,7 +778,7 @@ def scope_change_outline(
 
 
 @asset(
-    metadata={"version": "4.0.0"},
+    metadata={"version": "5.0.0"},
     partitions_def=partitions.ingest_raw_partition,
     group_name="scope",
     kinds={"github"},
@@ -829,7 +829,7 @@ def scope_change_raw(
 
 
 @asset(
-    metadata={"version": "4.0.0"},
+    metadata={"version": "5.0.0"},
     partitions_def=partitions.ingest_raw_partition,
     group_name="scope",
     kinds={"github"},
