@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from datetime import date
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -704,3 +706,123 @@ class IssueCollector:
                 ]
             ),
         )
+
+
+class CommitCursor:
+    """Iterator over commits resolved by identifier with associated pull requests."""
+
+    def __init__(
+        self,
+        client: Any,
+        repository: str,
+        ranges: Dict[str, List[str]],
+        batch_size: int = 50,
+        log: Optional[Callable[[str], None]] = None,
+    ):
+        self.client = client
+        self.repository = repository
+        self.owner, self.name = repository.split("/", 1)
+        self.ranges = ranges
+        self._items: List[Tuple[str, str]] = [
+            (branch, identifier)
+            for branch, identifiers in ranges.items()
+            for identifier in identifiers
+        ]
+        self._index = 0
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._batch_size = batch_size
+        self._log = log or (lambda message: None)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> Dict[str, Any]:
+        if self._index >= len(self._items):
+            raise StopIteration
+
+        branch, identifier = self._items[self._index]
+        if identifier not in self._cache:
+            self._fetch_batch()
+
+        self._index += 1
+        node = self._cache.get(identifier)
+        if node is None:
+            return {
+                "name": self.repository,
+                "branch": branch,
+                "identifier": identifier,
+                "date": None,
+                "payload": None,
+            }
+        return {
+            "name": self.repository,
+            "branch": branch,
+            "identifier": identifier,
+            "date": node.get("committedDate"),
+            "payload": json.dumps(node),
+        }
+
+    def _fetch_batch(self) -> None:
+        remaining = [
+            identifier
+            for _, identifier in self._items[self._index:]
+            if identifier not in self._cache
+        ]
+        chunk = remaining[: self._batch_size]
+        try:
+            self._cache.update(self._fetch_commits_batch(chunk))
+        except Exception as e:
+            if "complexity" in str(e).lower() or "timeout" in str(e).lower():
+                self._batch_size = max(5, self._batch_size // 2)
+                self._log(f"Reduced commit batch size to {self._batch_size}")
+                self._fetch_batch()
+            else:
+                raise
+
+    def _fetch_commits_batch(self, identifiers: List[str]) -> Dict[str, Dict[str, Any]]:
+        variables: Dict[str, Any] = {"owner": self.owner, "name": self.name}
+        declarations: List[str] = []
+        fragments: List[str] = []
+
+        template = """
+            c{index}: object(oid: $id{index}) {{
+              ... on Commit {{
+                oid
+                messageHeadline
+                messageBody
+                committedDate
+                author {{ user {{ __typename login }} }}
+                associatedPullRequests(first: 5) {{
+                  nodes {{
+                    number
+                    merged
+                    baseRefName
+                    mergeCommit {{ oid }}
+                    repository {{ nameWithOwner }}
+                  }}
+                }}
+              }}
+            }}
+        """
+
+        for index, identifier in enumerate(identifiers):
+            variables[f"id{index}"] = identifier
+            declarations.append(f"$id{index}: GitObjectID!")
+            fragments.append(template.format(index=index))
+
+        query = (
+            f"query Commits($owner: String!, $name: String!, {', '.join(declarations)})"
+            + "{ repository(owner: $owner, name: $name) { "
+            + " ".join(fragments)
+            + " } }"
+        )
+
+        response = self.client._Github__requester.graphql_query(query, variables)
+        repository = response[1]["data"]["repository"]
+
+        result: Dict[str, Dict[str, Any]] = {}
+        for index, identifier in enumerate(identifiers):
+            node = repository.get(f"c{index}")
+            if node is not None:
+                result[identifier] = node
+        return result

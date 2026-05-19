@@ -12,7 +12,8 @@ from components.decorator import asset
 from components.infrastructure import GithubResource
 from components.io import BlobStream
 from benchmark.definitions import partitions
-from benchmark.scope.cohort import ChangeOutlineCollector, ChangeReviewCollector, IssueCollector
+from benchmark.attribution.history import VersionControl
+from benchmark.scope.cohort import ChangeOutlineCollector, ChangeReviewCollector, CommitCursor, IssueCollector
 from benchmark.scope.filtering import TrunkBatch
 from benchmark.scope.ingestion import ChangeExtractor, IssueExtractor, SourceExtractor
 from benchmark.scope.profiling import ReviewBatch, Stationarity
@@ -597,7 +598,7 @@ def scope_repository_trunk(
     changes = pl.from_arrow(pa.concat_tables(scope_issue_catalog.values()))
     changes = changes.filter(pl.col("name").is_in(batch_repos))
     context.log.info(
-        "Batch %s: %d repos, %d change/issue records.",
+        "Batch %s: %d repositories, %d issues.",
         context.partition_key,
         len(batch_repos),
         changes.height,
@@ -613,7 +614,7 @@ def scope_repository_trunk(
 
 
 @asset(
-    metadata={"version": "2.0.0"},
+    metadata={"version": "3.0.0"},
     partitions_def=partitions.scope_repository_pool_batch_partition,
     group_name="scope",
 )
@@ -644,11 +645,20 @@ def scope_repository_review(
             ", ".join(unstable["name"].to_list()),
         )
 
-    return reviews.to_arrow()
+    trunks = (
+        trunk.filter(pl.col("type") == "change")
+        .with_columns(pl.col("payload").struct.field("merged").alias("merged"))
+        .filter(pl.col("merged").is_not_null())
+        .sort("merged", descending=True)
+        .group_by("name", maintain_order=True)
+        .agg(pl.col("trunk").unique(maintain_order=True).alias("trunks"))
+    )
+
+    return reviews.join(trunks, on="name", how="left").to_arrow()
 
 
 @asset(
-    metadata={"version": "4.0.0"},
+    metadata={"version": "5.0.0"},
     group_name="scope",
     ins={
         "scope_repository_review": dg.AssetIn(
@@ -691,7 +701,8 @@ def scope_repository_cohort(
     pool = pl.from_arrow(scope_repository_pool)
     cohort = (
         pool.join(retained, on="name", how="inner")
-        .select(scope_repository_pool.schema.names)
+        .join(fitted.select("name", "trunks"), on="name", how="left")
+        .select(*scope_repository_pool.schema.names, "trunks")
         .unique(subset=["name"])
         .sort("name")
     )
@@ -891,3 +902,94 @@ def scope_source_raw(
 
     extractor = SourceExtractor(github.client(), repository, log=context.log.info)
     return extractor.extract()
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    partitions_def=partitions.ingest_source_partition,
+    group_name="scope",
+    kinds={"github"},
+    pool="github",
+)
+def scope_commit_attribution(
+    context: dg.AssetExecutionContext,
+    scope_repository_cohort: pa.Table,
+    scope_source_raw,
+    github: GithubResource,
+) -> pa.Table:
+    """Trunk commits per repository with associated pull requests."""
+    import tarfile
+    import tempfile
+
+    import polars as pl
+    import pygit2
+
+    cohort = pl.from_arrow(scope_repository_cohort)
+    names = sorted(cohort["name"].to_list())
+    repository = partitions.Shard.from_space(context.partition_key, names)
+
+    branches = cohort.filter(pl.col("name") == repository).row(0, named=True)["trunks"]
+
+    context.log.info(
+        "Walking %d trunk branches for %s: %s",
+        len(branches),
+        repository,
+        branches,
+    )
+
+    with tempfile.TemporaryDirectory() as work:
+        with tarfile.open(fileobj=scope_source_raw, mode="r:gz") as tar:
+            tar.extractall(work, filter="data")
+        repo_dir = VersionControl._find_git_dir(Path(work))
+        git = pygit2.Repository(str(repo_dir))
+
+        seen = set()
+        ranges: Dict[str, list[str]] = {}
+        for branch in branches:
+            tip = None
+            for ref in (f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"):
+                try:
+                    tip = str(git.lookup_reference(ref).peel(pygit2.Commit).id)
+                    break
+                except KeyError:
+                    continue
+            if tip is None:
+                context.log.info(
+                    "Branch %s has no local reference, skipping.", branch
+                )
+                continue
+            walker = git.walk(tip, pygit2.GIT_SORT_TOPOLOGICAL)
+            walker.simplify_first_parent()
+            collected = []
+            for commit in walker:
+                identifier = str(commit.id)
+                if identifier in seen:
+                    break
+                seen.add(identifier)
+                collected.append(identifier)
+            ranges[branch] = collected
+            context.log.info(
+                "Branch %s contributes %d commits.", branch, len(collected)
+            )
+
+        cursor = CommitCursor(
+            github.client(), repository, ranges, log=context.log.info
+        )
+        rows = list(cursor)
+
+    context.log.info(
+        "Collected %d commit attributions for %s.", len(rows), repository
+    )
+
+    return pa.Table.from_pylist(
+        rows,
+        schema=pa.schema(
+            [
+                ("name", pa.string()),
+                ("branch", pa.string()),
+                ("identifier", pa.string()),
+                ("date", pa.string()),
+                ("payload", pa.large_string()),
+            ]
+        ),
+    )
