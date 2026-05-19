@@ -658,7 +658,7 @@ def scope_repository_review(
 
 
 @asset(
-    metadata={"version": "5.0.0"},
+    metadata={"version": "1.0.0"},
     group_name="scope",
     ins={
         "scope_repository_review": dg.AssetIn(
@@ -666,13 +666,14 @@ def scope_repository_review(
         )
     },
 )
-def scope_repository_cohort(
+def scope_repository_stationary(
     context: dg.AssetExecutionContext,
     scope_repository_pool: pa.Table,
     scope_repository_review: Dict[str, pa.Table],
 ) -> pa.Table:
-    """Final study cohort. Classifies stationarity over per-repository review
-    profiles and retains repositories whose review discipline is stable."""
+    """Repositories filtered by review stationarity. Classifies stationarity
+    over per-repository review profiles and retains repositories whose review
+    discipline is stable."""
     import numpy as np
     import polars as pl
 
@@ -887,14 +888,14 @@ def scope_issue_raw(
 )
 def scope_source_raw(
     context: dg.AssetExecutionContext,
-    scope_repository_cohort: pa.Table,
+    scope_repository_stationary: pa.Table,
     github: GithubResource,
 ) -> BlobStream:
     """Ingest repository source tarball."""
     import polars as pl
 
     partition = context.partition_key
-    df = pl.from_arrow(scope_repository_cohort)
+    df = pl.from_arrow(scope_repository_stationary)
     names = sorted(df["name"].to_list())
     repository = partitions.Shard.from_space(partition, names)
 
@@ -913,7 +914,7 @@ def scope_source_raw(
 )
 def scope_commit_attribution(
     context: dg.AssetExecutionContext,
-    scope_repository_cohort: pa.Table,
+    scope_repository_stationary: pa.Table,
     scope_source_raw,
     github: GithubResource,
 ) -> pa.Table:
@@ -924,7 +925,7 @@ def scope_commit_attribution(
     import polars as pl
     import pygit2
 
-    cohort = pl.from_arrow(scope_repository_cohort)
+    cohort = pl.from_arrow(scope_repository_stationary)
     names = sorted(cohort["name"].to_list())
     repository = partitions.Shard.from_space(context.partition_key, names)
 
@@ -993,3 +994,58 @@ def scope_commit_attribution(
             ]
         ),
     )
+
+
+@asset(
+    metadata={"version": "6.0.0"},
+    group_name="scope",
+    ins={
+        "scope_commit_attribution": dg.AssetIn(
+            partition_mapping=dg.AllPartitionMapping()
+        )
+    },
+)
+def scope_repository_cohort(
+    context: dg.AssetExecutionContext,
+    scope_repository_stationary: pa.Table,
+    scope_commit_attribution: Dict[str, pa.Table],
+) -> pa.Table:
+    """Final study cohort: stationary repositories whose PR-bypass rate on the
+    trunk falls below 5%."""
+    from benchmark.scope.attribution import PushClassification
+    import polars as pl
+
+    commits = pl.from_arrow(
+        pa.concat_tables(scope_commit_attribution.values())
+    ).filter(pl.col("payload").is_not_null())
+
+    classifier = PushClassification()
+    classified = commits.with_columns(
+        pl.struct(["payload", "branch", "name"])
+        .map_elements(classifier.label, return_dtype=pl.Utf8)
+        .alias("class")
+    )
+
+    counts = (
+        classified.group_by("name", "class")
+        .len()
+        .pivot(on="class", index="name", values="len")
+    )
+    for klass in ("bypassed", "attributed", "picked", "ambiguous"):
+        if klass not in counts.columns:
+            counts = counts.with_columns(pl.lit(0).cast(pl.UInt32).alias(klass))
+    rates = counts.fill_null(0).with_columns(
+        (pl.col("bypassed") / (pl.col("bypassed") + pl.col("attributed")))
+        .alias("rate")
+    )
+    kept = rates.filter(pl.col("rate") < 0.05).select("name")
+
+    stationary = pl.from_arrow(scope_repository_stationary)
+    cohort = stationary.join(kept, on="name", how="inner").sort("name")
+
+    context.log.info(
+        "Final cohort: %d of %d stationary repositories (bypass-rate < 0.05).",
+        cohort.height,
+        stationary.height,
+    )
+    return cohort.to_arrow()

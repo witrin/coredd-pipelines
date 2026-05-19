@@ -250,13 +250,60 @@ def scope_change_outline_sensor(
 
 
 @asset_sensor(
+    asset_key="scope_repository_stationary",
+)
+def scope_repository_stationary_sensor(
+    context: dg.SensorEvaluationContext,
+    asset_event: dg.EventLogEntry,
+):
+    """Populate ingest_source partitions for scope_source_raw based on
+    scope_repository_stationary."""
+    import polars as pl
+
+    storage = TableAssetStorage()
+    table = storage.load(context, event=asset_event)
+
+    if table is None or table.num_rows == 0:
+        context.log.info("No data found for scope_repository_stationary.")
+        return None
+
+    instance = context.instance
+    df = pl.from_arrow(table)
+    names = sorted(df["name"].to_list())
+
+    keys = set()
+    for row in df.iter_rows(named=True):
+        space = Shard.to_space(names, row["name"])
+        keys.add(space)
+
+    existing = set(instance.get_dynamic_partitions("ingest_source"))
+    to_add = keys - existing
+    to_remove = existing - keys
+
+    if to_add:
+        instance.add_dynamic_partitions("ingest_source", list(to_add))
+    if to_remove:
+        for key in to_remove:
+            instance.delete_dynamic_partition("ingest_source", key)
+
+    context.log.info(
+        "Updated source partitions with +%d / -%d",
+        len(to_add),
+        len(to_remove),
+    )
+
+    return None
+
+
+@asset_sensor(
     asset_key="scope_repository_cohort",
 )
 def scope_repository_cohort_sensor(
     context: dg.SensorEvaluationContext,
     asset_event: dg.EventLogEntry,
 ):
-    """Populate partitions for raw ingestion assets based on scope_repository_cohort."""
+    """Populate ingest_raw partitions for scope_change_raw and scope_issue_raw
+    based on the final cohort."""
     import polars as pl
     from dateutil.relativedelta import relativedelta
 
@@ -272,7 +319,6 @@ def scope_repository_cohort_sensor(
     names = sorted(df["name"].to_list())
 
     keys = set()
-
     for row in df.iter_rows(named=True):
         space = Shard.to_space(names, row["name"])
 
@@ -303,28 +349,6 @@ def scope_repository_cohort_sensor(
 
     context.log.info(
         "Updated entity partitions with +%d / -%d",
-        len(to_add),
-        len(to_remove),
-    )
-
-    keys = set()
-
-    for row in df.iter_rows(named=True):
-        space = Shard.to_space(names, row["name"])
-        keys.add(space)
-
-    existing = set(instance.get_dynamic_partitions("ingest_source"))
-    to_add = keys - existing
-    to_remove = existing - keys
-
-    if to_add:
-        instance.add_dynamic_partitions("ingest_source", list(to_add))
-    if to_remove:
-        for key in to_remove:
-            instance.delete_dynamic_partition("ingest_source", key)
-
-    context.log.info(
-        "Updated source partitions with +%d / -%d",
         len(to_add),
         len(to_remove),
     )
