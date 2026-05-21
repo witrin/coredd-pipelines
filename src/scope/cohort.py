@@ -608,6 +608,437 @@ class ChangeOutlineCollector:
             )
 
 
+class CommentCursor:
+    """Iterator over PR conversation and review-thread comments with batching."""
+
+    def __init__(
+        self,
+        client: Any,
+        owner: str,
+        name: str,
+        numbers: List[int],
+        batch_size: int = 20,
+        comment_page: int = 100,
+        thread_page: int = 50,
+        inner_page: int = 100,
+        log: Optional[Callable[[str], None]] = None,
+    ):
+        self.client = client
+        self.owner = owner
+        self.name = name
+        self.numbers = numbers
+        self._index = 0
+        self._batch_cache: Dict[int, Dict[str, Any]] = {}
+        self._batch_size = batch_size
+        self._comment_page = comment_page
+        self._thread_page = thread_page
+        self._inner_page = inner_page
+        self._log = log or (lambda msg: None)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> Tuple[int, Dict[str, Any]]:
+        if self._index >= len(self.numbers):
+            raise StopIteration
+
+        number = self.numbers[self._index]
+        if number not in self._batch_cache:
+            self._fetch_batch()
+
+        self._index += 1
+        return number, self._batch_cache.get(
+            number, {"comments": [], "review_comments": []}
+        )
+
+    def _fetch_batch(self) -> None:
+        remaining = self.numbers[self._index :]
+        chunk = remaining[: self._batch_size]
+        try:
+            self._batch_cache.update(self._fetch_comments_batch(chunk))
+        except Exception as e:
+            if "complexity" in str(e).lower() or "timeout" in str(e).lower():
+                self._batch_size = max(2, self._batch_size // 2)
+                self._log(f"Reduced comment batch size to {self._batch_size}")
+                self._fetch_batch()
+            else:
+                raise
+
+    def _fetch_comments_batch(self, numbers: List[int]) -> Dict[int, Dict[str, Any]]:
+        variables: Dict[str, Any] = {
+            "owner": self.owner,
+            "name": self.name,
+            "c": self._comment_page,
+            "t": self._thread_page,
+            "i": self._inner_page,
+        }
+        declarations: List[str] = []
+        fragments: List[str] = []
+
+        batch_template = """
+            pr{index}: pullRequest(number: $num{index}) {{
+              number
+              comments(first: $c) {{
+                pageInfo {{ hasNextPage endCursor }}
+                nodes {{ author {{ __typename login }} createdAt }}
+              }}
+              reviewThreads(first: $t) {{
+                pageInfo {{ hasNextPage endCursor }}
+                nodes {{
+                  id
+                  comments(first: $i) {{
+                    pageInfo {{ hasNextPage endCursor }}
+                    nodes {{ author {{ __typename login }} createdAt }}
+                  }}
+                }}
+              }}
+            }}
+        """
+
+        for index, number in enumerate(numbers):
+            variables[f"num{index}"] = int(number)
+            declarations.append(f"$num{index}: Int!")
+            fragments.append(batch_template.format(index=index))
+
+        query = (
+            "query Comments($owner: String!, $name: String!, "
+            "$c: Int!, $t: Int!, $i: Int!, " + ", ".join(declarations) + ")"
+            + "{ repository(owner: $owner, name: $name) { "
+            + " ".join(fragments)
+            + " } }"
+        )
+
+        response = self.client._Github__requester.graphql_query(query, variables)
+        repository = response[1]["data"]["repository"]
+
+        result: Dict[int, Dict[str, Any]] = {}
+        for index, _ in enumerate(numbers):
+            pull_request = repository.get(f"pr{index}")
+            if not pull_request:
+                continue
+
+            number = int(pull_request["number"])
+
+            comments_response = pull_request.get("comments") or {}
+            comments = list(comments_response.get("nodes") or [])
+            self._paginate_comments(
+                number, comments, comments_response.get("pageInfo") or {}
+            )
+
+            threads_response = pull_request.get("reviewThreads") or {}
+            review_comments = self._flatten_threads(
+                number,
+                list(threads_response.get("nodes") or []),
+                threads_response.get("pageInfo") or {},
+            )
+
+            result[number] = {
+                "comments": comments,
+                "review_comments": review_comments,
+            }
+
+        return result
+
+    def _paginate_comments(
+        self,
+        number: int,
+        nodes: List[Dict[str, Any]],
+        page_info: Dict[str, Any],
+    ) -> None:
+        pages = 1
+        cursor = page_info.get("endCursor")
+
+        page_query = """
+            query CommentPage($owner: String!, $name: String!, $num: Int!, $n: Int!, $cursor: String!) {
+                repository(owner: $owner, name: $name) {
+                    pullRequest(number: $num) {
+                        comments(first: $n, after: $cursor) {
+                            pageInfo { hasNextPage endCursor }
+                            nodes { author { __typename login } createdAt }
+                        }
+                    }
+                }
+            }
+        """
+
+        while page_info.get("hasNextPage") and pages < 50:
+            if not cursor:
+                self._log(f"Missing comments cursor for change {number}")
+                break
+
+            response = self.client._Github__requester.graphql_query(
+                page_query,
+                {
+                    "owner": self.owner,
+                    "name": self.name,
+                    "num": number,
+                    "n": self._comment_page,
+                    "cursor": cursor,
+                },
+            )
+            data = (
+                response[1]["data"]["repository"]["pullRequest"].get("comments") or {}
+            )
+            nodes.extend(data.get("nodes") or [])
+            page_info = data.get("pageInfo") or {}
+            cursor = page_info.get("endCursor")
+            pages += 1
+
+        if page_info.get("hasNextPage"):
+            self._log(
+                f"Comment pagination limit reached for change {number} with {pages} pages"
+            )
+
+    def _flatten_threads(
+        self,
+        number: int,
+        thread_nodes: List[Dict[str, Any]],
+        page_info: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        review_comments: List[Dict[str, Any]] = []
+
+        def absorb(threads: List[Dict[str, Any]]) -> None:
+            for thread in threads:
+                inner = thread.get("comments") or {}
+                nodes = list(inner.get("nodes") or [])
+                self._paginate_thread_comments(
+                    number,
+                    thread.get("id"),
+                    nodes,
+                    inner.get("pageInfo") or {},
+                )
+                review_comments.extend(nodes)
+
+        absorb(thread_nodes)
+
+        pages = 1
+        cursor = page_info.get("endCursor")
+
+        page_query = """
+            query ThreadPage($owner: String!, $name: String!, $num: Int!, $t: Int!, $i: Int!, $cursor: String!) {
+                repository(owner: $owner, name: $name) {
+                    pullRequest(number: $num) {
+                        reviewThreads(first: $t, after: $cursor) {
+                            pageInfo { hasNextPage endCursor }
+                            nodes {
+                                id
+                                comments(first: $i) {
+                                    pageInfo { hasNextPage endCursor }
+                                    nodes { author { __typename login } createdAt }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        """
+
+        while page_info.get("hasNextPage") and pages < 50:
+            if not cursor:
+                self._log(f"Missing reviewThreads cursor for change {number}")
+                break
+
+            response = self.client._Github__requester.graphql_query(
+                page_query,
+                {
+                    "owner": self.owner,
+                    "name": self.name,
+                    "num": number,
+                    "t": self._thread_page,
+                    "i": self._inner_page,
+                    "cursor": cursor,
+                },
+            )
+            data = (
+                response[1]["data"]["repository"]["pullRequest"].get("reviewThreads")
+                or {}
+            )
+            absorb(data.get("nodes") or [])
+            page_info = data.get("pageInfo") or {}
+            cursor = page_info.get("endCursor")
+            pages += 1
+
+        if page_info.get("hasNextPage"):
+            self._log(
+                f"Review-thread pagination limit reached for change {number} with {pages} pages"
+            )
+
+        return review_comments
+
+    def _paginate_thread_comments(
+        self,
+        number: int,
+        thread_id: Optional[str],
+        nodes: List[Dict[str, Any]],
+        page_info: Dict[str, Any],
+    ) -> None:
+        if not page_info.get("hasNextPage"):
+            return
+        if not thread_id:
+            self._log(f"Missing thread id for change {number}")
+            return
+
+        pages = 1
+        cursor = page_info.get("endCursor")
+
+        page_query = """
+            query ThreadComments($tid: ID!, $i: Int!, $cursor: String!) {
+                node(id: $tid) {
+                    ... on PullRequestReviewThread {
+                        comments(first: $i, after: $cursor) {
+                            pageInfo { hasNextPage endCursor }
+                            nodes { author { __typename login } createdAt }
+                        }
+                    }
+                }
+            }
+        """
+
+        while page_info.get("hasNextPage") and pages < 50:
+            if not cursor:
+                self._log(f"Missing thread-comment cursor for change {number}")
+                break
+
+            response = self.client._Github__requester.graphql_query(
+                page_query,
+                {"tid": thread_id, "i": self._inner_page, "cursor": cursor},
+            )
+            node = response[1]["data"].get("node") or {}
+            data = node.get("comments") or {}
+            nodes.extend(data.get("nodes") or [])
+            page_info = data.get("pageInfo") or {}
+            cursor = page_info.get("endCursor")
+            pages += 1
+
+        if page_info.get("hasNextPage"):
+            self._log(
+                f"Thread-comment pagination limit reached for change {number} with {pages} pages"
+            )
+
+
+class ChangeDiscussionCollector:
+    """Collects non-bot-author merged PRs with their conversation and
+    review-thread comments.
+
+    Each comment is tagged with author login, type (bot/user from author
+    __typename) and source (conversation/review); the created timestamp is
+    retained. Comments are not dropped, so bot filtering is deferred to
+    analysis. Unlike ChangeOutlineCollector, the search node requests the
+    author so the bot-AUTHORED-PR filter actually applies (the outline
+    collector omits author from its search node, making its filter inert).
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        repository: str,
+        log: Optional[Callable[[str], None]] = None,
+    ):
+        self.client = client
+        self.repository = repository
+        self.owner, self.name = repository.split("/", 1)
+        self._log = log or (lambda msg: None)
+
+    def _is_bot_author(self, node: Dict[str, Any]) -> bool:
+        return (node.get("author") or {}).get("__typename") == "Bot"
+
+    def _get_count(self, start: date, end: date) -> int:
+        schema = """
+            query CountSearch($q: String!) {
+                search(type: ISSUE, query: $q, first: 0) { issueCount }
+            }
+        """
+        query = f"repo:{self.repository} is:pr is:merged merged:{start}..{end}"
+        response = self.client._Github__requester.graphql_query(schema, {"q": query})
+        return int(response[1]["data"]["search"]["issueCount"])
+
+    def _entry(self, node: Dict[str, Any], source: str) -> Dict[str, Any]:
+        author = node.get("author") or {}
+        return {
+            "author": author.get("login"),
+            "type": "bot" if author.get("__typename") == "Bot" else "user",
+            "source": source,
+            "created": node.get("createdAt"),
+        }
+
+    def collect(self, since: date, until: date) -> pa.Table:
+        schema = """
+          query SearchPage($q: String!, $first: Int!, $after: String) {
+            search(type: ISSUE, query: $q, first: $first, after: $after) {
+              issueCount
+              pageInfo { hasNextPage endCursor }
+              nodes {
+                __typename
+                ... on PullRequest {
+                  number
+                  author { __typename login }
+                }
+              }
+            }
+          }
+        """
+
+        splitter = RangeSplitter(count=self._get_count, log=self._log)
+        ranges = splitter.split(since, until)
+
+        changes: List[Dict[str, Any]] = []
+        for start, end in ranges:
+            query = f"repo:{self.repository} is:pr is:merged merged:{start}..{end}"
+            cursor = SearchCursor(self.client, query, schema, "PullRequest", log=self._log)
+            for change in cursor:
+                if self._is_bot_author(change):
+                    continue
+                changes.append(change)
+
+        numbers = [int(x["number"]) for x in changes]
+        if len(numbers) != len(set(numbers)):
+            duplicates = [n for n in numbers if numbers.count(n) > 1]
+            raise ValueError(f"Duplicate changes {set(duplicates)} found")
+
+        discussion = dict(
+            CommentCursor(self.client, self.owner, self.name, numbers, log=self._log)
+        )
+
+        result = []
+        for change in changes:
+            number = int(change["number"])
+            payload = discussion.get(
+                number, {"comments": [], "review_comments": []}
+            )
+            comments = [self._entry(n, "conversation") for n in payload["comments"]]
+            comments += [self._entry(n, "review") for n in payload["review_comments"]]
+            result.append(
+                {
+                    "name": self.repository,
+                    "number": number,
+                    "comments": comments,
+                }
+            )
+
+        return pa.Table.from_pylist(
+            result,
+            schema=pa.schema(
+                [
+                    ("name", pa.string()),
+                    ("number", pa.int64()),
+                    (
+                        "comments",
+                        pa.list_(
+                            pa.struct(
+                                [
+                                    ("author", pa.string()),
+                                    ("type", pa.string()),
+                                    ("source", pa.string()),
+                                    ("created", pa.string()),
+                                ]
+                            )
+                        ),
+                    ),
+                ]
+            ),
+        )
+
+
 class IssueCollector:
     """Collects closed issues."""
 

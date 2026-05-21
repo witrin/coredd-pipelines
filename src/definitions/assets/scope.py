@@ -13,7 +13,7 @@ from components.infrastructure import GithubResource
 from components.io import BlobStream
 from benchmark.definitions import partitions
 from benchmark.attribution.history import VersionControl
-from benchmark.scope.cohort import ChangeOutlineCollector, ChangeReviewCollector, CommitCursor, IssueCollector
+from benchmark.scope.cohort import ChangeDiscussionCollector, ChangeOutlineCollector, ChangeReviewCollector, CommitCursor, IssueCollector
 from benchmark.scope.filtering import TrunkBatch
 from benchmark.scope.ingestion import ChangeExtractor, IssueExtractor, SourceExtractor
 from benchmark.scope.profiling import ReviewBatch, Stationarity
@@ -768,6 +768,75 @@ def scope_change_outline(
 
     context.log.info(
         "Collected outline of %s from %s to %s with %d changes",
+        repository,
+        start,
+        end,
+        table.num_rows,
+    )
+
+    return table
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    partitions_def=partitions.scope_change_discussion_partition,
+    group_name="scope",
+    kinds={"github"},
+    pool="github",
+)
+def scope_change_discussion(
+    context: dg.AssetExecutionContext,
+    scope_repository_cohort: pa.Table,
+    github: GithubResource,
+) -> pa.Table:
+    """Non-bot-author merged-PR comments (conversation + review threads) per
+    cohort repository shard. Each comment is tagged with author login, type
+    (bot/user) and source (conversation/review); the created timestamp is
+    retained. Enables a McIntosh-style discussion rate (share of merged PRs
+    with at least one non-bot comment), computed downstream. Uses batched
+    GraphQL (CommentCursor) to avoid the per-PR REST cost of scope_change_raw."""
+    import polars as pl
+
+    partition = context.partition_key
+    df = pl.from_arrow(scope_repository_cohort)
+    names = sorted(df["name"].to_list())
+
+    shard = partitions.Shard.from_key(partition)
+    repository = partitions.Shard.from_space(shard.space, names)
+
+    matches = df.filter(pl.col("name") == repository)
+    if matches.is_empty():
+        raise ValueError(f"Repository '{repository}' not found in cohort")
+    row = matches.row(0, named=True)
+    creation_str = row["creation"]
+
+    index = shard.keys().index(partition)
+    creation = datetime.fromisoformat(str(creation_str).replace("Z", "+00:00")).date()
+    today = date.today()
+    days = (today - creation).days + 1
+    step = days // shard.shards
+
+    start = creation + timedelta(days=index * step)
+    end = (
+        today
+        if index == shard.shards - 1
+        else creation + timedelta(days=(index + 1) * step - 1)
+    )
+
+    context.log.info(
+        "Collect discussion of %s from %s to %s",
+        repository,
+        start,
+        end,
+    )
+
+    client = github.client()
+    table = ChangeDiscussionCollector(
+        client, repository, log=context.log.info
+    ).collect(start, end)
+
+    context.log.info(
+        "Collected discussion of %s from %s to %s with %d changes",
         repository,
         start,
         end,

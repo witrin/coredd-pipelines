@@ -229,6 +229,10 @@ scope_change_outline_partition = dg.DynamicPartitionsDefinition(
     name="scope_change_outline",
 )
 
+scope_change_discussion_partition = dg.DynamicPartitionsDefinition(
+    name="scope_change_discussion",
+)
+
 ingest_raw_partition = dg.DynamicPartitionsDefinition(name="ingest_raw")
 
 ingest_source_partition = dg.DynamicPartitionsDefinition(name="ingest_source")
