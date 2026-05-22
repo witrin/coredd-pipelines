@@ -620,7 +620,7 @@ class CommentCursor:
         batch_size: int = 20,
         comment_page: int = 100,
         thread_page: int = 50,
-        inner_page: int = 100,
+        inner_page: int = 10,
         log: Optional[Callable[[str], None]] = None,
     ):
         self.client = client

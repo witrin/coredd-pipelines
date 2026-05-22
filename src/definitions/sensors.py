@@ -346,14 +346,14 @@ def scope_repository_stationary_sensor(
 
 
 @asset_sensor(
-    asset_key="scope_repository_cohort",
+    asset_key="scope_repository_sample",
 )
-def scope_repository_cohort_sensor(
+def scope_repository_sample_sensor(
     context: dg.SensorEvaluationContext,
     asset_event: dg.EventLogEntry,
 ):
     """Populate ingest_raw partitions for scope_change_raw and scope_issue_raw
-    based on the final cohort."""
+    based on the audit sample."""
     import polars as pl
     from dateutil.relativedelta import relativedelta
 
@@ -361,7 +361,7 @@ def scope_repository_cohort_sensor(
     table = storage.load(context, event=asset_event)
 
     if table is None or table.num_rows == 0:
-        context.log.info("No data found for scope_repository_cohort.")
+        context.log.info("No data found for scope_repository_sample.")
         return None
 
     instance = context.instance

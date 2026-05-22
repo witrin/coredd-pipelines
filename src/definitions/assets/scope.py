@@ -13,7 +13,13 @@ from components.infrastructure import GithubResource
 from components.io import BlobStream
 from benchmark.definitions import partitions
 from benchmark.attribution.history import VersionControl
-from benchmark.scope.cohort import ChangeDiscussionCollector, ChangeOutlineCollector, ChangeReviewCollector, CommitCursor, IssueCollector
+from benchmark.scope.cohort import (
+    ChangeDiscussionCollector,
+    ChangeOutlineCollector,
+    ChangeReviewCollector,
+    CommitCursor,
+    IssueCollector,
+)
 from benchmark.scope.filtering import TrunkBatch
 from benchmark.scope.ingestion import ChangeExtractor, IssueExtractor, SourceExtractor
 from benchmark.scope.profiling import ReviewBatch, Stationarity
@@ -34,15 +40,7 @@ class BigQueryQueryConfig(dg.Config):
 def scope_repository_event(
     context: dg.AssetExecutionContext, config: BigQueryQueryConfig
 ) -> pa.Table:
-    """
-    Repository-level aggregates derived from GH Archive platform events.
-    Includes GitHub repositories whose primary language is Python, and
-    that show maintenance activity within the specified time window.
-    Maintenance is defined as at least one pull request opened against
-    the default branch with reviews from at least two distinct reviewers,
-    at least one issue opened, and at least one issue closed during the
-    same period. Only activity performed by human users is considered.
-    """
+    """Active Python repositories with their platform event aggregates."""
 
     with open(
         Path(__file__).parent.parent.parent / "scope/sampling.sql",
@@ -68,9 +66,7 @@ def scope_repository_event(
                 bigquery.ScalarQueryParameter(
                     "until", "TIMESTAMP", "2025-09-01T00:00:00Z"
                 ),
-                bigquery.ArrayQueryParameter(
-                    "languages", "STRING", ["Python"]
-                ),
+                bigquery.ArrayQueryParameter("languages", "STRING", ["Python"]),
             ]
         ),
         **query_kwargs,
@@ -91,37 +87,41 @@ def scope_repository_signal(
     context: dg.AssetExecutionContext,
     scope_repository_event: pa.Table,
 ) -> pa.Table:
-    """
-    Enriches the input dataset with aggregated indicators that capture
-    throughput, contributor structure, and overall review characteristics
-    within the observed time window.
-    """
+    """Repositories with throughput, contributor, and review indicators."""
     import polars as pl
     from statsmodels.stats.proportion import proportion_confint
 
     df = pl.from_arrow(scope_repository_event)
 
     df = df.with_columns(
-        (pl.col("review_merges") / pl.col("total_merges").clip(lower_bound=1))
-        .alias("review_share")
+        (pl.col("review_merges") / pl.col("total_merges").clip(lower_bound=1)).alias(
+            "review_share"
+        )
     )
 
     intervals = [
-        proportion_confint(int(k), int(n), alpha=0.05, method="wilson")
-        if n > 0 else (float("nan"), float("nan"))
+        (
+            proportion_confint(int(k), int(n), alpha=0.05, method="wilson")
+            if n > 0
+            else (float("nan"), float("nan"))
+        )
         for k, n in zip(df["review_merges"], df["total_merges"])
     ]
 
-    df = df.with_columns(
-        pl.Series("review_low", [x[0] for x in intervals]),
-        pl.Series("review_high", [x[1] for x in intervals]),
-    ).with_columns(
-        (pl.col("review_high") - pl.col("review_low")).alias("review_span")
-    ).with_columns(
-        (
-            pl.col("review_high")
-            - pl.col("review_span") * (1 - pl.col("review_high"))
-        ).alias("review_score")
+    df = (
+        df.with_columns(
+            pl.Series("review_low", [x[0] for x in intervals]),
+            pl.Series("review_high", [x[1] for x in intervals]),
+        )
+        .with_columns(
+            (pl.col("review_high") - pl.col("review_low")).alias("review_span")
+        )
+        .with_columns(
+            (
+                pl.col("review_high")
+                - pl.col("review_span") * (1 - pl.col("review_high"))
+            ).alias("review_score")
+        )
     )
 
     df = df.with_columns(
@@ -150,7 +150,7 @@ def scope_repository_snapshot(
     scope_repository_signal: pa.Table,
     github: GithubResource,
 ) -> pa.Table:
-    """Ingest repository REST snapshots."""
+    """Repository snapshots from the REST API."""
     client = github.client()
 
     partition = context.partition_key
@@ -196,7 +196,7 @@ def scope_repository_profile(
     scope_repository_snapshot: pa.Table,
     github: GithubResource,
 ) -> pa.Table:
-    """Repository profiles built from REST snapshot and GraphQL counts."""
+    """Repository profiles combining snapshot metadata and activity counts."""
     from lingua import LanguageDetectorBuilder
 
     client = github.client()
@@ -300,12 +300,14 @@ def scope_repository_profile(
                         continue
                     if len(body) < 50:
                         continue
-                    excerpts.append({
-                        "kind": "change",
-                        "number": node["number"],
-                        "author": author["login"],
-                        "body": body[:500],
-                    })
+                    excerpts.append(
+                        {
+                            "kind": "change",
+                            "number": node["number"],
+                            "author": author["login"],
+                            "body": body[:500],
+                        }
+                    )
 
                 blob = " ".join(e["body"] for e in excerpts)
                 tongue: list[dict[str, object]] = []
@@ -313,10 +315,12 @@ def scope_repository_profile(
                     for c in detector.compute_language_confidence_values(blob):
                         if c.value <= 0:
                             continue
-                        tongue.append({
-                            "language": c.language.iso_code_639_1.name.lower(),
-                            "confidence": float(c.value),
-                        })
+                        tongue.append(
+                            {
+                                "language": c.language.iso_code_639_1.name.lower(),
+                                "confidence": float(c.value),
+                            }
+                        )
 
                 profile |= {
                     "changes": result["pullRequests"]["totalCount"],
@@ -363,7 +367,7 @@ def scope_repository_pool(
     scope_repository_signal: pa.Table,
     scope_repository_profile: Dict[str, pa.Table],
 ) -> pa.Table:
-    """Pool of repositories that pass the profile filters (Wilson score, metadata, language)."""
+    """Repositories that pass the profile filters."""
     import polars as pl
 
     targets = {"Python"}
@@ -381,17 +385,14 @@ def scope_repository_pool(
         "Dart",
         "PHP",
         "Ruby",
-
         "JavaScript",
         "TypeScript",
         "CoffeeScript",
-
         "Groovy",
         "Clojure",
         "F#",
         "Visual Basic",
         "Visual Basic .NET",
-
         "Zig",
         "D",
         "Nim",
@@ -400,7 +401,6 @@ def scope_repository_pool(
         "Ada",
         "Fortran",
         "Assembly",
-
         "Haskell",
         "OCaml",
         "Erlang",
@@ -413,15 +413,12 @@ def scope_repository_pool(
         "PureScript",
         "ReScript",
         "Haxe",
-
         "Perl",
         "Lua",
         "R",
         "Julia",
         "Tcl",
-
         "Objective-C++",
-
         "MATLAB",
         "Mathematica",
         "Solidity",
@@ -431,63 +428,75 @@ def scope_repository_pool(
     signal = pl.from_arrow(scope_repository_signal).drop("language", "license")
     profiles = signal.join(pl.from_arrow(catalog), on="name", how="inner")
 
-    pool = profiles.with_columns(
-        pl.col("languages")
-        .list.eval(
-            pl.when(pl.element().struct.field("name").is_in(targets))
-            .then(pl.element().struct.field("size"))
-            .otherwise(0)
+    pool = (
+        profiles.with_columns(
+            pl.col("languages")
+            .list.eval(
+                pl.when(pl.element().struct.field("name").is_in(targets))
+                .then(pl.element().struct.field("size"))
+                .otherwise(0)
+            )
+            .list.sum()
+            .alias("target_language_size"),
+            pl.col("languages")
+            .list.eval(
+                pl.when(pl.element().struct.field("name").is_in(excluded))
+                .then(pl.element().struct.field("size"))
+                .otherwise(0)
+            )
+            .list.sum()
+            .alias("excluded_language_size"),
         )
-        .list.sum()
-        .alias("target_language_size"),
-
-        pl.col("languages")
-        .list.eval(
-            pl.when(pl.element().struct.field("name").is_in(excluded))
-            .then(pl.element().struct.field("size"))
-            .otherwise(0)
+        .with_columns(
+            (pl.col("target_language_size") / pl.col("size").clip(lower_bound=1)).alias(
+                "target_language_share"
+            ),
+            (
+                pl.lit(datetime(2025, 9, 1, tzinfo=timezone.utc))
+                - pl.col("creation").str.to_datetime(
+                    format="%Y-%m-%dT%H:%M:%SZ", time_zone="UTC"
+                )
+            )
+            .dt.total_days()
+            .alias("age"),
+            (
+                pl.col("excluded_language_size") / pl.col("size").clip(lower_bound=1)
+            ).alias("excluded_language_share"),
         )
-        .list.sum()
-        .alias("excluded_language_size"),
-    ).with_columns(
-        (pl.col("target_language_size") / pl.col("size").clip(lower_bound=1))
-        .alias("target_language_share"),
-
-        (
-            pl.lit(datetime(2025, 9, 1, tzinfo=timezone.utc))
-            - pl.col("creation").str.to_datetime(
-                format="%Y-%m-%dT%H:%M:%SZ", time_zone="UTC"
+        .filter(
+            (pl.col("review_score") >= 0.75)
+            & (pl.col("age") >= 365)
+            & (pl.col("size") >= 300_000)
+            & (pl.col("merges") >= 100)
+            & (pl.col("target_language_share") >= 0.90)
+            & (pl.col("excluded_language_share") < 0.10)
+            & (pl.col("language").is_in(targets))
+            & (pl.col("archive") == False)
+            & (
+                pl.col("tongue")
+                .list.eval(
+                    pl.when(pl.element().struct.field("language") == "en")
+                    .then(pl.element().struct.field("confidence"))
+                    .otherwise(0)
+                )
+                .list.sum()
+                >= 0.95
+            )
+            & (
+                pl.col("tongue")
+                .list.eval(
+                    pl.when(pl.element().struct.field("language") != "en")
+                    .then(pl.element().struct.field("confidence"))
+                    .otherwise(0)
+                )
+                .list.sum()
+                < 0.05
             )
         )
-        .dt.total_days()
-        .alias("age"),
-
-        (pl.col("excluded_language_size") / pl.col("size").clip(lower_bound=1))
-        .alias("excluded_language_share"),
-    ).filter(
-        (pl.col("review_score") >= 0.75)
-        & (pl.col("age") >= 365)
-        & (pl.col("size") >= 300_000)
-        & (pl.col("merges") >= 100)
-        & (pl.col("target_language_share") >= 0.90)
-        & (pl.col("excluded_language_share") < 0.10)
-        & (pl.col("language").is_in(targets))
-        & (pl.col("archive") == False)
-        & (
-            pl.col("tongue").list.eval(
-                pl.when(pl.element().struct.field("language") == "en")
-                .then(pl.element().struct.field("confidence"))
-                .otherwise(0)
-            ).list.sum() >= 0.95
-        )
-        & (
-            pl.col("tongue").list.eval(
-                pl.when(pl.element().struct.field("language") != "en")
-                .then(pl.element().struct.field("confidence"))
-                .otherwise(0)
-            ).list.sum() < 0.05
-        )
-    ).select(catalog.column_names).unique(subset=["name"]).sort("name")
+        .select(catalog.column_names)
+        .unique(subset=["name"])
+        .sort("name")
+    )
 
     context.log.info("Repository pool contains %d repositories.", pool.height)
 
@@ -506,7 +515,7 @@ def scope_issue_catalog(
     scope_repository_pool: pa.Table,
     github: GithubResource,
 ) -> pa.Table:
-    """Historical change and issue sequence over the full repository lifetime."""
+    """Full history of changes and issues per repository."""
     import polars as pl
 
     partition = context.partition_key
@@ -547,9 +556,9 @@ def scope_issue_catalog(
     )
 
     client = github.client()
-    changes = ChangeReviewCollector(client, repository, trunk, log=context.log.info).collect(
-        start, end
-    )
+    changes = ChangeReviewCollector(
+        client, repository, trunk, log=context.log.info
+    ).collect(start, end)
     issues = IssueCollector(client, repository, log=context.log.info).collect(
         start, end
     )
@@ -570,18 +579,14 @@ def scope_issue_catalog(
     metadata={"version": "2.0.0"},
     partitions_def=partitions.scope_repository_pool_batch_partition,
     group_name="scope",
-    ins={
-        "scope_issue_catalog": dg.AssetIn(
-            partition_mapping=dg.AllPartitionMapping()
-        )
-    },
+    ins={"scope_issue_catalog": dg.AssetIn(partition_mapping=dg.AllPartitionMapping())},
 )
 def scope_repository_trunk(
     context: dg.AssetExecutionContext,
     scope_repository_pool: pa.Table,
     scope_issue_catalog: Dict[str, pa.Table],
 ) -> pa.Table:
-    """Reconstruct integration branches for one batch of repositories."""
+    """Reconstructed integration branches per repository."""
     import polars as pl
 
     pool = pl.from_arrow(scope_repository_pool)
@@ -591,9 +596,7 @@ def scope_repository_trunk(
         population=len(names),
         size=50,
     )
-    batch_repos = {
-        name for name in names if shard.key(name) == context.partition_key
-    }
+    batch_repos = {name for name in names if shard.key(name) == context.partition_key}
 
     changes = pl.from_arrow(pa.concat_tables(scope_issue_catalog.values()))
     changes = changes.filter(pl.col("name").is_in(batch_repos))
@@ -622,7 +625,7 @@ def scope_repository_review(
     context: dg.AssetExecutionContext,
     scope_repository_trunk: pa.Table,
 ) -> pa.Table:
-    """Fit logistic GAMs of review probability for one batch of repositories."""
+    """Fitted review probability models per repository."""
     import polars as pl
 
     trunk = pl.from_arrow(scope_repository_trunk)
@@ -671,9 +674,7 @@ def scope_repository_stationary(
     scope_repository_pool: pa.Table,
     scope_repository_review: Dict[str, pa.Table],
 ) -> pa.Table:
-    """Repositories filtered by review stationarity. Classifies stationarity
-    over per-repository review profiles and retains repositories whose review
-    discipline is stable."""
+    """Repositories with stable review discipline over time."""
     import numpy as np
     import polars as pl
 
@@ -725,7 +726,7 @@ def scope_change_outline(
     scope_repository_cohort: pa.Table,
     github: GithubResource,
 ) -> pa.Table:
-    """PR title, body text, and changed files per cohort repository shard."""
+    """Pull request titles, body text, and changed files per repository."""
     import polars as pl
 
     partition = context.partition_key
@@ -789,12 +790,7 @@ def scope_change_discussion(
     scope_repository_cohort: pa.Table,
     github: GithubResource,
 ) -> pa.Table:
-    """Non-bot-author merged-PR comments (conversation + review threads) per
-    cohort repository shard. Each comment is tagged with author login, type
-    (bot/user) and source (conversation/review); the created timestamp is
-    retained. Enables a McIntosh-style discussion rate (share of merged PRs
-    with at least one non-bot comment), computed downstream. Uses batched
-    GraphQL (CommentCursor) to avoid the per-PR REST cost of scope_change_raw."""
+    """Comments on merged pull requests per repository."""
     import polars as pl
 
     partition = context.partition_key
@@ -831,9 +827,9 @@ def scope_change_discussion(
     )
 
     client = github.client()
-    table = ChangeDiscussionCollector(
-        client, repository, log=context.log.info
-    ).collect(start, end)
+    table = ChangeDiscussionCollector(client, repository, log=context.log.info).collect(
+        start, end
+    )
 
     context.log.info(
         "Collected discussion of %s from %s to %s with %d changes",
@@ -847,7 +843,7 @@ def scope_change_discussion(
 
 
 @asset(
-    metadata={"version": "5.0.0"},
+    metadata={"version": "6.0.0"},
     partitions_def=partitions.ingest_raw_partition,
     group_name="scope",
     kinds={"github"},
@@ -855,15 +851,15 @@ def scope_change_discussion(
 )
 def scope_change_raw(
     context: dg.AssetExecutionContext,
-    scope_repository_cohort: pa.Table,
+    scope_repository_sample: pa.Table,
     github: GithubResource,
 ) -> pa.Table:
-    """Ingest raw PR data for a repository and month partition."""
+    """Raw pull request data per repository and month."""
     import polars as pl
     from dateutil.relativedelta import relativedelta
 
     partition = context.partition_key
-    df = pl.from_arrow(scope_repository_cohort)
+    df = pl.from_arrow(scope_repository_sample)
     names = sorted(df["name"].to_list())
 
     shard = partitions.Shard.from_key(partition)
@@ -898,7 +894,7 @@ def scope_change_raw(
 
 
 @asset(
-    metadata={"version": "5.0.0"},
+    metadata={"version": "6.0.0"},
     partitions_def=partitions.ingest_raw_partition,
     group_name="scope",
     kinds={"github"},
@@ -906,15 +902,15 @@ def scope_change_raw(
 )
 def scope_issue_raw(
     context: dg.AssetExecutionContext,
-    scope_repository_cohort: pa.Table,
+    scope_repository_sample: pa.Table,
     github: GithubResource,
 ) -> pa.Table:
-    """Ingest raw issue data for a repository and month partition."""
+    """Raw issue data per repository and month."""
     import polars as pl
     from dateutil.relativedelta import relativedelta
 
     partition = context.partition_key
-    df = pl.from_arrow(scope_repository_cohort)
+    df = pl.from_arrow(scope_repository_sample)
     names = sorted(df["name"].to_list())
 
     shard = partitions.Shard.from_key(partition)
@@ -960,7 +956,7 @@ def scope_source_raw(
     scope_repository_stationary: pa.Table,
     github: GithubResource,
 ) -> BlobStream:
-    """Ingest repository source tarball."""
+    """Repository source tarball."""
     import polars as pl
 
     partition = context.partition_key
@@ -987,7 +983,7 @@ def scope_commit_attribution(
     scope_source_raw,
     github: GithubResource,
 ) -> pa.Table:
-    """Trunk commits per repository with associated pull requests."""
+    """Trunk commits with their associated pull requests per repository."""
     import tarfile
     import tempfile
 
@@ -1024,9 +1020,7 @@ def scope_commit_attribution(
                 except KeyError:
                     continue
             if tip is None:
-                context.log.info(
-                    "Branch %s has no local reference, skipping.", branch
-                )
+                context.log.info("Branch %s has no local reference, skipping.", branch)
                 continue
             walker = git.walk(tip, pygit2.GIT_SORT_TOPOLOGICAL)
             walker.simplify_first_parent()
@@ -1042,14 +1036,10 @@ def scope_commit_attribution(
                 "Branch %s contributes %d commits.", branch, len(collected)
             )
 
-        cursor = CommitCursor(
-            github.client(), repository, ranges, log=context.log.info
-        )
+        cursor = CommitCursor(github.client(), repository, ranges, log=context.log.info)
         rows = list(cursor)
 
-    context.log.info(
-        "Collected %d commit attributions for %s.", len(rows), repository
-    )
+    context.log.info("Collected %d commit attributions for %s.", len(rows), repository)
 
     return pa.Table.from_pylist(
         rows,
@@ -1079,14 +1069,13 @@ def scope_repository_cohort(
     scope_repository_stationary: pa.Table,
     scope_commit_attribution: Dict[str, pa.Table],
 ) -> pa.Table:
-    """Final study cohort: stationary repositories whose PR-bypass rate on the
-    trunk falls below 5%."""
+    """Final study cohort of repositories that rarely bypass pull requests."""
     from benchmark.scope.attribution import PushClassification
     import polars as pl
 
-    commits = pl.from_arrow(
-        pa.concat_tables(scope_commit_attribution.values())
-    ).filter(pl.col("payload").is_not_null())
+    commits = pl.from_arrow(pa.concat_tables(scope_commit_attribution.values())).filter(
+        pl.col("payload").is_not_null()
+    )
 
     classifier = PushClassification()
     classified = commits.with_columns(
@@ -1104,8 +1093,7 @@ def scope_repository_cohort(
         if klass not in counts.columns:
             counts = counts.with_columns(pl.lit(0).cast(pl.UInt32).alias(klass))
     rates = counts.fill_null(0).with_columns(
-        (pl.col("bypassed") / (pl.col("bypassed") + pl.col("attributed")))
-        .alias("rate")
+        (pl.col("bypassed") / (pl.col("bypassed") + pl.col("attributed"))).alias("rate")
     )
     kept = rates.filter(pl.col("rate") < 0.05).select("name")
 
@@ -1118,3 +1106,91 @@ def scope_repository_cohort(
         stationary.height,
     )
     return cohort.to_arrow()
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    group_name="scope",
+    ins={
+        "scope_change_discussion": dg.AssetIn(
+            partition_mapping=dg.AllPartitionMapping()
+        ),
+        "scope_issue_catalog": dg.AssetIn(partition_mapping=dg.AllPartitionMapping()),
+    },
+)
+def scope_repository_sample(
+    context: dg.AssetExecutionContext,
+    scope_repository_cohort: pa.Table,
+    scope_change_discussion: Dict[str, pa.Table],
+    scope_issue_catalog: Dict[str, pa.Table],
+) -> pa.Table:
+    """Audit sample of two repositories per discussion rate stratum."""
+    import numpy as np
+    import polars as pl
+
+    seed, k, cuts = 451600, 2, [0.32, 0.48]
+
+    cohort = pl.from_arrow(scope_repository_cohort)
+    catalog = (
+        pl.from_arrow(pa.concat_tables(scope_issue_catalog.values()))
+        .filter(pl.col("type") == "change")
+        .select("name", "author", "number", "closed")
+    )
+    discussion = pl.from_arrow(pa.concat_tables(scope_change_discussion.values()))
+
+    base = (
+        discussion.join(
+            catalog.rename({"author": "pr_author"}),
+            on=["name", "number"],
+            how="inner",
+        )
+        .explode("comments")
+        .unnest("comments")
+        .filter(
+            (pl.col("type") == "user")
+            & (pl.col("author") != pl.col("pr_author"))
+            & (pl.col("created") <= pl.col("closed"))
+        )
+        .group_by(["name", "number"])
+        .agg(pl.len().alias("n_user_comments"))
+        .with_columns((pl.col("n_user_comments") > 0).alias("discussed"))
+        .join(catalog.select("name", "number"), on=["name", "number"], how="right")
+        .with_columns(pl.col("discussed").fill_null(False))
+        .select("name", "number", "discussed")
+        .group_by("name")
+        .agg(
+            pl.len().alias("merged_prs"),
+            pl.col("discussed").sum().alias("discussed_prs"),
+        )
+        .with_columns((pl.col("discussed_prs") / pl.col("merged_prs")).alias("share"))
+        .join(cohort.select("name"), on="name", how="inner")
+        .sort("share")
+        .with_columns(
+            pl.col("share")
+            .cut(breaks=cuts, labels=["low", "mid", "high"])
+            .alias("stratum")
+        )
+    )
+    strata = {
+        s: base.filter(pl.col("stratum") == s)["name"].to_list()
+        for s in ["low", "mid", "high"]
+    }
+
+    rng = np.random.default_rng(seed)
+    picked: list[str] = []
+    for names in strata.values():
+        indices = rng.choice(len(names), size=k, replace=False)
+        picked.extend(names[i] for i in indices)
+
+    meta = base.select("name", "stratum", pl.col("share").alias("discussions"))
+    sample = cohort.filter(pl.col("name").is_in(picked)).join(
+        meta, on="name", how="inner"
+    )
+
+    context.log.info(
+        "Sampled %d repositories (seed=%d): %s",
+        sample.height,
+        seed,
+        sorted(picked),
+    )
+    return sample.to_arrow()
