@@ -57,6 +57,10 @@ osPolicies:
                 ARGILLA_OAUTH2_GITHUB_CLIENT_SECRET=$(s 'github-argilla-client-secret')
                 SOCIAL_AUTH_GITHUB_SCOPE=read:user,user:email
                 SOCIAL_AUTH_GITHUB_ORG_NAME=bug-request
+                USERNAME=pipelines
+                PASSWORD=$(s 'pipelines-argilla-api-key')
+                API_KEY=$(s 'pipelines-argilla-api-key')
+                WORKSPACE=bug-request
                 EOF
 
                 cat >/etc/argilla/oauth.yml <<EOF

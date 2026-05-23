@@ -114,6 +114,12 @@ data "google_secret_manager_secret_version" "together_ai_api_key" {
   version = "latest"
 }
 
+data "google_secret_manager_secret_version" "pipelines_argilla_api_key" {
+  project = data.google_project.current.project_id
+  secret  = "pipelines-argilla-api-key"
+  version = "latest"
+}
+
 data "google_compute_default_service_account" "compute_default" {
   project = data.google_project.current.project_id
 }

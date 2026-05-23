@@ -16,9 +16,9 @@ ExecStart=/usr/bin/docker run \
   --rm \
   --network host \
   --name dagster-location-%i \
+  --env-file /etc/dagster/secrets.env \
   --env-file /etc/dagster/location.env \
   --env-file /etc/dagster/locations/%i.env \
-  --env-file /etc/dagster/secrets.env \
   ${IMAGE_REPOSITORY}:${IMAGE_TAG} \
   dagster api grpc -h 127.0.0.1 -p ${GRPC_PORT} -f /usr/local/src/components/bootstrap.py
 

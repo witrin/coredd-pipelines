@@ -131,6 +131,8 @@ osPolicies:
                 DATABASE_NAME=$(v '.database.name')
                 CLOUD_BUCKET=$(v '.bucket')
                 CLOUD_PROJECT=$(v '.project')
+                ARGILLA_API_URL=http://127.0.0.1:6900
+                ARGILLA_API_KEY=$(s 'pipelines-argilla-api-key')
                 EOF
 
                 cat >/etc/dagster/locations.env <<EOF

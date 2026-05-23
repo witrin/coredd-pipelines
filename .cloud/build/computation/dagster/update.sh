@@ -357,6 +357,7 @@ ensure_cloud_run_job() {
       ${secrets:+--set-secrets="$(echo "$secrets" | paste -sd,)"} \
       --set-env-vars="CLOUD_BUCKET=${bucket}" \
       --set-env-vars="CLOUD_PROJECT=${project}" \
+      --set-env-vars="ARGILLA_API_URL=https://evaluation.bug-request.dev" \
       --set-env-vars="DAGSTER_LOCATION=$branch" \
       --quiet
   done

@@ -475,6 +475,8 @@ class ChangeOutlineCollector:
                   number
                   title
                   bodyText
+                  body
+                  author { __typename }
                   changedFiles
                   files(first: 100) {
                     pageInfo { hasNextPage endCursor }
@@ -517,7 +519,8 @@ class ChangeOutlineCollector:
                     "name": self.repository,
                     "number": number,
                     "title": change.get("title") or "",
-                    "body": change.get("bodyText") or "",
+                    "text": change.get("bodyText") or "",
+                    "markdown": change.get("body") or "",
                     "files": [
                         {
                             "path": node.get("path"),
@@ -537,7 +540,8 @@ class ChangeOutlineCollector:
                     ("name", pa.string()),
                     ("number", pa.int64()),
                     ("title", pa.string()),
-                    ("body", pa.string()),
+                    ("text", pa.string()),
+                    ("markdown", pa.string()),
                     (
                         "files",
                         pa.list_(

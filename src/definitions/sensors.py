@@ -1,10 +1,13 @@
+import json
 import math
 import hashlib
+import os
 from datetime import date, datetime
 
 from components.decorator import asset_sensor
 from components.io import TableAssetStorage
 from benchmark.definitions.partitions import Shard
+from benchmark.definitions.jobs import filter_annotation_collect, filter_annotation_request
 from benchmark.attribution.reference import ValidationPartitionReport
 
 import dagster as dg
@@ -471,3 +474,103 @@ def ingest_validation_sources_partition_prune_sensor(context: dg.SensorEvaluatio
 
     if watermark is not None:
         context.update_cursor(watermark.isoformat())
+
+
+@dg.sensor(
+    jobs=[filter_annotation_request, filter_annotation_collect],
+    minimum_interval_seconds=300,
+    default_status=dg.DefaultSensorStatus.STOPPED,
+)
+def filter_annotation_sensor(context: dg.SensorEvaluationContext):
+    """Drive the batched annotation loop."""
+    import argilla as rg
+
+    threshold = 100
+    size = 20
+
+    cursor = json.loads(context.cursor) if context.cursor else {"last_completed": -1}
+
+    try:
+        client = rg.Argilla(
+            api_url=os.environ["ARGILLA_API_URL"],
+            api_key=os.environ["ARGILLA_API_KEY"],
+        )
+        dataset = client.datasets(name="change-filter-labels", workspace="bug-request")
+    except Exception as exc:
+        return dg.SkipReason(f"Argilla unavailable: {exc!r}")
+
+    if dataset is None or int(dataset.progress()["total"]) == 0:
+        return dg.SensorResult(
+            run_requests=[
+                dg.RunRequest(
+                    job_name="filter_annotation_request",
+                    run_config={
+                        "ops": {
+                            "filter_annotation_request_op": {
+                                "config": {"batch": 0, "size": size}
+                            }
+                        }
+                    },
+                )
+            ],
+            cursor=json.dumps({"last_completed": 0}),
+        )
+
+    progress = dataset.progress()
+    total = int(progress["total"])
+    completed = int(progress["completed"])
+
+    if int(progress["pending"]) > 0:
+        return dg.SkipReason(f"{progress['pending']} records still pending annotation.")
+
+    query = rg.Query(filter=rg.Filter([("status", "==", "completed")]))
+    intrinsic = 0
+    for record in dataset.records(query=query, with_responses=True):
+        for response in record.responses:
+            if (
+                response.question_name == "categories"
+                and response.status == rg.ResponseStatus.submitted
+                and response.value
+                and "intrinsic" in response.value
+            ):
+                intrinsic += 1
+                break
+    context.log.info("Intrinsic records so far: %d / %d", intrinsic, threshold)
+
+    pull = dg.RunRequest(
+        run_key=f"filter-pull-{completed}",
+        job_name="filter_annotation_collect",
+        run_config={"ops": {"filter_annotation_collect_op": {"config": {}}}},
+    )
+
+    # Stop condition reached: only refresh the annotation snapshot.
+    if intrinsic >= threshold:
+        return dg.SensorResult(
+            run_requests=[pull],
+            cursor=json.dumps({"last_completed": completed}),
+        )
+
+    # Only push the next batch once new annotations have completed.
+    # Pool exhaustion is guarded by the push op itself (raises when the
+    # permutation offset runs past the pool), so no separate height check here.
+    if completed <= cursor["last_completed"]:
+        return dg.SkipReason("No new completions since the last push.")
+
+    batch = total // size
+    return dg.SensorResult(
+        run_requests=[
+            pull,
+            dg.RunRequest(
+                run_key=f"filter-push-{total}",
+                job_name="filter_annotation_request",
+                run_config={
+                    "ops": {
+                        "filter_annotation_request_op": {
+                            "config": {"batch": batch, "size": size}
+                        }
+                    }
+                },
+            ),
+        ],
+        cursor=json.dumps({"last_completed": completed}),
+    )
