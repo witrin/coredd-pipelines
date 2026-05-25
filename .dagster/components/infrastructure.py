@@ -39,7 +39,12 @@ class RequesterProxy:
 
         if self.resume is not None and self.resume > now:
             seconds = max(int((self.resume - now).total_seconds()), 1)
-            raise dg.RetryRequested(seconds_to_wait=seconds, max_retries=3)
+            raise dg.Failure(
+                description=(
+                    f"Rate limit active; resume not before "
+                    f"{self.resume.isoformat()} (~{seconds}s)."
+                )
+            )
 
         method = getattr(self._requester, method_name)
 
@@ -73,8 +78,11 @@ class RequesterProxy:
 
             seconds = max(int((resume - now).total_seconds()), 1)
 
-            raise dg.RetryRequested(
-                seconds_to_wait=seconds, max_retries=3
+            raise dg.Failure(
+                description=(
+                    f"Rate limit hit; resume not before "
+                    f"{resume.isoformat()} (~{seconds}s)."
+                )
             ) from exception
 
     def __getattr__(self, name: str):
