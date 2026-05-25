@@ -8,7 +8,9 @@ import json
 from datetime import date
 from typing import Any, Callable, List, Optional
 
+import dagster as dg
 import pyarrow as pa
+from github.GithubException import RateLimitExceededException
 
 from benchmark.scope.utils import RangeSplitter
 
@@ -99,6 +101,8 @@ class ChangeExtractor:
                         "payload": json.dumps(items),
                     }
                 )
+        except (dg.Failure, RateLimitExceededException):
+            raise
         except Exception as e:
             self._log(f"Failed to get commits for PR {number}: {e}")
 
@@ -115,6 +119,8 @@ class ChangeExtractor:
                         "payload": json.dumps(items),
                     }
                 )
+        except (dg.Failure, RateLimitExceededException):
+            raise
         except Exception as e:
             self._log(f"Failed to get reviews for PR {number}: {e}")
 
@@ -131,6 +137,8 @@ class ChangeExtractor:
                         "payload": json.dumps(items),
                     }
                 )
+        except (dg.Failure, RateLimitExceededException):
+            raise
         except Exception as e:
             self._log(f"Failed to get review comments for PR {number}: {e}")
 
@@ -150,6 +158,8 @@ class ChangeExtractor:
                     "payload": json.dumps(payload),
                 }
             )
+        except (dg.Failure, RateLimitExceededException):
+            raise
         except Exception as e:
             self._log(f"Failed to get requested reviewers for PR {number}: {e}")
 
@@ -166,6 +176,8 @@ class ChangeExtractor:
                         "payload": json.dumps(items),
                     }
                 )
+        except (dg.Failure, RateLimitExceededException):
+            raise
         except Exception as e:
             self._log(f"Failed to get comments for PR {number}: {e}")
 
@@ -196,6 +208,8 @@ class ChangeExtractor:
                         "payload": json.dumps(items),
                     }
                 )
+        except (dg.Failure, RateLimitExceededException):
+            raise
         except Exception as e:
             self._log(f"Failed to get timeline for PR {number}: {e}")
 
@@ -296,6 +310,8 @@ class IssueExtractor:
                         "payload": json.dumps(items),
                     }
                 )
+        except (dg.Failure, RateLimitExceededException):
+            raise
         except Exception as e:
             self._log(f"Failed to get comments for issue {number}: {e}")
 
@@ -326,6 +342,8 @@ class IssueExtractor:
                         "payload": json.dumps(items),
                     }
                 )
+        except (dg.Failure, RateLimitExceededException):
+            raise
         except Exception as e:
             self._log(f"Failed to get timeline for issue {number}: {e}")
 

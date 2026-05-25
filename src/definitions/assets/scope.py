@@ -843,7 +843,7 @@ def scope_change_discussion(
 
 
 @asset(
-    metadata={"version": "6.0.0"},
+    metadata={"version": "7.0.0"},
     partitions_def=partitions.ingest_raw_partition,
     group_name="scope",
     kinds={"github"},
