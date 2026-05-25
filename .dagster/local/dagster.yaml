@@ -15,11 +15,7 @@ local_artifact_storage:
     base_dir: /var/lib/dagster
 
 concurrency:
-  pools:
-    default_limit: 50
-    granularity: 'run'
-  runs:
-    max_concurrent_runs: 50
+  default_op_concurrency_limit: 50
 
 run_coordinator:
   module: dagster.core.run_coordinator
@@ -28,6 +24,7 @@ run_coordinator:
     dequeue_interval_seconds: 1
     dequeue_use_threads: true
     dequeue_num_workers: 10
+    max_concurrent_runs: 50
 
 telemetry:
   enabled: false
