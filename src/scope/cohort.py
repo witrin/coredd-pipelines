@@ -612,6 +612,393 @@ class ChangeOutlineCollector:
             )
 
 
+class ReferenceEdgeCollector:
+    """Collects related issues and PRs per merged pull request via GraphQL."""
+
+    def __init__(
+        self,
+        client: Any,
+        repository: str,
+        log: Optional[Callable[[str], None]] = None,
+    ):
+        self.client = client
+        self.repository = repository
+        self.owner, self.name = repository.split("/", 1)
+        self._batch_size = 20
+        self._log = log or (lambda msg: None)
+
+    def collect(self, numbers: List[int]) -> pa.Table:
+        rows: List[Dict[str, Any]] = []
+        index = 0
+        while index < len(numbers):
+            chunk = numbers[index : index + self._batch_size]
+            try:
+                payload = self._fetch_batch(chunk)
+            except Exception as e:
+                if any(t in str(e).lower() for t in ("complexity", "timeout")):
+                    self._batch_size = max(5, self._batch_size // 2)
+                    self._log(f"Reduced reference batch size to {self._batch_size}")
+                    continue
+                raise
+            for number, pr in payload.items():
+                rows.extend(self._closing_edges(number, pr))
+                rows.extend(self._timeline_edges(number, pr))
+            index += len(chunk)
+        return self._build_table(rows)
+
+    def _fetch_batch(self, numbers: List[int]) -> Dict[int, Dict[str, Any]]:
+        variables: Dict[str, Any] = {
+            "owner": self.owner,
+            "name": self.name,
+            "n": 50,
+        }
+        declarations: List[str] = []
+        fragments: List[str] = []
+
+        fragment_template = """
+            pr{index}: pullRequest(number: $num{index}) {{
+              number
+              mergedAt
+              author {{ __typename login }}
+              closingIssuesReferences(first: $n) {{
+                pageInfo {{ hasNextPage endCursor }}
+                nodes {{ __typename number repository {{ nameWithOwner }} }}
+              }}
+              timelineItems(
+                first: $n
+                itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT, DISCONNECTED_EVENT, REFERENCED_EVENT]
+              ) {{
+                pageInfo {{ hasNextPage endCursor }}
+                nodes {{
+                  __typename
+                  ... on CrossReferencedEvent {{
+                    createdAt willCloseTarget isCrossRepository
+                    actor {{ __typename login }}
+                    source {{
+                      __typename
+                      ... on Issue       {{ number repository {{ nameWithOwner }} }}
+                      ... on PullRequest {{ number repository {{ nameWithOwner }} }}
+                    }}
+                  }}
+                  ... on ConnectedEvent {{
+                    createdAt
+                    actor {{ __typename login }}
+                    subject {{
+                      __typename
+                      ... on Issue       {{ number repository {{ nameWithOwner }} }}
+                      ... on PullRequest {{ number repository {{ nameWithOwner }} }}
+                    }}
+                  }}
+                  ... on DisconnectedEvent {{
+                    createdAt
+                    actor {{ __typename login }}
+                    subject {{
+                      __typename
+                      ... on Issue       {{ number repository {{ nameWithOwner }} }}
+                      ... on PullRequest {{ number repository {{ nameWithOwner }} }}
+                    }}
+                  }}
+                  ... on ReferencedEvent {{
+                    createdAt isCrossRepository
+                    commit {{ oid }}
+                    actor {{ __typename login }}
+                    subject {{
+                      __typename
+                      ... on Issue       {{ number repository {{ nameWithOwner }} }}
+                      ... on PullRequest {{ number repository {{ nameWithOwner }} }}
+                    }}
+                  }}
+                }}
+              }}
+            }}
+        """
+
+        for index, number in enumerate(numbers):
+            variables[f"num{index}"] = int(number)
+            declarations.append(f"$num{index}: Int!")
+            fragments.append(fragment_template.format(index=index))
+
+        query = (
+            f"query References($owner: String!, $name: String!, $n: Int!, {', '.join(declarations)})"
+            + " { repository(owner: $owner, name: $name) { "
+            + " ".join(fragments)
+            + " } }"
+        )
+
+        response = self.client._Github__requester.graphql_query(query, variables)
+        repository = response[1]["data"]["repository"]
+
+        result: Dict[int, Dict[str, Any]] = {}
+        for index, _ in enumerate(numbers):
+            pull_request = repository.get(f"pr{index}")
+            if not pull_request:
+                continue
+
+            number = int(pull_request["number"])
+
+            closing_response = pull_request.get("closingIssuesReferences") or {}
+            closing_nodes = list(closing_response.get("nodes") or [])
+            self._paginate_closing(number, closing_nodes, closing_response.get("pageInfo") or {})
+            pull_request["closingIssuesReferences"] = {"nodes": closing_nodes}
+
+            timeline_response = pull_request.get("timelineItems") or {}
+            timeline_nodes = list(timeline_response.get("nodes") or [])
+            self._paginate_timeline(number, timeline_nodes, timeline_response.get("pageInfo") or {})
+            pull_request["timelineItems"] = {"nodes": timeline_nodes}
+
+            result[number] = pull_request
+
+        return result
+
+    def _paginate_closing(
+        self,
+        number: int,
+        nodes: List[Dict[str, Any]],
+        page_info: Dict[str, Any],
+    ) -> None:
+        pages = 1
+        cursor = page_info.get("endCursor")
+
+        schema = """
+            query ClosingPage($owner: String!, $name: String!, $num: Int!, $n: Int!, $cursor: String!) {
+                repository(owner: $owner, name: $name) {
+                    pullRequest(number: $num) {
+                        closingIssuesReferences(first: $n, after: $cursor) {
+                            pageInfo { hasNextPage endCursor }
+                            nodes { __typename number repository { nameWithOwner } }
+                        }
+                    }
+                }
+            }
+        """
+
+        while page_info.get("hasNextPage") and pages < 10:
+            if not cursor:
+                self._log(f"Missing closing cursor for change {number}")
+                break
+
+            response = self.client._Github__requester.graphql_query(
+                schema,
+                {
+                    "owner": self.owner,
+                    "name": self.name,
+                    "num": number,
+                    "n": 50,
+                    "cursor": cursor,
+                },
+            )
+            closing_response = (
+                response[1]["data"]["repository"]["pullRequest"].get("closingIssuesReferences") or {}
+            )
+            nodes.extend(closing_response.get("nodes") or [])
+
+            page_info = closing_response.get("pageInfo") or {}
+            cursor = page_info.get("endCursor")
+            pages += 1
+
+        if page_info.get("hasNextPage"):
+            self._log(
+                f"Closing pagination limit reached for change {number} with {pages} pages"
+            )
+
+    def _paginate_timeline(
+        self,
+        number: int,
+        nodes: List[Dict[str, Any]],
+        page_info: Dict[str, Any],
+    ) -> None:
+        pages = 1
+        cursor = page_info.get("endCursor")
+
+        schema = """
+            query TimelinePage($owner: String!, $name: String!, $num: Int!, $n: Int!, $cursor: String!) {
+                repository(owner: $owner, name: $name) {
+                    pullRequest(number: $num) {
+                        timelineItems(
+                            first: $n
+                            after: $cursor
+                            itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT, DISCONNECTED_EVENT, REFERENCED_EVENT]
+                        ) {
+                            pageInfo { hasNextPage endCursor }
+                            nodes {
+                                __typename
+                                ... on CrossReferencedEvent {
+                                    createdAt willCloseTarget isCrossRepository
+                                    actor { __typename login }
+                                    source {
+                                        __typename
+                                        ... on Issue       { number repository { nameWithOwner } }
+                                        ... on PullRequest { number repository { nameWithOwner } }
+                                    }
+                                }
+                                ... on ConnectedEvent {
+                                    createdAt
+                                    actor { __typename login }
+                                    subject {
+                                        __typename
+                                        ... on Issue       { number repository { nameWithOwner } }
+                                        ... on PullRequest { number repository { nameWithOwner } }
+                                    }
+                                }
+                                ... on DisconnectedEvent {
+                                    createdAt
+                                    actor { __typename login }
+                                    subject {
+                                        __typename
+                                        ... on Issue       { number repository { nameWithOwner } }
+                                        ... on PullRequest { number repository { nameWithOwner } }
+                                    }
+                                }
+                                ... on ReferencedEvent {
+                                    createdAt isCrossRepository
+                                    commit { oid }
+                                    actor { __typename login }
+                                    subject {
+                                        __typename
+                                        ... on Issue       { number repository { nameWithOwner } }
+                                        ... on PullRequest { number repository { nameWithOwner } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        """
+
+        while page_info.get("hasNextPage") and pages < 10:
+            if not cursor:
+                self._log(f"Missing timeline cursor for change {number}")
+                break
+
+            response = self.client._Github__requester.graphql_query(
+                schema,
+                {
+                    "owner": self.owner,
+                    "name": self.name,
+                    "num": number,
+                    "n": 50,
+                    "cursor": cursor,
+                },
+            )
+            timeline_response = (
+                response[1]["data"]["repository"]["pullRequest"].get("timelineItems") or {}
+            )
+            nodes.extend(timeline_response.get("nodes") or [])
+
+            page_info = timeline_response.get("pageInfo") or {}
+            cursor = page_info.get("endCursor")
+            pages += 1
+
+        if page_info.get("hasNextPage"):
+            self._log(
+                f"Timeline pagination limit reached for change {number} with {pages} pages"
+            )
+
+    def _closing_edges(self, number: int, pr: Dict[str, Any]) -> List[Dict[str, Any]]:
+        creation = pr.get("mergedAt")
+        author = (pr.get("author") or {}).get("login")
+        edges = []
+        for node in pr.get("closingIssuesReferences", {}).get("nodes") or []:
+            target = self._related(node)
+            if target is None:
+                continue
+            edges.append(
+                {
+                    "name": self.repository,
+                    "number": number,
+                    "kind": "closing",
+                    "related": target,
+                    "close": True,
+                    "creation": creation,
+                    "actor": author,
+                    "commit": None,
+                }
+            )
+        return edges
+
+    def _timeline_edges(self, number: int, pr: Dict[str, Any]) -> List[Dict[str, Any]]:
+        edges = []
+        for node in pr.get("timelineItems", {}).get("nodes") or []:
+            classification = self._classify(node)
+            if classification is None:
+                continue
+            kind, target_field, close, commit_oid = classification
+            target = self._related(node.get(target_field) or {})
+            if target is None:
+                continue
+            edges.append(
+                {
+                    "name": self.repository,
+                    "number": number,
+                    "kind": kind,
+                    "related": target,
+                    "close": close,
+                    "creation": node.get("createdAt"),
+                    "actor": (node.get("actor") or {}).get("login"),
+                    "commit": commit_oid,
+                }
+            )
+        return edges
+
+    def _classify(
+        self, node: Dict[str, Any]
+    ) -> Optional[Tuple[str, str, bool, Optional[str]]]:
+        typename = node.get("__typename")
+        if typename == "CrossReferencedEvent":
+            return "cross_referenced", "source", bool(node.get("willCloseTarget")), None
+        if typename == "ConnectedEvent":
+            return "connected", "subject", False, None
+        if typename == "DisconnectedEvent":
+            return "disconnected", "subject", False, None
+        if typename == "ReferencedEvent":
+            return "commit_referenced", "subject", False, (node.get("commit") or {}).get("oid")
+        return None
+
+    def _related(self, node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not node or "number" not in node:
+            return None
+        typename = node.get("__typename")
+        if typename == "Issue":
+            kind = "issue"
+        elif typename == "PullRequest":
+            kind = "pr"
+        else:
+            return None
+        repository = ((node.get("repository") or {}).get("nameWithOwner")) or self.repository
+        return {
+            "repository": repository,
+            "number": int(node["number"]),
+            "kind": kind,
+        }
+
+    def _build_table(self, rows: List[Dict[str, Any]]) -> pa.Table:
+        schema = pa.schema(
+            [
+                ("name", pa.string()),
+                ("number", pa.int64()),
+                ("kind", pa.string()),
+                (
+                    "related",
+                    pa.struct(
+                        [
+                            ("repository", pa.string()),
+                            ("number", pa.int64()),
+                            ("kind", pa.string()),
+                        ]
+                    ),
+                ),
+                ("close", pa.bool_()),
+                ("creation", pa.string()),
+                ("actor", pa.string()),
+                ("commit", pa.string()),
+            ]
+        )
+        if not rows:
+            return pa.Table.from_pylist([], schema=schema)
+        return pa.Table.from_pylist(rows, schema=schema)
+
+
 class CommentCursor:
     """Iterator over PR conversation and review-thread comments with batching."""
 

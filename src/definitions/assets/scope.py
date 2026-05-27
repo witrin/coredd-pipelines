@@ -19,6 +19,7 @@ from benchmark.scope.cohort import (
     ChangeReviewCollector,
     CommitCursor,
     IssueCollector,
+    ReferenceEdgeCollector,
 )
 from benchmark.scope.filtering import TrunkBatch
 from benchmark.scope.ingestion import ChangeExtractor, IssueExtractor, SourceExtractor
@@ -886,6 +887,56 @@ def scope_change_raw(
 
     context.log.info(
         "Extracted %d raw records for %s.",
+        table.num_rows,
+        repository,
+    )
+
+    return table
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    partitions_def=partitions.ingest_raw_partition,
+    group_name="scope",
+    kinds={"github"},
+    pool="github",
+)
+def scope_reference_edge(
+    context: dg.AssetExecutionContext,
+    scope_repository_sample: pa.Table,
+    scope_change_raw: pa.Table,
+    github: GithubResource,
+) -> pa.Table:
+    """Edges from each merged PR to related issues and PRs."""
+    import polars as pl
+
+    partition = context.partition_key
+    df = pl.from_arrow(scope_repository_sample)
+    names = sorted(df["name"].to_list())
+
+    shard = partitions.Shard.from_key(partition)
+    repository = partitions.Shard.from_space(shard.space, names)
+
+    numbers = (
+        pl.from_arrow(scope_change_raw)
+        .filter(pl.col("type") == "pr")
+        .get_column("number")
+        .unique()
+        .sort()
+        .to_list()
+    )
+
+    context.log.info(
+        "Collecting references for %s across %d pull requests",
+        repository,
+        len(numbers),
+    )
+
+    collector = ReferenceEdgeCollector(github.client(), repository, log=context.log.info)
+    table = collector.collect([int(n) for n in numbers])
+
+    context.log.info(
+        "Collected %d reference edges for %s.",
         table.num_rows,
         repository,
     )
