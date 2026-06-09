@@ -1,0 +1,44 @@
+Assign the provided GitHub pull request to one or more applicable categories.
+
+### Definitions
+A **defect** is a flaw within the repository's Python source files (in any folder) that leads or could lead to faulty execution. Non-Python artifacts (Markdown, READMEs, shell scripts, YAML configs) are excluded and cannot contain defects.
+
+* **Intrinsic**: Fixes a flaw originating from within this codebase. Typical instances include resolving logical mistakes, faulty conditions, failure-inducing typos, or incorrect internal API usage.
+* **Extrinsic**: Fixes a flaw triggered by external factors. The original code was sound, but outside modifications (like environment shifts or dependency upgrades) resulted in an observable breakdown that this PR resolves.
+* **Other**: Encompasses modifications that do not fix flaws. This includes refactoring, adding features, updating dependencies without breakage, documentation, configuration, and alterations to non-Python artifacts.
+
+### Decision Rules
+Review the description and file modifications. Determine the root cause for every fix applied. Include "Other" if the PR contains non-fix modifications. PRs containing exclusively non-fix work get "Other" exclusively. A PR resolving an external flaw while simultaneously performing unrelated refactoring gets both "Extrinsic" and "Other".
+
+**Observable Failure**: Any breakage during software usage or development (e.g., CI failures, build/install errors, test failures, runtime crashes, or developer-reported bugs). A connected bug ticket serves as proof but is not mandatory.
+
+### Edge Cases
+* **Mixed Work**: If a PR combines unrelated tasks, assign every relevant category.
+* **No Source Code**: PRs altering zero Python source files get "Other" exclusively, irrespective of the title.
+* **Reverts**: Assign "Intrinsic" if the reverted commit caused a flaw. Assign "Other" if it merely rolled back an unneeded or premature feature.
+* **Deprecation**: Assign "Extrinsic" if adapting to an external dependency's deprecation where the API is already deleted and causing failures. Assign "Other" if the API is merely flagged as deprecated but remains functional.
+* **Releases**: PRs that only increment versions and document releases get "Other".
+* **Non-Source/Docs/Config**: PRs restricted to documentation, configuration, or non-Python files get "Other" exclusively, even if described as fixes. This applies to Python docstring edits: they alter source files but fix no execution flaws, thus receiving "Other".
+* **Fix Mechanisms**: Introducing a new helper, argument, or parameter strictly to implement a fix is part of that fix and does not independently trigger "Other".
+* **Tests and Examples**: Python test and example files count as source code and can contain defects. Fixing a flaw in them that caused an observable failure is a correction (classify by the flaw's origin). However, updating tests to match an API shift or moving examples to an existing internal API without fixing an actual failure just improves internal quality and gets "Other".
+
+### Pull Request Details
+**Title:** {{ title }}
+**Description:** {{ body }}
+
+{% if "files" in features %}
+### Modified Files
+{% for file in files %}
+- **Name:** {{ file.name }} | **Action:** {{ file.action }} | **Added:** {{ file.added }} | **Removed:** {{ file.removed }}
+{% endfor %}
+{% endif %}
+
+{% if "issues" in features %}
+### Related Issues
+{% for issue in issues %}
+- **Number:** {{ issue.number }} | **Title:** {{ issue.title }}
+  **Body:** {{ issue.body }}
+{% endfor %}
+{% endif %}
+
+Return a JSON object of the form {"labels": [...]} where the array contains 1 to 3 strings drawn from "Intrinsic", "Extrinsic", "Other", with no duplicates. Output only the JSON object: no prose, no explanation, no markdown fences.

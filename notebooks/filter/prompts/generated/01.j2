@@ -1,0 +1,48 @@
+Classify the given pull request into one or more of the following categories: Intrinsic, Extrinsic, Other.
+
+For each pull request, decide which of three categories apply. Multiple categories can apply to a single change.
+
+A defect is a deficiency in the Python source code of this repository that is or can become the cause of incorrect behavior. Python files in any directory of the repository qualify. Other artefacts such as YAML configuration, shell scripts, Markdown documentation, and README files are not source code and cannot host defects.
+
+Intrinsic. The change corrects a defect whose origin is itself a change in this repository. Typical cases include fixing a logic error, an incorrect condition, a typo that caused a failure, or a misused API call within the project.
+
+Extrinsic. The change corrects a defect whose origin lies outside the repository. The code was correct when written, but a later external change such as a dependency update or an environment change caused observable failure that this change addresses.
+
+Other. The change includes work that does not correct a defect. This covers refactoring, new features, dependency updates without observed failure, documentation, configuration, and any work on non-source artefacts.
+
+Decision. Inspect the file list and the description. For each correction identified, decide where the defect originates. Add Other if the change also contains work that does not correct a defect. A pull request with only non-corrective work receives Other alone. A pull request that fixes a defect from outside the repository and also adds unrelated refactoring receives Extrinsic and Other.
+
+Observable failure includes any breakage encountered in development or use of the software, such as runtime errors, test failures, build or installation failures, CI failures, and developer-reported behavior. A linked issue or bug ticket is one form of evidence but not a requirement.
+
+Edge Cases. Several patterns recur and warrant explicit guidance. If a pull request bundles unrelated work, select all categories that apply. A pull request that touches no source code receives Other alone regardless of how the change is titled.
+
+A revert receives Intrinsic if the reverted change introduced a defect, and Other if the reverted change introduced a feature that turned out to be premature or unwanted.
+
+Adapting code in response to deprecation warnings from an external dependency receives Extrinsic if the deprecated API has already been removed and the code now fails. If the API has only been marked deprecated and the code still works, the change receives Other.
+
+A release pull request that bumps the version and documents the release receives Other.
+
+Documentation-only changes, configuration-only changes, and changes that touch only non-source artefacts receive Other regardless of any fix-oriented framing. This includes changes that touch only docstrings within Python source files: although they modify source code, they do not correct a defect and receive Other.
+
+A new parameter, argument, or helper introduced as the mechanism of a defect correction is part of that correction and not a separate feature, so it does not by itself add Other.
+
+Test and example code written in Python are source code and can host defects. A defect in test or example code that produced an observable failure is a correction and is classified by the origin of that defect. In contrast, migrating example code to an already existing internal API, or adjusting tests to follow an API change, where no defect is corrected and no failure was observed, improves internal qualities rather than correcting a defect and receives Other.
+
+Pull Request Title: {{ title }}
+Pull Request Description: {{ body }}
+
+{% if "files" in features %}
+Files:
+{% for file in files %}
+Name: {{ file.name }}, Action: {{ file.action }}, Added: {{ file.added }}, Removed: {{ file.removed }}
+{% endfor %}
+{% endif %}
+
+{% if "issues" in features %}
+Related Issues:
+{% for issue in issues %}
+Number: {{ issue.number }}, Title: {{ issue.title }}, Body: {{ issue.body }}
+{% endfor %}
+{% endif %}
+
+Return a JSON object of the form {"labels": [...]} where the array contains 1 to 3 strings drawn from "Intrinsic", "Extrinsic", "Other", with no duplicates. Output only the JSON object: no prose, no explanation, no markdown fences.

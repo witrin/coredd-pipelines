@@ -1,0 +1,46 @@
+Categorize the supplied pull request into the relevant modification types using the following criteria.
+
+Assess the modification to identify which classifications apply. A single submission may receive multiple classifications.
+
+A flaw is a shortcoming within the Python code of this project that causes or might cause faulty execution. These files can reside in any folder. Non-code assets like YAML setups, bash scripts, markdown texts, and readme documents are not code and cannot contain flaws.
+
+Intrinsic: The modification resolves a flaw that started within this project. Common instances are repairing faulty logic, wrong conditions, typos leading to crashes, or incorrect internal API usage.
+
+Extrinsic: The modification resolves a flaw originating externally. The code was initially sound, but a subsequent outside alteration like a library upgrade or system environment shift triggered a visible breakdown that this modification fixes.
+
+Other: The modification involves tasks that do not fix a flaw. This encompasses restructuring, adding capabilities, upgrading libraries without visible breakdowns, writing texts, adjusting setups, and altering non-code assets.
+
+Visible breakdown encompasses any disruption during creation or operation, like execution crashes, testing failures, compilation or setup breakdowns, continuous integration breakdowns, and creator-noted issues. A connected ticket is proof but not mandatory.
+
+Evaluation process:
+Review the asset list and summary. For every repair found, determine the flaw source. Include Other if the submission also has non-repair tasks. A submission with exclusively non-repair tasks gets only Other. A submission fixing an external flaw while also doing unrelated restructuring gets both Extrinsic and Other.
+
+Specific scenarios:
+If a submission combines disconnected tasks, pick every relevant classification.
+A submission altering zero code files gets only Other, ignoring its heading.
+A rollback gets Intrinsic if the rolled-back modification created a flaw, and Other if it introduced an early or unneeded capability.
+Modifying code due to external library deprecation alerts gets Extrinsic if the deprecated function is already gone and the code now breaks. If the function is merely flagged as deprecated and the code still functions, it gets Other.
+A distribution submission that increments the version and records the distribution gets Other.
+Submissions restricted to texts, setups, or non-code assets get Other despite any repair-focused wording. This covers submissions altering only documentation strings inside Python files; while they change code files, they do not fix a flaw and get Other.
+Adding a variable, input, or utility specifically to execute a flaw repair is part of that repair and does not independently trigger Other.
+Python test and example code counts as repository code and can contain flaws. A flaw in them causing a visible breakdown is a repair classified by the flaw source. Conversely, moving example code to a pre-existing internal function, or tweaking tests to match an API shift without fixing a flaw or visible breakdown, enhances internal traits rather than fixing a flaw, receiving Other.
+
+Pull Request Title: {{ title }}
+Pull Request Description: {{ body }}
+
+{% if "files" in features %}
+Modified Assets:
+{% for file in files %}
+File: {{ file.name }}, Action: {{ file.action }}, Additions: {{ file.added }}, Deletions: {{ file.removed }}
+{% endfor %}
+{% endif %}
+
+{% if "issues" in features %}
+Connected Tickets:
+{% for issue in issues %}
+Ticket {{ issue.number }}: {{ issue.title }}
+Description: {{ issue.body }}
+{% endfor %}
+{% endif %}
+
+Return a JSON object of the form {"labels": [...]} where the array contains 1 to 3 strings drawn from "Intrinsic", "Extrinsic", "Other", with no duplicates. Output only the JSON object: no prose, no explanation, no markdown fences.
