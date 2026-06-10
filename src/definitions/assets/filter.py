@@ -326,6 +326,7 @@ def filter_change_labels(
         base_url="https://api.together.xyz/v1",
         temperature=0.0,
         max_tokens=4096,
+        streaming=True,
     )
     graph = ClassifyGraph(classify=ClassifyNode(llm=llm))
 
