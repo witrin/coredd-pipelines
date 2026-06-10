@@ -9,6 +9,7 @@ import pyarrow as pa
 import pyarrow.csv as pacsv
 
 from components.decorator import asset
+from benchmark.definitions import partitions
 
 
 @asset(
@@ -288,3 +289,58 @@ def filter_change_corpus(
     context.log.info("Prepared %d changes.", evaluation.height)
 
     return evaluation.to_arrow()
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    partitions_def=partitions.filter_change_labels_partition,
+    group_name="filter",
+    kinds={"gcs"},
+)
+def filter_change_labels(
+    context: dg.AssetExecutionContext,
+    filter_change_corpus: pa.Table,
+) -> pa.Table:
+    """Intrinsic/extrinsic/other labels per pull request, sharded over the change corpus."""
+    import os
+
+    from langchain_openai import ChatOpenAI
+    from benchmark.filter.classify import ClassifyNode
+    from benchmark.filter.graph import ClassifyGraph
+
+    partition = context.partition_key
+    bucket = partitions.Shard.from_key(partition)
+
+    frame = pl.from_arrow(filter_change_corpus).select(
+        "name", "number", "title", "body"
+    )
+    rows = [
+        row
+        for row in frame.iter_rows(named=True)
+        if bucket.key(f"{row['name']}#{row['number']}") == partition
+    ]
+
+    llm = ChatOpenAI(
+        model="Qwen/Qwen3.7-Max",
+        api_key=os.getenv("TOGETHER_AI_API_KEY"),
+        base_url="https://api.together.xyz/v1",
+        temperature=0.0,
+        max_tokens=4096,
+    )
+    graph = ClassifyGraph(classify=ClassifyNode(llm=llm))
+
+    names: list[str] = []
+    numbers: list[int] = []
+    labels: list[list[str]] = []
+    for row in rows:
+        output = graph.invoke(
+            title=row["title"] or "",
+            description=row["body"] or "",
+        )
+        names.append(row["name"])
+        numbers.append(row["number"])
+        labels.append(output["labels"])
+
+    context.log.info("Classified %d changes in %s", len(rows), partition)
+
+    return pa.table({"name": names, "number": numbers, "labels": labels})

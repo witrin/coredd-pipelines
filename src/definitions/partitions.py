@@ -233,6 +233,10 @@ scope_change_discussion_partition = dg.DynamicPartitionsDefinition(
     name="scope_change_discussion",
 )
 
+filter_change_labels_partition = dg.DynamicPartitionsDefinition(
+    name="filter_change_labels",
+)
+
 ingest_raw_partition = dg.DynamicPartitionsDefinition(name="ingest_raw")
 
 ingest_source_partition = dg.DynamicPartitionsDefinition(name="ingest_source")
