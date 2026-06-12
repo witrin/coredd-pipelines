@@ -278,7 +278,8 @@ class TestKnowledgeGraphSearchNode(unittest.TestCase):
         factory_args, factory_kwargs = factory.call_args
         self.assertEqual(factory_args, (llm,))
         self.assertIs(factory_kwargs["tools"], tool_node)
-        self.assertIs(factory_kwargs["response_format"], SearchResult)
+        self.assertIs(factory_kwargs["response_format"][1], SearchResult)
+        self.assertIn("json", factory_kwargs["response_format"][0].lower())
         self.assertIsInstance(factory_kwargs["pre_model_hook"], ResolvedErrorFilter)
         self.assertIsInstance(factory_kwargs["post_model_hook"], TurnBudget)
         self.assertIn("blame", factory_kwargs["prompt"])
@@ -492,7 +493,8 @@ class TestRepositorySearchNode(unittest.TestCase):
         factory_args, factory_kwargs = factory.call_args
         self.assertEqual(factory_args, (llm,))
         self.assertIs(factory_kwargs["tools"], tool_node)
-        self.assertIs(factory_kwargs["response_format"], SearchResult)
+        self.assertIs(factory_kwargs["response_format"][1], SearchResult)
+        self.assertIn("json", factory_kwargs["response_format"][0].lower())
         self.assertIsInstance(factory_kwargs["pre_model_hook"], ResolvedErrorFilter)
         self.assertIsInstance(factory_kwargs["post_model_hook"], TurnBudget)
         self.assertIn("blame", factory_kwargs["prompt"])

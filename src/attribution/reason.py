@@ -303,8 +303,8 @@ class ExplainNode:
             )
 
         runs = list(input.get("runs") or [])
-        samples = input.get("samples", self._samples)
-        if samples is None or samples < 1:
+        samples = input.get("samples") or self._samples
+        if samples < 1:
             raise ValueError("ExplainNode requires positive samples.")
         operations = self._factory.repository.manifest(
             correction["base"],

@@ -259,7 +259,11 @@ class KnowledgeGraphSearchNode:
             self._llm,
             tools=node,
             prompt=prompt,
-            response_format=SearchResult,
+            response_format=(
+                "Return the final answer as a JSON object with an `introducer` "
+                "field holding the full 40-character SHA, or null.",
+                SearchResult,
+            ),
             pre_model_hook=ResolvedErrorFilter(),
             post_model_hook=budget,
         )
@@ -582,7 +586,11 @@ class RepositorySearchNode:
             self._llm,
             tools=node,
             prompt=prompt,
-            response_format=SearchResult,
+            response_format=(
+                "Return the final answer as a JSON object with an `introducer` "
+                "field holding the full 40-character SHA, or null.",
+                SearchResult,
+            ),
             pre_model_hook=ResolvedErrorFilter(),
             post_model_hook=budget,
         )

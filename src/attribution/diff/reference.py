@@ -23,8 +23,8 @@ Interval = Tuple[int, int]
 
 
 class PatchView:
-    def __init__(self, source: patch.PatchSet | str) -> None:
-        source = source
+    def __init__(self, source: patch.PatchSet | str, numbered: bool = False) -> None:
+        self._numbered = numbered
         if isinstance(source, patch.PatchSet):
             self._patch = source
             return
@@ -77,7 +77,10 @@ class PatchView:
                     "\n".join(
                         [
                             f"File: {path}",
-                            *[line[1] for line in lines],
+                            *[
+                                f"{line[0]} | {line[1]}" if self._numbered else line[1]
+                                for line in lines
+                            ],
                         ]
                     )
                 )
@@ -104,7 +107,10 @@ class PatchView:
                     "\n".join(
                         [
                             f"File: {path}",
-                            *[line[1] for line in lines],
+                            *[
+                                f"{line[0]} | {line[1]}" if self._numbered else line[1]
+                                for line in lines
+                            ],
                         ]
                     )
                 )
