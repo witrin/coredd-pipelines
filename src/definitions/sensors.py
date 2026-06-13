@@ -161,6 +161,60 @@ def filter_change_labels_sensor(
 
 
 @asset_sensor(
+    asset_key="filter_change_labels",
+)
+def benchmark_correction_sensor(
+    context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
+):
+    """Synchronize benchmark correction partitions over intrinsic changes."""
+    import polars as pl
+
+    instance = context.instance
+    storage = TableAssetStorage()
+
+    shards = instance.get_dynamic_partitions("filter_change_labels")
+    frames = [
+        pl.from_arrow(table)
+        for key in shards
+        for table in [storage.load(context, partition=key)]
+        if table is not None and table.num_rows > 0
+    ]
+    if not frames:
+        return None
+
+    frame = pl.concat(frames, how="vertical").filter(
+        pl.col("labels").list.contains("Intrinsic")
+    )
+    if frame.height == 0:
+        return None
+
+    pairs = sorted(
+        f"{name}#{number}"
+        for name, number in zip(frame["name"].to_list(), frame["number"].to_list())
+    )
+    keys = {Shard.to_space(pairs, pair) for pair in pairs}
+
+    existing = set(instance.get_dynamic_partitions("benchmark_correction"))
+    to_add = keys - existing
+    to_remove = existing - keys
+
+    if to_add:
+        instance.add_dynamic_partitions("benchmark_correction", list(to_add))
+
+    if to_remove:
+        for key in to_remove:
+            instance.delete_dynamic_partition("benchmark_correction", key)
+
+    context.log.info(
+        "Updated benchmark_correction partitions with +%d / -%d",
+        len(to_add),
+        len(to_remove),
+    )
+
+    return None
+
+
+@asset_sensor(
     asset_key="scope_repository_pool",
 )
 def scope_repository_pool_batch_sensor(
