@@ -58,12 +58,16 @@ class BenchmarkConfig(dg.Config):
         "filter_change_labels": dg.AssetIn(
             partition_mapping=dg.AllPartitionMapping()
         ),
+        "scope_change_raw": dg.AssetIn(
+            partition_mapping=dg.AllPartitionMapping()
+        ),
     },
 )
 def benchmark_trace_attribution(
     context: dg.AssetExecutionContext,
     config: BenchmarkConfig,
     filter_change_labels: dict,
+    scope_change_raw: dict,
     scope_repository_stationary: pa.Table,
 ) -> pa.Table:
     """Attribution traces over intrinsic corrections, three runs per method."""
@@ -81,6 +85,7 @@ def benchmark_trace_attribution(
     name, number = Shard.from_space(correction, pairs).split("#")
     number = int(number)
 
+    changes = pl.from_arrow(pa.concat_tables(scope_change_raw.values()))
     names = sorted(pl.from_arrow(scope_repository_stationary)["name"].to_list())
     enricher = PullRequestEnricher(name)
     repository = VersionControl.create(
@@ -92,7 +97,7 @@ def benchmark_trace_attribution(
         partition=Shard.to_space(names, name),
         filter=enricher.enrich,
     )
-    enricher.attach(repository)
+    enricher.attach(repository, changes)
     platform = PlatformCache(
         enricher.table(), repository=repository, filter=enricher.enrich
     )
@@ -196,6 +201,9 @@ def benchmark_trace_attribution(
         "filter_change_labels": dg.AssetIn(
             partition_mapping=dg.AllPartitionMapping()
         ),
+        "scope_change_raw": dg.AssetIn(
+            partition_mapping=dg.AllPartitionMapping()
+        ),
     },
 )
 def benchmark_trace_localization(
@@ -203,6 +211,7 @@ def benchmark_trace_localization(
     config: BenchmarkConfig,
     benchmark_trace_attribution: pa.Table,
     filter_change_labels: dict,
+    scope_change_raw: dict,
     scope_repository_stationary: pa.Table,
 ) -> pa.Table:
     """Localization traces over the deduplicated inducer candidates per correction."""
@@ -245,6 +254,7 @@ def benchmark_trace_localization(
             }
         )
 
+    changes = pl.from_arrow(pa.concat_tables(scope_change_raw.values()))
     names = sorted(pl.from_arrow(scope_repository_stationary)["name"].to_list())
     enricher = PullRequestEnricher(name)
     repository = VersionControl.create(
@@ -256,7 +266,7 @@ def benchmark_trace_localization(
         partition=Shard.to_space(names, name),
         filter=enricher.enrich,
     )
-    enricher.attach(repository)
+    enricher.attach(repository, changes)
     platform = PlatformCache(
         enricher.table(), repository=repository, filter=enricher.enrich
     )

@@ -2,7 +2,6 @@ import pyarrow as pa
 import polars as pl
 
 from benchmark.attribution.history import VersionControl
-from benchmark_notebook.io import CloudStorage
 
 
 class PullRequestEnricher:
@@ -12,15 +11,9 @@ class PullRequestEnricher:
         self._name = name
         self._frame: pl.DataFrame | None = None
 
-    def attach(self, repository: VersionControl) -> "PullRequestEnricher":
-        raw = pl.from_arrow(
-            CloudStorage(bucket="bug-request-bucket").asset(
-                key="scope-change-raw",
-                location="main",
-                version="6.0.0",
-                partition="default",
-            )
-        )
+    def attach(
+        self, repository: VersionControl, raw: pl.DataFrame
+    ) -> "PullRequestEnricher":
         self._frame = (
             raw.filter(pl.col("name") == self._name)
             .filter(pl.col("type") == "pr")
