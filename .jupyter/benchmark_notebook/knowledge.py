@@ -39,17 +39,10 @@ class KnowledgeGraphRenderer:
             showlegend=True,
             plot_bgcolor="white",
             paper_bgcolor="white",
-            margin={"l": 20, "r": 60, "t": 20, "b": 40},
+            margin={"l": 20, "r": 14, "t": 20, "b": 40},
             dragmode="pan",
             xaxis=xaxis,
             yaxis=yaxis,
-            legend={
-                "itemclick": "toggle",
-                "itemdoubleclick": "toggleothers",
-                "x": 1.02,
-                "y": 1.0,
-                "yanchor": "top",
-            },
             legend2={
                 "itemclick": False,
                 "itemdoubleclick": False,
@@ -352,7 +345,7 @@ class KnowledgeGraphRenderer:
             if label == "ALIAS":
                 line_template["shape"] = "spline"
                 line_template["smoothing"] = 1.15
-            for component, (xs, ys) in bucket.items():
+            for _component, (xs, ys) in bucket.items():
                 line = dict(line_template)
                 trace_kwargs: dict = {
                     "x": xs,
@@ -363,8 +356,6 @@ class KnowledgeGraphRenderer:
                     "name": label,
                     "showlegend": False,
                 }
-                if component is not None:
-                    trace_kwargs["legendgroup"] = f"file-{component}"
                 traces.append(go.Scatter(**trace_kwargs))
         return traces
 
@@ -508,7 +499,7 @@ class KnowledgeGraphRenderer:
                         "line": {"width": 1.1, "color": "#2d3748"},
                     },
                     name=label,
-                    legendgroup=group_id,
+                    showlegend=False,
                 )
             )
 
@@ -527,7 +518,6 @@ class KnowledgeGraphRenderer:
                             "line": {"width": 1.0, "color": "#2d3748"},
                         },
                         name=f"{title} entities",
-                        legendgroup=group_id,
                         showlegend=False,
                     )
                 )
@@ -572,7 +562,6 @@ class KnowledgeGraphRenderer:
         marker("commit: blame-ancestor", "#5dade2", "circle", 1.0)
         marker("commit: correction-ancestor", "#a9d6f5", "circle", 1.0)
         marker("commit: correction", "#e2e8f0", "circle", 1.0)
-        marker("commit: candidate", "#cbd5e0", "circle", 1.0)
         marker("entity: class", "#ef8a62", "triangle-up", 1.0)
         marker("entity: method", "#67a9cf", "triangle-up", 1.0)
         marker("entity: function", "#7bccc4", "triangle-up", 1.0)
@@ -683,12 +672,13 @@ class KnowledgeGraphRenderer:
 
         pad = (0.6, 0.45)
 
-        width = 1200
+        unit = 40.0
+        margin_px = 20 + 14
+        data_units = hi[0] - lo[0] + 2 * pad[0]
+        width = max(900, int(data_units * unit) + margin_px)
         height = max(360, int((hi[1] - lo[1] + 2 * pad[1]) * 180) + 80)
 
-        unit = 40.0
-        plot_px = width - 80
-        data_units = hi[0] - lo[0] + 2 * pad[0]
+        plot_px = width - margin_px
         canvas_units = plot_px / unit
         extra = max(0.0, (canvas_units - data_units) / 2.0)
 
