@@ -41,9 +41,11 @@ from langchain_openai import ChatOpenAI
 
 
 class AttributionEvaluationConfig(dg.Config):
-    model: str = "MiniMaxAI/MiniMax-M2.7"
+    model: str = "MiniMaxAI/MiniMax-M3"
     temperature: float = 0.0
     steps: int = 15
+    api: str = "https://api.together.xyz/v1"
+    key: str = "TOGETHER_AI_API_KEY"
 
 
 @asset(
@@ -77,7 +79,11 @@ def attribution_agentic_szz_evaluation(
     repository_key = keys["repository"]
 
     rows = pl.from_arrow(ingest_validation_context_index)
-    partition_cases = rows.filter(pl.col("partition") == repository_key)
+    partition_cases = rows.filter(
+        (pl.col("partition") == repository_key)
+        & (pl.col("languages").list.len() == 1)
+        & pl.col("languages").list.contains("py")
+    )
 
     cases = [
         ValidationCase(
@@ -103,8 +109,8 @@ def attribution_agentic_szz_evaluation(
 
     llm = ChatOpenAI(
         model=config.model,
-        api_key=os.getenv("TOGETHER_AI_API_KEY"),
-        base_url="https://api.together.xyz/v1",
+        api_key=os.getenv(config.key),
+        base_url=config.api,
         temperature=config.temperature,
         max_tokens=4096,
     )
@@ -222,7 +228,11 @@ def attribution_agent_szz_evaluation(
     repository_key = keys["repository"]
 
     rows = pl.from_arrow(ingest_validation_context_index)
-    partition_cases = rows.filter(pl.col("partition") == repository_key)
+    partition_cases = rows.filter(
+        (pl.col("partition") == repository_key)
+        & (pl.col("languages").list.len() == 1)
+        & pl.col("languages").list.contains("py")
+    )
 
     cases = [
         ValidationCase(
@@ -253,8 +263,8 @@ def attribution_agent_szz_evaluation(
 
     llm = ChatOpenAI(
         model=config.model,
-        api_key=os.getenv("TOGETHER_AI_API_KEY"),
-        base_url="https://api.together.xyz/v1",
+        api_key=os.getenv(config.key),
+        base_url=config.api,
         temperature=config.temperature,
         max_tokens=4096,
     )
