@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Iterable
 
+import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 from google.cloud import storage
@@ -105,6 +106,52 @@ class CloudStorage:
             f" in location {location} and partition {partition}."
         )
 
+    def scan(
+        self,
+        key: str,
+        version: str = "1.0.0",
+        location: str = "main",
+        partition: str = "default",
+    ) -> pl.LazyFrame:
+        """Return a Polars LazyFrame backed by the cached parquet file."""
+        if self._has_wildcard(version):
+            raise ValueError("Version wildcards are not supported.")
+        if self._has_wildcard(location):
+            raise ValueError("Location wildcards are not supported.")
+        if self._has_wildcard(partition):
+            raise ValueError("Partition wildcards are not supported by scan.")
+
+        path = self._materialize(key, version, location, partition)
+        if path is None and location != "main":
+            path = self._materialize(key, version, "main", partition)
+        if path is None:
+            raise FileNotFoundError(
+                f"Asset {key} not found for version {version} "
+                f"in location {location} and partition {partition}."
+            )
+        return pl.scan_parquet(path)
+
+    def _materialize(
+        self,
+        key: str,
+        version: str,
+        location: str,
+        partition: str,
+    ) -> Path | None:
+        name = self._blob_name(key=key, version=version, location=location, partition=partition)
+        blob = self._bucket.blob(name)
+        if not blob.exists():
+            return None
+        blob.reload()
+        path, meta = self._cache_path(blob)
+        if not self._is_cache_valid(blob, path, meta):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.parent / f".{path.name}.tmp"
+            blob.download_to_filename(str(temp))
+            temp.replace(path)
+            self._write_cache_meta(blob, path, meta)
+        return path
+
     def _merge_tables(self, tables: Iterable[pa.Table]) -> pa.Table:
         items = list(tables)
         if len(items) == 1:
@@ -171,7 +218,7 @@ class CloudStorage:
     ) -> Iterator[pa.RecordBatch]:
         dataset = pq.ParquetDataset(path, filters=filters)
         for fragment in dataset.fragments:
-            yield from fragment.to_batches(batch=batch, columns=columns, filter=dataset._filter_expression)
+            yield from fragment.to_batches(batch_size=batch, columns=columns, filter=dataset._filter_expression)
 
     def _list_tables(
         self,
