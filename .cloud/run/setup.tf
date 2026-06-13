@@ -114,6 +114,12 @@ data "google_secret_manager_secret_version" "together_ai_api_key" {
   version = "latest"
 }
 
+data "google_secret_manager_secret_version" "deepseek_api_key" {
+  project = data.google_project.current.project_id
+  secret  = "pipelines-deepseek-api-key"
+  version = "latest"
+}
+
 data "google_secret_manager_secret_version" "pipelines_argilla_api_key" {
   project = data.google_project.current.project_id
   secret  = "pipelines-argilla-api-key"

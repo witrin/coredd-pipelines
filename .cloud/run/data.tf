@@ -15,17 +15,6 @@ resource "google_storage_bucket" "bucket" {
   }
 }
 
-resource "google_storage_bucket_iam_member" "evaluation_public_read" {
-  bucket = google_storage_bucket.bucket.name
-  role   = "roles/storage.objectViewer"
-  member = "allUsers"
-
-  condition {
-    title      = "evaluation-prefix-only"
-    expression = "resource.name.startsWith(\"projects/_/buckets/${google_storage_bucket.bucket.name}/objects/evaluation/\")"
-  }
-}
-
 resource "google_storage_bucket_iam_member" "pipelines_runtime_bucket_writer" {
   bucket = google_storage_bucket.bucket.name
   role   = "roles/storage.objectAdmin"
