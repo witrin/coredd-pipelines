@@ -533,7 +533,15 @@ def ingest_validation_sources_partition_sensor(
     instance = context.instance
     df = pl.from_arrow(table)
     names = sorted(df["repository"].unique().to_list())
-    keys = {Shard.to_space(names, name) for name in names}
+    python = (
+        df.filter(
+            (pl.col("languages").list.len() == 1)
+            & pl.col("languages").list.contains("py")
+        )["repository"]
+        .unique()
+        .to_list()
+    )
+    keys = {Shard.to_space(names, name) for name in python}
 
     existing = set(instance.get_dynamic_partitions("ingest_validation_sources"))
     to_add = keys - existing

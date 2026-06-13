@@ -79,11 +79,7 @@ def attribution_agentic_szz_evaluation(
     repository_key = keys["repository"]
 
     rows = pl.from_arrow(ingest_validation_context_index)
-    partition_cases = rows.filter(
-        (pl.col("partition") == repository_key)
-        & (pl.col("languages").list.len() == 1)
-        & pl.col("languages").list.contains("py")
-    )
+    partition_cases = rows.filter(pl.col("partition") == repository_key)
 
     cases = [
         ValidationCase(
@@ -228,11 +224,7 @@ def attribution_agent_szz_evaluation(
     repository_key = keys["repository"]
 
     rows = pl.from_arrow(ingest_validation_context_index)
-    partition_cases = rows.filter(
-        (pl.col("partition") == repository_key)
-        & (pl.col("languages").list.len() == 1)
-        & pl.col("languages").list.contains("py")
-    )
+    partition_cases = rows.filter(pl.col("partition") == repository_key)
 
     cases = [
         ValidationCase(
