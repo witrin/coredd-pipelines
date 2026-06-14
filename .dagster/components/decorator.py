@@ -157,14 +157,14 @@ def asset(*asset_args, **asset_kwargs):
             @dg.asset(*asset_args, key=full, **asset_kwargs)
             @wraps(fn)
             def wrapped(
-                context: dg.AssetExecutionContext, configuration=None, *args, **kwargs
+                context: dg.AssetExecutionContext, config=None, *args, **kwargs
             ):
                 if (
-                    configuration is not None
-                    and getattr(configuration, "compute", "default") == "force"
+                    config is not None
+                    and getattr(config, "compute", "default") == "force"
                 ):
                     context.log.info("Forced compute for %s", context.asset_key)
-                    return fn(context, configuration, *args, **kwargs)
+                    return fn(context, config, *args, **kwargs)
 
                 cache = AssetCache(context)
                 cached = cache.load()
@@ -172,10 +172,10 @@ def asset(*asset_args, **asset_kwargs):
                 if cached is not None:
                     return cached
 
-                if configuration is None:
+                if config is None:
                     table = fn(context, *args, **kwargs)
                 else:
-                    table = fn(context, configuration, *args, **kwargs)
+                    table = fn(context, config, *args, **kwargs)
 
                 context.log.info(
                     "Cache miss for asset %s",
@@ -188,12 +188,12 @@ def asset(*asset_args, **asset_kwargs):
             @dg.asset(*asset_args, key=full, **asset_kwargs)
             @wraps(fn)
             def wrapped(
-                context: dg.AssetExecutionContext, configuration=None, *args, **kwargs
+                context: dg.AssetExecutionContext, config=None, *args, **kwargs
             ):
-                if configuration is None:
+                if config is None:
                     yield from fn(context, *args, **kwargs)
                 else:
-                    yield from fn(context, configuration, *args, **kwargs)
+                    yield from fn(context, config, *args, **kwargs)
 
         return wrapped
 

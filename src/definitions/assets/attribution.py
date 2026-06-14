@@ -46,6 +46,7 @@ class AttributionEvaluationConfig(dg.Config):
     steps: int = 15
     api: str = "https://api.together.xyz/v1"
     key: str = "TOGETHER_AI_API_KEY"
+    compute: str = "default"
 
 
 @asset(
