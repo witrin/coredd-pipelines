@@ -154,6 +154,14 @@ def snapshot_op(context: dg.OpExecutionContext, config: SnapshotConfig) -> dg.Ou
                     )
                     rows += table.num_rows
 
+                    table = table.append_column(
+                        "partition",
+                        pa.DictionaryArray.from_arrays(
+                            pa.array([0] * table.num_rows, type=pa.int32()),
+                            pa.array([source["partition"]], type=pa.string()),
+                        ),
+                    )
+
                     if writer is None:
                         writer = pq.ParquetWriter(temporary.name, table.schema)
 
