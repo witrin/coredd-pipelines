@@ -34,6 +34,7 @@ from benchmark.attribution.search import (
     RepositorySearchNode,
     RepositorySeedNode,
 )
+from benchmark.attribution.evaluation import TraceMonitor
 from benchmark.attribution.tracing import Trace
 from benchmark.localization.graph import LocateGraph
 from benchmark.localization.reason import LocateNode
@@ -152,7 +153,11 @@ def benchmark_trace_attribution(
 
     tables: list[pa.Table] = []
     for run in range(config.runs):
-        trace = Trace(seed=f"{method}-{correction}-run{run}")
+        monitor = TraceMonitor(sink=context.log.info)
+        trace = Trace(
+            seed=f"{method}-{correction}-run{run}",
+            hook=lambda event: monitor({"event": event}),
+        )
         try:
             result = graph.invoke(change, trace=trace)
             introducer = result.get("introducer")
@@ -300,7 +305,11 @@ def benchmark_trace_localization(
             refine=RefineNode(factory=factory),
             locate=LocateNode(factory=factory, llm=llm),
         )
-        trace = Trace(seed=f"localization-{correction}-{sha[:8]}")
+        monitor = TraceMonitor(sink=context.log.info)
+        trace = Trace(
+            seed=f"localization-{correction}-{sha[:8]}",
+            hook=lambda event: monitor({"event": event}),
+        )
         try:
             result = graph.invoke(change, defect=defect, trace=trace)
             locations = json.dumps(result.get("locations") or [], sort_keys=True)
