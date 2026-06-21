@@ -189,7 +189,7 @@ def attribution_agentic_szz_evaluation(
 
 
 @asset(
-    metadata={"version": "1.0.1"},
+    metadata={"version": "1.1.0"},
     partitions_def=partitions.attribution_evaluation_partition,
     group_name="attribution",
     pool="default",
@@ -260,6 +260,8 @@ def attribution_agent_szz_evaluation(
         base_url=config.api,
         temperature=config.temperature,
         max_tokens=4096,
+        logprobs=True,
+        top_logprobs=5,
     )
 
     tables: list[pa.Table] = []
