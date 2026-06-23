@@ -260,11 +260,11 @@ benchmark_correction_partition = dg.DynamicPartitionsDefinition(
     name="benchmark_correction"
 )
 
-benchmark_method_partition = dg.StaticPartitionsDefinition(["agentszz", "agenticszz"])
+benchmark_run_partition = dg.DynamicPartitionsDefinition(name="benchmark_run")
 
 benchmark_attribution_partition = dg.MultiPartitionsDefinition(
     {
         "correction": benchmark_correction_partition,
-        "method": benchmark_method_partition,
+        "run": benchmark_run_partition,
     }
 )

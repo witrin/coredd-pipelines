@@ -12,14 +12,28 @@ import pyarrow as pa
 import networkx as nx
 import pygit2
 
+import polars as pl
+from google.cloud import storage
+
 from components.decorator import asset
 from components.infrastructure import GithubResource
 from components.io import BlobStream
 from benchmark.definitions import partitions
+from benchmark.definitions.partitions import Shard
 from benchmark.attribution.agent import KnowledgeGraphToolFactory, RepositoryToolFactory
+from benchmark.attribution.change import PullRequestEnricher
 from benchmark.attribution.evaluation import TraceMonitor
-from benchmark.attribution.graph import AgenticSZZGraphBuilder, AgentSZZGraphBuilder
-from benchmark.attribution.history import VersionControl, VersionControlSnapshot
+from benchmark.attribution.graph import (
+    AgenticSZZGraph,
+    AgenticSZZGraphBuilder,
+    AgentSZZGraph,
+    AgentSZZGraphBuilder,
+)
+from benchmark.attribution.history import (
+    PlatformCache,
+    VersionControl,
+    VersionControlSnapshot,
+)
 from benchmark.attribution.ingestion import ValidationExtractor
 from benchmark.attribution.knowledge import KnowledgeGraphBuilder, KnowledgeGraphStore
 from benchmark.attribution.reference import ValidationPartitionReport
@@ -29,6 +43,7 @@ from benchmark.attribution.search import (
     RepositorySearchNode,
     RepositorySeedNode,
 )
+from benchmark.attribution.tracing import Trace
 from benchmark.attribution.validation import (
     GitHubRedaction,
     KnowledgeGraphSetup,
@@ -40,6 +55,14 @@ from benchmark.attribution.validation import (
 from langchain_openai import ChatOpenAI
 
 
+class BenchmarkConfig(dg.Config):
+    model: str = "deepseek-ai/DeepSeek-V4-Pro"
+    temperature: float = 0.0
+    steps: int = 15
+    context: int = 3
+    samples: int = 3
+
+
 class AttributionEvaluationConfig(dg.Config):
     model: str = "MiniMaxAI/MiniMax-M3"
     temperature: float = 0.0
@@ -47,6 +70,114 @@ class AttributionEvaluationConfig(dg.Config):
     api: str = "https://api.together.xyz/v1"
     key: str = "TOGETHER_AI_API_KEY"
     compute: str = "default"
+
+
+@asset(
+    metadata={"version": "2.0.0"},
+    partitions_def=partitions.benchmark_attribution_partition,
+    group_name="attribution",
+    pool="default",
+    ins={
+        "filter_change_labels": dg.AssetIn(
+            partition_mapping=dg.AllPartitionMapping()
+        ),
+        "scope_change_raw": dg.AssetIn(
+            partition_mapping=dg.AllPartitionMapping()
+        ),
+    },
+)
+def attribution_change_trace(
+    context: dg.AssetExecutionContext,
+    config: BenchmarkConfig,
+    filter_change_labels: dict,
+    scope_change_raw: dict,
+    scope_repository_stationary: pa.Table,
+) -> pa.Table:
+    """One AgentSZZ attribution trace per (correction, run) partition."""
+    keys = context.partition_key.keys_by_dimension
+    correction = keys["correction"]
+    run = int(keys["run"])
+
+    frame = pl.from_arrow(pa.concat_tables(filter_change_labels.values())).filter(
+        pl.col("labels").list.contains("Intrinsic")
+    )
+    pairs = sorted(
+        f"{name}#{number}"
+        for name, number in zip(frame["name"].to_list(), frame["number"].to_list())
+    )
+    name, number = Shard.from_space(correction, pairs).split("#")
+    number = int(number)
+
+    changes = pl.from_arrow(pa.concat_tables(scope_change_raw.values()))
+    names = sorted(pl.from_arrow(scope_repository_stationary)["name"].to_list())
+    enricher = PullRequestEnricher(name)
+    repository = VersionControl.create(
+        storage.Client(project="bug-request"),
+        bucket="bug-request-bucket",
+        key="scope-source-raw",
+        location="main",
+        version="4.0.0",
+        partition=Shard.to_space(names, name),
+        filter=enricher.enrich,
+    )
+    enricher.attach(repository, changes)
+    platform = PlatformCache(
+        enricher.table(), repository=repository, filter=enricher.enrich
+    )
+    change = platform.load(number)
+    llm = ChatOpenAI(
+        model=config.model,
+        api_key=os.getenv("TOGETHER_AI_API_KEY"),
+        base_url="https://api.together.xyz/v1",
+        temperature=config.temperature,
+        max_tokens=8000,
+        streaming=True,
+    )
+
+    graph = AgentSZZGraph(
+        seed=RepositorySeedNode(repository=repository),
+        search=RepositorySearchNode(
+            tool=RepositoryToolFactory(repository=repository),
+            llm=llm,
+        ),
+        steps=config.steps,
+    )
+
+    monitor = TraceMonitor(sink=context.log.info)
+    trace = Trace(
+        seed=f"agentszz-{correction}-run{run}",
+        hook=lambda event: monitor({"event": event}),
+    )
+    try:
+        result = graph.invoke(change, trace=trace)
+        introducer = result.get("introducer")
+        aborted = bool(result.get("aborted", False))
+    except Exception as error:
+        context.log.warning(
+            "Run %d failed for %s/%s: %s", run, name, number, error
+        )
+        introducer = None
+        aborted = True
+
+    table = trace.to_table()
+    rows = table.num_rows
+    table = (
+        table
+        .append_column("name", pa.array([name] * rows, type=pa.string()))
+        .append_column("number", pa.array([number] * rows, type=pa.int64()))
+        .append_column("introducer", pa.array([introducer] * rows, type=pa.string()))
+        .append_column("aborted", pa.array([aborted] * rows, type=pa.bool_()))
+    )
+
+    context.log.info(
+        "AgentSZZ run %d for %s/%s: %s",
+        run,
+        name,
+        number,
+        "aborted" if aborted else (introducer or "")[:8],
+    )
+
+    return table
 
 
 @asset(

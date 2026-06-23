@@ -15,7 +15,10 @@ from google.cloud import storage as cloud_storage
 from components.io import BlobAssetStorage, TableAssetStorage
 from components.location import Location
 from components.meta import AssetResolver
-from benchmark.evaluation.annotation import Projection
+from benchmark.evaluation.annotation import (
+    RepositoryProjection,
+    RepositorySnapshotProjection,
+)
 
 
 class SnapshotConfig(dg.Config):
@@ -311,7 +314,7 @@ def evaluation_demo_op(
         with open(snapshot / "meta.json", "r", encoding="utf-8") as file:
             commits = json.load(file)["commits"]
 
-        projection = Projection(commits, snapshot)
+        projection = RepositorySnapshotProjection(commits, snapshot)
 
         correction_entry = projection.transform(correction, "correction")
 
@@ -818,3 +821,468 @@ def filter_annotation_collect_op(
 @dg.job(name="filter_annotation_collect")
 def filter_annotation_collect():
     filter_annotation_collect_op()
+
+
+class AuditPushConfig(dg.Config):
+    reset: bool = False
+    workspace: str = "bug-request"
+
+
+@dg.op(name="audit_change_request_op")
+def audit_change_request_op(
+    context: dg.OpExecutionContext, config: AuditPushConfig
+) -> dg.Output:
+    """Push the stratified audit sample into the Argilla dataset.
+
+    The corrections are grouped by repository so a single version control
+    handle serves every correction of a repository. For each correction the
+    correction commit and the identified introducer are projected into the
+    annotation component format and uploaded to a shared, content addressed
+    blob store per repository. Each record carries an overview of both changes
+    and a localization field bound to the uploaded meta file.
+    """
+    import argilla as rg
+    import polars as pl
+
+    from benchmark.attribution.change import PullRequestEnricher
+    from benchmark.attribution.history import PlatformCache, VersionControl
+    from benchmark.definitions.partitions import Shard
+    from benchmark.evaluation.annotation import RepositoryProjection
+
+    storage = TableAssetStorage()
+    location = Location.load()
+    places = list(dict.fromkeys([location.current, location.default]))
+
+    pools: dict[str, pa.Table] = {}
+    for asset in (
+        "audit-change-sample",
+        "scope-repository-stationary",
+        "scope-change-raw",
+        "scope-change-outline",
+    ):
+        resolver = AssetResolver(context, asset)
+        version = resolver.version()
+        partitions = resolver.partitions_def()
+        if partitions is None:
+            keys = ["default"]
+        elif isinstance(partitions, dg.DynamicPartitionsDefinition):
+            keys = list(context.instance.get_dynamic_partitions(partitions.name))
+        else:
+            keys = list(partitions.get_partition_keys())
+
+        tables = []
+        for partition in keys:
+            normalized = partition.replace("|", ":").replace("/", "-").replace("_", "-")
+            for place in places:
+                blob = (
+                    storage.prefix(resolver.key, version, place, normalized)
+                    + "data.parquet"
+                )
+                table = storage.load(blob=blob)
+                if table is not None:
+                    tables.append(table)
+                    break
+
+        if not tables:
+            raise dg.Failure(description=f"No data found for {asset}")
+        pools[asset] = pa.concat_tables(tables, promote_options="permissive")
+
+    selection = pl.from_arrow(pools["audit-change-sample"])
+    changes = pl.from_arrow(pools["scope-change-raw"])
+    names = sorted(
+        pl.from_arrow(pools["scope-repository-stationary"])["name"].to_list()
+    )
+
+    outline = {
+        (row["name"], row["number"]): row
+        for row in pl.from_arrow(pools["scope-change-outline"])
+        .select("name", "number", "title", "markdown")
+        .iter_rows(named=True)
+    }
+
+    if selection.height == 0:
+        raise dg.Failure(description="Audit selection is empty")
+
+    client = rg.Argilla(
+        api_url=os.environ["ARGILLA_API_URL"],
+        api_key=os.environ["ARGILLA_API_KEY"],
+    )
+    workspace = client.workspaces(config.workspace)
+    if workspace is None:
+        workspace = rg.Workspace(name=config.workspace, client=client)
+        workspace.create()
+
+    bucket = cloud_storage.Client(
+        project=os.environ.get("CLOUD_PROJECT")
+    ).bucket(os.environ["CLOUD_BUCKET"])
+
+    settings = rg.Settings(
+        guidelines="""\
+You are shown a pair of changes, a corrective change that fixes a defect, and the earlier defective change that is believed to have introduced it. Inside the defective change, some lines are already marked as the location of the defect. You see both changes and the marked lines, and you may open either change on GitHub through the links provided.
+
+A defect is a deficiency in the Python source code of this repository that is or can become the cause of incorrect behavior. Only Python source files can host a defect, in any directory of the repository. Other artefacts, such as YAML configuration, shell scripts, Markdown documentation, and README files, do not count as source code.
+
+Where a defect comes from determines how the corrective change is categorized.
+
+**Intrinsic.** The defect originates in this repository, introduced by an earlier change. Typical cases are a logic error, an incorrect condition, a typo that caused a failure, or a misused API call within the project.
+
+**Extrinsic.** The defect originates outside the repository. The code was correct when written, and only a later external change, such as a dependency update or an environment change, caused the failure that this change addresses.
+
+**Other.** The change does not correct a defect at all. This covers refactoring, new features, dependency updates without an observed failure, documentation, and configuration.
+
+Observable failure includes any breakage encountered in development or use of the software, such as runtime errors, test failures, build or installation failures, CI failures, and developer-reported behavior. A linked issue or bug ticket is one form of evidence but not a requirement.
+
+## Decision
+
+The audit proceeds through three stages, applied in order. As soon as a change fails one stage, it stops there, and that stage is recorded as the failure label of the change.
+
+## Edge Cases
+
+A corrective change that also contains refactoring, a feature, or documentation still passes Correction, as long as at least one of its corrections is intrinsic. Such a change also receives Other, but having Other alongside Intrinsic does not change the outcome.
+
+If the shown defective change introduced one of several intrinsic corrections, Attribution is passed. The other corrections, introduced by different changes, are not a reason to reject it.
+
+If the line that actually causes the defect lies outside the marked region, for example earlier in the same function, add it in Localization.
+
+A revert receives Intrinsic if the reverted change introduced a defect, and Other if the reverted change introduced a feature that turned out to be premature or unwanted.""",
+        fields=[
+            rg.TextField(name="corrective", title="Corrective change", use_markdown=True),
+            rg.TextField(name="defective", title="Defective change", use_markdown=True),
+            rg.CustomField(
+                name="annotation",
+                title="Localization",
+                description=(
+                    "Look at the lines marked as the defect in the defective "
+                    "change and correct the marking in both directions. For each "
+                    "marked line, decide whether it really belongs to the defect "
+                    "that the corrective change fixes. If the defect reaches lines "
+                    "that were not marked, add them. The result should be the "
+                    "complete set of lines that carry the defect, not just a "
+                    "verdict on the lines already marked."
+                ),
+                template=(
+                    '<link rel="stylesheet" href="/annotation/annotation.css">'
+                    "<style>html, body { height: 600px; overflow: hidden; }</style>"
+                    '<script src="/annotation/bundle.js"></script>'
+                    "<code-annotation></code-annotation>"
+                    '<script src="/annotation/adapter.js"></script>'
+                ),
+                advanced_mode=True,
+            ),
+        ],
+        questions=[
+            rg.MultiLabelQuestion(
+                name="categories",
+                title="Correction",
+                description=(
+                    "For the corrective change, decide which of the three "
+                    "categories Intrinsic, Extrinsic, and Other apply. Multiple "
+                    "categories can apply to a single change. Inspect the file "
+                    "list and the description. For each correction identified, "
+                    "decide where the defect originates. Add Other if the change "
+                    "also contains work that does not correct a defect. The change "
+                    "continues to Attribution if Intrinsic is among the selected "
+                    "categories. Otherwise the audit for the change ends."
+                ),
+                labels={
+                    "intrinsic": "Intrinsic",
+                    "extrinsic": "Extrinsic",
+                    "other": "Other",
+                },
+                required=True,
+            ),
+            rg.LabelQuestion(
+                name="attribution",
+                title="Attribution",
+                description=(
+                    "Check whether the defective change you were shown is "
+                    "actually where the defect was introduced. Accept it if it "
+                    "introduced at least one of the corrections you labeled "
+                    "Intrinsic. A defect can have more than one origin, but you "
+                    "only judge the one change presented to you, so do not go "
+                    "looking for a better candidate. If the shown change is not "
+                    "an origin, the audit for the pair ends. Otherwise it "
+                    "continues to Localization."
+                ),
+                labels={"yes": "Yes", "no": "No"},
+                required=False,
+            ),
+            rg.RatingQuestion(
+                name="confidence",
+                title="Confidence",
+                description=(
+                    "Rate your confidence in the Correction and Attribution "
+                    "decisions on a scale of 1 to 3. A 1 means the decision "
+                    "involved substantial guesswork, a 2 that it rested on "
+                    "partial evidence, and a 3 that it was clear from the "
+                    "available information. The decisions in Localization are "
+                    "not rated."
+                ),
+                values=[1, 2, 3],
+                required=False,
+            ),
+            rg.TextQuestion(
+                name="comment",
+                title="Comment",
+                description=(
+                    "The comment field is optional and used only for "
+                    "diagnostics. Use it for ambiguous cases, unusual patterns, "
+                    "or any note that may help the later analysis."
+                ),
+                required=False,
+            ),
+        ],
+        metadata=[
+            rg.TermsMetadataProperty(name="repository"),
+            rg.TermsMetadataProperty(name="change"),
+            rg.TermsMetadataProperty(name="introducer"),
+            rg.TermsMetadataProperty(name="rho_bin"),
+        ],
+        distribution=rg.TaskDistribution(min_submitted=1),
+    )
+
+    dataset = client.datasets(name="benchmark-audit", workspace=workspace)
+    if dataset is not None and config.reset:
+        dataset.delete()
+        dataset = None
+    if dataset is None:
+        dataset = rg.Dataset(
+            name="benchmark-audit",
+            workspace=workspace,
+            settings=settings,
+            client=client,
+        )
+        dataset.create()
+
+    existing = {record.id for record in dataset.records}
+    pushed = 0
+
+    for name, group in selection.group_by("name"):
+        rows = [
+            row
+            for row in group.iter_rows(named=True)
+            if f"{row['name']}#{row['number']}" not in existing
+        ]
+        if not rows:
+            continue
+
+        enricher = PullRequestEnricher(name[0])
+        repository = VersionControl.create(
+            cloud_storage.Client(project="bug-request"),
+            bucket="bug-request-bucket",
+            key="scope-source-raw",
+            location="main",
+            version="4.0.0",
+            partition=Shard.to_space(names, name[0]),
+            filter=enricher.enrich,
+        )
+        enricher.attach(repository, changes)
+        platform = PlatformCache(
+            enricher.table(), repository=repository, filter=enricher.enrich
+        )
+
+        prefix = f"audit/{name[0].replace('/', '-').lower()}"
+        records = []
+
+        for row in rows:
+            change = platform.load(int(row["number"]))
+            introducer = str(row["introducer"])
+            projection = RepositoryProjection(repository)
+            correction = projection.transform(change["after"], "correction")
+            target = projection.transform(introducer, "defect")
+
+            if correction is None or target is None:
+                context.log.warning(
+                    "Skipping %s#%s (missing parent).", row["name"], row["number"]
+                )
+                continue
+
+            annotation = {
+                "model": "benchmark",
+                "repository": row["name"],
+                "context": correction,
+                "targets": [target],
+            }
+            bucket.blob(f"{prefix}/{row['number']}.json").upload_from_string(
+                json.dumps(annotation, sort_keys=True),
+                content_type="application/json",
+            )
+            pending = [
+                blob
+                for blob in projection.blobs()
+                if not bucket.blob(f"{prefix}/{blob}").exists()
+            ]
+            with ThreadPoolExecutor() as pool:
+                pool.map(
+                    lambda blob: bucket.blob(
+                        f"{prefix}/{blob}"
+                    ).upload_from_string(projection.fetch(blob)),
+                    pending,
+                )
+
+            url = (
+                f"https://storage.googleapis.com/{os.environ['CLOUD_BUCKET']}/"
+                f"{prefix}/{row['number']}.json"
+            )
+
+            entry = outline.get((row["name"], int(row["number"])), {})
+            corrective = (
+                f"### {(entry.get('title') or '').strip()}\n\n"
+                f"[#{row['number']}](https://github.com/{row['name']}/"
+                f"pull/{row['number']})\n\n"
+                f"{(entry.get('markdown') or '').strip()}"
+            )
+
+            message = (target["message"] or "").strip()
+            headline, _, body = message.partition("\n")
+            defective = (
+                f"### {headline.strip()}\n\n"
+                f"[{introducer[:8]}](https://github.com/{row['name']}/"
+                f"commit/{introducer})\n\n"
+                f"{body.strip()}"
+            )
+
+            records.append(
+                rg.Record(
+                    id=f"{row['name']}#{row['number']}",
+                    fields={
+                        "corrective": corrective,
+                        "defective": defective,
+                        "annotation": {"url": url},
+                    },
+                    metadata={
+                        "repository": row["name"],
+                        "change": str(row["number"]),
+                        "introducer": introducer,
+                        "rho_bin": str(row["rho_bin"]),
+                    },
+                )
+            )
+
+        if records:
+            dataset.records.log(records)
+            pushed += len(records)
+
+    context.log.info("Pushed %d audit records.", pushed)
+
+    return dg.Output(
+        value=None,
+        metadata={
+            "pushed": dg.MetadataValue.int(pushed),
+            "selected": dg.MetadataValue.int(selection.height),
+            "reset": dg.MetadataValue.bool(config.reset),
+        },
+    )
+
+
+@dg.job(name="audit_change_request")
+def audit_change_request():
+    audit_change_request_op()
+
+
+class AuditCollectConfig(dg.Config):
+    version: str = "1.0.0"
+
+
+@dg.op(name="audit_change_collect_op")
+def audit_change_collect_op(
+    context: dg.OpExecutionContext, config: AuditCollectConfig
+) -> dg.Output:
+    """Snapshot the completed audit annotations back to cloud storage."""
+    import argilla as rg
+
+    client = rg.Argilla(
+        api_url=os.environ["ARGILLA_API_URL"],
+        api_key=os.environ["ARGILLA_API_KEY"],
+    )
+
+    dataset = client.datasets(name="benchmark-audit", workspace="bug-request")
+    if dataset is None:
+        raise dg.Failure(description="Dataset benchmark-audit does not exist")
+
+    query = rg.Query(filter=rg.Filter([("status", "==", "completed")]))
+
+    rows: list[dict[str, object]] = []
+    for record in dataset.records(query=query, with_responses=True):
+        answers: dict[str, list] = {}
+        for response in record.responses:
+            if response.status != rg.ResponseStatus.submitted:
+                continue
+            answers.setdefault(response.question_name, []).append(response.value)
+
+        categories = next(iter(answers.get("categories", [])), None) or []
+        origin = next(iter(answers.get("attribution", [])), None)
+        confidence = next(iter(answers.get("confidence", [])), None)
+        selections = (record.fields.get("annotation") or {}).get("selections") or []
+
+        if "intrinsic" not in categories:
+            verdict = "filter"
+        elif origin == "no":
+            verdict = "attribution"
+        elif origin == "yes":
+            verdict = "none"
+        else:
+            verdict = None
+
+        rows.append(
+            {
+                "repository": record.metadata.get("repository"),
+                "number": int(record.metadata.get("change")),
+                "introducer": record.metadata.get("introducer"),
+                "rho_bin": int(record.metadata.get("rho_bin", -1)),
+                "categories": sorted(categories),
+                "attribution": origin,
+                "confidence": int(confidence) if confidence is not None else None,
+                "verdict": verdict,
+                "selections": json.dumps(selections, sort_keys=True),
+                "comment": "\n".join(
+                    note for note in answers.get("comment", []) if note
+                ),
+                "status": str(record.status),
+            }
+        )
+
+    schema = pa.schema(
+        [
+            ("repository", pa.string()),
+            ("number", pa.int64()),
+            ("introducer", pa.string()),
+            ("rho_bin", pa.int64()),
+            ("categories", pa.list_(pa.string())),
+            ("attribution", pa.string()),
+            ("confidence", pa.int64()),
+            ("verdict", pa.string()),
+            ("selections", pa.string()),
+            ("comment", pa.string()),
+            ("status", pa.string()),
+        ]
+    )
+    table = pa.Table.from_pylist(rows, schema=schema)
+
+    storage = TableAssetStorage()
+    location = Location.load()
+    blob = (
+        storage.prefix(
+            dg.AssetKey([location.current, "audit-change-annotation"]),
+            config.version,
+            location.current,
+            "default",
+        )
+        + "data.parquet"
+    )
+    storage.store(blob=blob, table=table)
+
+    context.log.info("Pulled %d completed audits into %s.", table.num_rows, blob)
+
+    return dg.Output(
+        value=None,
+        metadata={
+            "records": dg.MetadataValue.int(table.num_rows),
+            "storage": dg.MetadataValue.text(f"gs://{storage.bucket}/{blob}"),
+        },
+    )
+
+
+@dg.job(name="audit_change_collect")
+def audit_change_collect():
+    audit_change_collect_op()

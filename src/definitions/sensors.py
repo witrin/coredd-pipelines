@@ -7,7 +7,11 @@ from datetime import date, datetime
 from components.decorator import asset_sensor
 from components.io import TableAssetStorage
 from benchmark.definitions.partitions import Shard
-from benchmark.definitions.jobs import filter_annotation_collect, filter_annotation_request
+from benchmark.definitions.jobs import (
+    audit_change_collect,
+    filter_annotation_collect,
+    filter_annotation_request,
+)
 from benchmark.attribution.reference import ValidationPartitionReport
 
 import dagster as dg
@@ -683,6 +687,46 @@ def filter_annotation_sensor(context: dg.SensorEvaluationContext):
                     }
                 },
             ),
+        ],
+        cursor=json.dumps({"last_completed": completed}),
+    )
+
+
+@dg.sensor(
+    jobs=[audit_change_collect],
+    minimum_interval_seconds=300,
+    default_status=dg.DefaultSensorStatus.STOPPED,
+)
+def audit_change_collect_sensor(context: dg.SensorEvaluationContext):
+    """Periodically pull completed audit annotations back into storage."""
+    import argilla as rg
+
+    cursor = json.loads(context.cursor) if context.cursor else {"last_completed": -1}
+
+    try:
+        client = rg.Argilla(
+            api_url=os.environ["ARGILLA_API_URL"],
+            api_key=os.environ["ARGILLA_API_KEY"],
+        )
+        dataset = client.datasets(name="benchmark-audit", workspace="bug-request")
+    except Exception as exc:
+        return dg.SkipReason(f"Argilla unavailable: {exc!r}")
+
+    if dataset is None:
+        return dg.SkipReason("Dataset benchmark-audit does not exist yet.")
+
+    completed = int(dataset.progress()["completed"])
+
+    if completed <= cursor["last_completed"]:
+        return dg.SkipReason("No new completions since the last pull.")
+
+    return dg.SensorResult(
+        run_requests=[
+            dg.RunRequest(
+                run_key=f"audit-change-pull-{completed}",
+                job_name="audit_change_collect",
+                run_config={"ops": {"audit_change_collect_op": {"config": {}}}},
+            )
         ],
         cursor=json.dumps({"last_completed": completed}),
     )
