@@ -180,7 +180,7 @@ def benchmark_correction_sensor(
     frames = [
         pl.from_arrow(table)
         for key in shards
-        for table in [storage.load(context, partition=key)]
+        for table in [storage.load(context, event=asset_event, partition=key)]
         if table is not None and table.num_rows > 0
     ]
     if not frames:
