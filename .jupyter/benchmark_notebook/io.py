@@ -216,6 +216,15 @@ class CloudStorage:
         filters: list | None,
         batch: int,
     ) -> Iterator[pa.RecordBatch]:
+        # ParquetFile.iter_batches releases each decoded row group as it advances,
+        # so memory stays flat. The dataset/fragment path retains decoded row
+        # groups and grows without bound on large files, so it is used only when a
+        # filter expression is required, which iter_batches cannot apply.
+        if filters is None:
+            yield from pq.ParquetFile(path).iter_batches(
+                batch_size=batch, columns=columns
+            )
+            return
         dataset = pq.ParquetDataset(path, filters=filters)
         for fragment in dataset.fragments:
             yield from fragment.to_batches(batch_size=batch, columns=columns, filter=dataset._filter_expression)
