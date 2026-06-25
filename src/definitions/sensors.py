@@ -186,21 +186,23 @@ def benchmark_correction_sensor(
     if not frames:
         return None
 
-    frame = pl.concat(frames, how="vertical").filter(
-        pl.col("labels").list.contains("Intrinsic")
-    )
-    if frame.height == 0:
-        return None
+    loaded = pl.concat(frames, how="vertical")
+    loaded_keys = {
+        Shard.to_space([f"{name}#{number}"])
+        for name, number in zip(loaded["name"].to_list(), loaded["number"].to_list())
+    }
 
-    pairs = sorted(
+    frame = loaded.filter(pl.col("labels").list.contains("Intrinsic"))
+
+    pairs = [
         f"{name}#{number}"
         for name, number in zip(frame["name"].to_list(), frame["number"].to_list())
-    )
-    keys = {Shard.to_space(pairs, pair) for pair in pairs}
+    ]
+    keys = {Shard.to_space([pair]) for pair in pairs}
 
     existing = set(instance.get_dynamic_partitions("benchmark_correction"))
     to_add = keys - existing
-    to_remove = existing - keys
+    to_remove = (existing & loaded_keys) - keys
 
     if to_add:
         instance.add_dynamic_partitions("benchmark_correction", list(to_add))

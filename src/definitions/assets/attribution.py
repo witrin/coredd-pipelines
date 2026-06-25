@@ -101,11 +101,12 @@ def attribution_change_trace(
     frame = pl.from_arrow(pa.concat_tables(filter_change_labels.values())).filter(
         pl.col("labels").list.contains("Intrinsic")
     )
-    pairs = sorted(
+    pairs = [
         f"{name}#{number}"
         for name, number in zip(frame["name"].to_list(), frame["number"].to_list())
-    )
-    name, number = Shard.from_space(correction, pairs).split("#")
+    ]
+    pair = next(p for p in pairs if Shard.to_space([p]) == correction)
+    name, number = pair.split("#")
     number = int(number)
 
     changes = pl.from_arrow(pa.concat_tables(scope_change_raw.values()))
