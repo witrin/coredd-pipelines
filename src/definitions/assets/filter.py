@@ -321,7 +321,7 @@ def filter_change_labels(
     ]
 
     llm = ChatOpenAI(
-        model="Qwen/Qwen3.7-Max",
+        model="deepseek-ai/DeepSeek-V4-Pro",
         api_key=os.getenv("TOGETHER_AI_API_KEY"),
         base_url="https://api.together.xyz/v1",
         temperature=0.0,
