@@ -854,11 +854,16 @@ def audit_change_request_op(
     places = list(dict.fromkeys([location.current, location.default]))
 
     pools: dict[str, pa.Table] = {}
+    # localization-change-trace carries the LLM4SZZ defect line markings. It is
+    # optional: corrections without a localization run still push without
+    # pre-marked lines rather than failing the whole job.
+    optional = {"localization-change-trace"}
     for asset in (
         "audit-change-sample",
         "scope-repository-stationary",
         "scope-change-raw",
         "scope-change-outline",
+        "localization-change-trace",
     ):
         resolver = AssetResolver(context, asset)
         version = resolver.version()
@@ -884,6 +889,8 @@ def audit_change_request_op(
                     break
 
         if not tables:
+            if asset in optional:
+                continue
             raise dg.Failure(description=f"No data found for {asset}")
         pools[asset] = pa.concat_tables(tables, promote_options="permissive")
 
@@ -899,6 +906,35 @@ def audit_change_request_op(
         .select("name", "number", "title", "markdown")
         .iter_rows(named=True)
     }
+
+    # Defect line markings from the localization stage, keyed by
+    # (name, number, defect-sha) -> path -> sorted unique 1-based line numbers.
+    # Single lines are collapsed into half-open [start, end) intervals when
+    # written onto the target so the annotation component can pre-mark them.
+    markings: dict[tuple[str, int, str], dict[str, list[int]]] = {}
+    localization = pools.get("localization-change-trace")
+    if localization is not None:
+        seen_locations: set[str] = set()
+        for record in (
+            pl.from_arrow(localization)
+            .select("name", "number", "defect", "locations")
+            .iter_rows(named=True)
+        ):
+            payload = record["locations"]
+            if not payload or payload in seen_locations:
+                continue
+            seen_locations.add(payload)
+            entries = json.loads(payload)
+            if not entries:
+                continue
+            key = (record["name"], int(record["number"]), str(record["defect"]))
+            paths = markings.setdefault(key, {})
+            for entry in entries:
+                path = entry.get("file")
+                line = entry.get("line")
+                if path is None or line is None:
+                    continue
+                paths.setdefault(path, []).append(int(line))
 
     if selection.height == 0:
         raise dg.Failure(description="Audit selection is empty")
@@ -1096,6 +1132,26 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
                     "Skipping %s#%s (missing parent).", row["name"], row["number"]
                 )
                 continue
+
+            marks = markings.get((row["name"], int(row["number"]), introducer), {})
+            target_annotations = []
+            for path in sorted(marks):
+                lines = sorted(set(marks[path]))
+                intervals: list[list[int]] = []
+                for line in lines:
+                    if intervals and line == intervals[-1][1]:
+                        intervals[-1][1] = line + 1
+                    else:
+                        intervals.append([line, line + 1])
+                target_annotations.append(
+                    {
+                        "path": path,
+                        "lines": intervals,
+                        "description": "Localized by the benchmark.",
+                    }
+                )
+            if target_annotations:
+                target["annotations"] = target_annotations
 
             annotation = {
                 "model": "benchmark",

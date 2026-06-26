@@ -61,6 +61,7 @@ class BenchmarkConfig(dg.Config):
     steps: int = 15
     context: int = 3
     samples: int = 3
+    compute: str = "default"
 
 
 class AttributionEvaluationConfig(dg.Config):

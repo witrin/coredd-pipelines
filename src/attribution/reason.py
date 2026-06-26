@@ -461,6 +461,8 @@ class ExplainNode:
             {patch_text}
 
             Return only files that are relevant to the root cause and appear in the provided patch.
+            Return only source code files that can host the defect. Do not return documentation, configuration, data, or markup files such as Markdown, reStructuredText, YAML, JSON, TOML, INI, or plain text.
+            Output only the single most likely file. If you are not sure, output at most two files.
             """
         ).strip()
         return template.format(
@@ -500,6 +502,19 @@ class AggregateNode:
             valid_seen: set[str] = set()
             for path in run["files"]:
                 if path in valid_seen:
+                    continue
+                try:
+                    PatchScope.language(
+                        FileOperation(
+                            base=path,
+                            after=path,
+                            operation=OperationType.EDIT,
+                        )
+                    )
+                except ValueError:
+                    # Only source files can host a defect. Drop documentation,
+                    # configuration, and markup so they never reach the hint and
+                    # locate stages, mirroring the original LLM4SZZ behavior.
                     continue
                 valid_seen.add(path)
                 valid_files.append(path)
