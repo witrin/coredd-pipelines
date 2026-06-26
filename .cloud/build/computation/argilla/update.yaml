@@ -13,6 +13,25 @@ osPolicies:
             apt:
               name: argilla-cloud
 
+        - id: argilla-cloud-update
+          exec:
+            validate:
+              interpreter: SHELL
+              script: |
+                if apt-get -s upgrade 2>/dev/null | grep -q "^Inst argilla-cloud"; then
+                  exit 101
+                fi
+                exit 100
+            enforce:
+              interpreter: SHELL
+              script: |
+                set -e
+                apt update
+                apt install -y --only-upgrade argilla-cloud
+                systemctl daemon-reload
+                systemctl restart argilla-release.service || true
+                exit 100
+
         - id: argilla-configuration
           exec:
             validate:

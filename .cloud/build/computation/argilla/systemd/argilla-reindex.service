@@ -1,0 +1,21 @@
+[Unit]
+Description=Reindex Argilla search engine from PostgreSQL
+After=argilla-server.service
+Requires=argilla-server.service
+PartOf=argilla-server.service
+# Unit-Version: ${unit_version}
+# Retry generously: a failed reindex (search engine or database not ready yet)
+# is retried until it succeeds. StartLimit is raised so systemd does not give
+# up during a slow Elasticsearch cold start.
+StartLimitIntervalSec=600
+StartLimitBurst=60
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/docker exec argilla-server python -m argilla_server search-engine reindex
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

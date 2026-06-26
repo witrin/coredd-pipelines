@@ -10,6 +10,7 @@ substitutions:
 steps:
 
   - id: build
+    waitFor: ['-']
     name: gcr.io/cloud-builders/docker
     args:
       - build
@@ -20,13 +21,59 @@ steps:
       - .
 
   - id: push
+    waitFor: [build]
     name: gcr.io/cloud-builders/docker
     args:
       - push
       - --all-tags
       - ${_REGION}-docker.pkg.dev/${_PROJECT}/${_IMAGES}/evaluation
 
+  - id: package
+    waitFor: ['-']
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        if ! command -v dpkg-deb >/dev/null 2>&1 || ! command -v envsubst >/dev/null 2>&1; then
+          apt-get update -y
+          apt-get install -y dpkg-dev gettext-base
+        fi
+
+        version="$(date -u +%Y%m%d%H%M%S)"
+        export unit_version="$version"
+
+        root="/workspace/argilla-cloud"
+
+        rm -rf "$root"
+        mkdir -p "$root/DEBIAN" "$root/lib/systemd/system"
+
+        cp -R .cloud/build/computation/argilla/package/DEBIAN/* "$root/DEBIAN/"
+        sed -i "s/__VERSION__/$version/" "$root/DEBIAN/control"
+
+        systemd_tmp="/workspace/argilla-cloud-systemd"
+        rm -rf "$systemd_tmp"
+        mkdir -p "$systemd_tmp"
+
+        for unit in .cloud/build/computation/argilla/systemd/*.service .cloud/build/computation/argilla/systemd/*.path; do
+          envsubst '${unit_version}' < "$unit" > "$systemd_tmp/$(basename "$unit")"
+        done
+
+        for unit in "$systemd_tmp"/*.service "$systemd_tmp"/*.path; do
+          install -m 0644 "$unit" "$root/lib/systemd/system/$(basename "$unit")"
+        done
+
+        dpkg-deb --build "$root" "/workspace/argilla-cloud_${version}_all.deb"
+
+        gcloud artifacts apt upload "${_PACKAGES}" \
+          --project="${_PROJECT}" \
+          --location="${_REGION}" \
+          --source="/workspace/argilla-cloud_${version}_all.deb"
+
   - id: assign
+    waitFor: [push, package]
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: bash
     args:

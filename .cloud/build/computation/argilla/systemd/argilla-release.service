@@ -8,4 +8,5 @@ Type=oneshot
 ExecStart=/bin/systemctl restart \
   argilla-elastisearch.service \
   argilla-redis.service \
-  argilla-server.service
+  argilla-server.service \
+  argilla-reindex.service

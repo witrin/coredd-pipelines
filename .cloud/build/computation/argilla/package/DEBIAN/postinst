@@ -5,6 +5,7 @@ systemctl daemon-reload
 systemctl enable argilla-elastisearch.service
 systemctl enable argilla-redis.service
 systemctl enable argilla-server.service
+systemctl enable argilla-reindex.service
 systemctl enable argilla-release.path
 
 exit 0
