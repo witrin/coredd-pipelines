@@ -891,3 +891,35 @@ class PatchFactory:
             after=(min(low[1], anchors[1][0]), max(high[1] + 1, anchors[1][1])),
             changes=[change],
         )
+
+
+class SourceManifest:
+    """Narrow a change manifest to source files before the patch is parsed.
+
+    The localization graph operates on the corrective change, whose commit may
+    touch non-source files (README, JSON, plain text). Those cannot be parsed
+    as part of a unified diff downstream (PatchView) and crash the whole graph.
+    This narrows the manifest to source files at the entry, before any node
+    expands or parses the patch.
+    """
+
+    def __init__(self, repository: VersionControl) -> None:
+        self._repository = repository
+
+    def select(self, base: str, after: str) -> List[FileOperation]:
+        operations: list[FileOperation] = []
+        for operation in self._repository.manifest(base, after):
+            try:
+                language = PatchScope.language(operation)
+            except ValueError:
+                # Only source files can host a defect. Drop documentation,
+                # configuration, data, and markup before the patch is parsed.
+                continue
+            # The upstream scope restricts the benchmark to Python repositories,
+            # so a defect lives in Python source (.py is the only Python suffix
+            # PatchScope recognizes). Drop the other languages PatchScope can
+            # parse (.js/.ts/.tsx) before they reach the locate stage.
+            if language != "python":
+                continue
+            operations.append(operation)
+        return operations

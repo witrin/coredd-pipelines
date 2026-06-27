@@ -6,7 +6,7 @@ from pydantic import BaseModel, ValidationError
 
 from benchmark.attribution.domain import Anchor, Change, FileOperation, JsonDict, OperationType, Slice
 from benchmark.attribution.diff.context import PatchScope
-from benchmark.attribution.diff.reference import PatchFactory, PatchView
+from benchmark.attribution.diff.reference import PatchFactory, PatchView, SourceManifest
 
 
 class ExplainRunState(TypedDict, total=False):
@@ -213,7 +213,7 @@ class SummarizeNode:
         if correction is None or self._factory is None or self._llm is None:
             raise ValueError("SummarizeNode requires correction, factory, and llm.")
 
-        operations = self._factory.repository.manifest(
+        operations = SourceManifest(self._factory.repository).select(
             correction["base"],
             correction["after"],
         )
@@ -306,7 +306,7 @@ class ExplainNode:
         samples = input.get("samples") or self._samples
         if samples < 1:
             raise ValueError("ExplainNode requires positive samples.")
-        operations = self._factory.repository.manifest(
+        operations = SourceManifest(self._factory.repository).select(
             correction["base"],
             correction["after"],
         )
@@ -461,8 +461,6 @@ class ExplainNode:
             {patch_text}
 
             Return only files that are relevant to the root cause and appear in the provided patch.
-            Return only source code files that can host the defect. Do not return documentation, configuration, data, or markup files such as Markdown, reStructuredText, YAML, JSON, TOML, INI, or plain text.
-            Output only the single most likely file. If you are not sure, output at most two files.
             """
         ).strip()
         return template.format(
@@ -498,26 +496,7 @@ class AggregateNode:
         seen: set[str] = set()
         hypotheses: list[ExplainRunState] = []
         for run in runs:
-            valid_files: list[str] = []
-            valid_seen: set[str] = set()
             for path in run["files"]:
-                if path in valid_seen:
-                    continue
-                try:
-                    PatchScope.language(
-                        FileOperation(
-                            base=path,
-                            after=path,
-                            operation=OperationType.EDIT,
-                        )
-                    )
-                except ValueError:
-                    # Only source files can host a defect. Drop documentation,
-                    # configuration, and markup so they never reach the hint and
-                    # locate stages, mirroring the original LLM4SZZ behavior.
-                    continue
-                valid_seen.add(path)
-                valid_files.append(path)
                 if path in seen:
                     continue
                 seen.add(path)
@@ -526,7 +505,7 @@ class AggregateNode:
                 {
                     "index": run["index"],
                     "rationale": run["rationale"],
-                    "files": valid_files,
+                    "files": run["files"],
                 }
             )
 
@@ -629,7 +608,7 @@ class ExpandNode:
         selected_paths = set(selected_files)
         operations = [
             operation
-            for operation in self._factory.repository.manifest(
+            for operation in SourceManifest(self._factory.repository).select(
                 correction["base"],
                 correction["after"],
             )

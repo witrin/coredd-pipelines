@@ -2687,37 +2687,3 @@ class TestAgentSZZGraph(unittest.TestCase):
             result,
             {"introducer": "abc123", "aborted": False},
         )
-
-
-class TestAggregateNodeSourceFilter(unittest.TestCase):
-    def _run(self, files: list[str]) -> list[str]:
-        llm = Mock(spec_set=["invoke"])
-        llm.invoke.return_value = SimpleNamespace(text="Root cause.")
-        node = AggregateNode(llm=llm)
-        result = node.run(
-            {
-                "summary": "Summary.",
-                "runs": [
-                    {"index": 0, "rationale": "Rationale.", "files": files},
-                ],
-            }
-        )
-        return result["files"]
-
-    def test_drops_non_source_files(self) -> None:
-        files = self._run(
-            [
-                "examples/phi3/README.md",
-                "olive/passes/onnx/nvmo_quantization.py",
-                "config.yaml",
-            ]
-        )
-        self.assertEqual(files, ["olive/passes/onnx/nvmo_quantization.py"])
-
-    def test_keeps_supported_source_languages(self) -> None:
-        files = self._run(["a.py", "b.ts", "c.tsx", "d.js", "notes.txt"])
-        self.assertEqual(files, ["a.py", "b.ts", "c.tsx", "d.js"])
-
-    def test_all_non_source_yields_empty(self) -> None:
-        files = self._run(["README.md", "LICENSE", "data.json"])
-        self.assertEqual(files, [])

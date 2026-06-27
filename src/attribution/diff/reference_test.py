@@ -4,7 +4,12 @@ import unittest
 from pathlib import Path
 from textwrap import dedent
 
-from benchmark.attribution.diff.reference import PatchContext, PatchFactory, PatchView
+from benchmark.attribution.diff.reference import (
+    PatchContext,
+    PatchFactory,
+    PatchView,
+    SourceManifest,
+)
 from benchmark.attribution.domain import (
     Anchor,
     Context,
@@ -3589,6 +3594,201 @@ class TestPatchFactory(unittest.TestCase):
                 normalize(PatchSet(actual)),
                 normalize(PatchSet(patch.text)),
             )
+
+    def test_py_small_scope_replaced_by_large_scope(self) -> None:
+        # Regression for the olive/Olive#1985 localization crash. _normalize
+        # expanded the after-side range over context lines without pulling the
+        # paired base-side line along, so the merged hunk's declared lengths did
+        # not match the lines project() could emit. HintNode then crashed wrapping
+        # str(patch) in PatchView (UnidiffParseError: 'Hunk is shorter than
+        # expected'). The expected diff below is the correct, symmetric output;
+        # this test stays red until _normalize pairs both sides.
+        base_sha, after_sha = self._commit(
+            """
+            class C:
+                class Calibration(StrEnumBase):
+                    AWQ_LITE = "awq_lite"
+                    AWQ_CLIP = "awq_clip"
+
+                def f(self):
+                    return 1
+        """,
+            """
+            class C:
+                DEFAULT_SETTINGS = {
+                    "dataset": "cnn",
+                    "calib_size": 32,
+                }
+
+                class CalibrationMethod(StrEnumBase):
+                    AWQ_LITE = "awq_lite"
+                    AWQ_CLIP = "awq_clip"
+                    RTN = "rtn"
+                    RTN_DQ = "rtn_dq"
+
+                def f(self):
+                    return 1
+        """,
+            ".py",
+        )
+
+        patch = self._candidate.expand(
+            base=base_sha,
+            after=after_sha,
+            files=self._repository.manifest(base_sha, after_sha),
+            n=3,
+        )
+
+        self.assertEqual(
+            str(patch),
+            self._patch(
+                """
+            --- a/file.py
+            +++ b/file.py
+            @@ -1,4 +1,11 @@
+             class C:
+            -class Calibration(StrEnumBase):
+            +DEFAULT_SETTINGS = {
+            +    "dataset": "cnn",
+            +    "calib_size": 32,
+            +}
+            +
+            +class CalibrationMethod(StrEnumBase):
+                 AWQ_LITE = "awq_lite"
+                 AWQ_CLIP = "awq_clip"
+            +    RTN = "rtn"
+            +    RTN_DQ = "rtn_dq"
+        """
+            ),
+        )
+
+    def test_py_insert_below_grown_method_keeps_paired_context(self) -> None:
+        # Second shape of the same _normalize bug, without a merge: a pure
+        # insertion below a method whose enclosing scope was expanded on the
+        # after side only. The single block's after range claimed lines that had
+        # no base partner, so its header over-counted the target length.
+        base_sha, after_sha = self._commit(
+            """
+            class Service:
+                def setup(self):
+                    self.x = 1
+
+                def teardown(self):
+                    self.y = 2
+        """,
+            """
+            class Service:
+                def setup(self):
+                    self.x = 1
+                    self.a = 10
+                    self.b = 20
+                    self.c = 30
+
+                def teardown(self):
+                    self.y = 2
+                    self.z = 99
+        """,
+            ".py",
+        )
+
+        patch = self._candidate.expand(
+            base=base_sha,
+            after=after_sha,
+            files=self._repository.manifest(base_sha, after_sha),
+            n=3,
+        )
+
+        self.assertEqual(
+            str(patch),
+            self._patch(
+                """
+            --- a/file.py
+            +++ b/file.py
+            @@ -2,2 +2,5 @@
+             def setup(self):
+                 self.x = 1
+            +    self.a = 10
+            +    self.b = 20
+            +    self.c = 30
+            @@ -5,2 +8,3 @@
+             def teardown(self):
+                 self.y = 2
+            +    self.z = 99
+        """
+            ),
+        )
+
+
+class TestSourceManifest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._fixture = HistoryFixture()
+        self._fixture.__enter__()
+        self._repository = VersionControl(self._fixture.repository)
+
+    def tearDown(self) -> None:
+        self._fixture.__exit__(None, None, None)
+
+    def test_select_keeps_only_python_source(self) -> None:
+        before = {
+            "module.py": "def foo():\n    return 1\n",
+            "README.md": "# Title\n\nold\n",
+            "data.json": '{"a": 1}\n',
+            "notes.txt": "alpha\n",
+        }
+        after = {
+            "module.py": "def foo():\n    return 2\n",
+            "README.md": "# Title\n\nnew\n",
+            "data.json": '{"a": 2}\n',
+            "notes.txt": "beta\n",
+        }
+        base = self._fixture.commit(self._fixture.tree(before), [], "base")
+        head = self._fixture.commit(self._fixture.tree(after), [base], "after")
+
+        manifest = SourceManifest(self._repository)
+        operations = manifest.select(base, head)
+
+        paths = sorted(
+            (operation.after or operation.base) for operation in operations
+        )
+        self.assertEqual(paths, ["module.py"])
+
+    def test_select_drops_other_parseable_languages(self) -> None:
+        before = {
+            "module.py": "def foo():\n    return 1\n",
+            "widget.ts": "export const a = 1\n",
+            "script.js": "const b = 1\n",
+        }
+        after = {
+            "module.py": "def foo():\n    return 2\n",
+            "widget.ts": "export const a = 2\n",
+            "script.js": "const b = 2\n",
+        }
+        base = self._fixture.commit(self._fixture.tree(before), [], "base")
+        head = self._fixture.commit(self._fixture.tree(after), [base], "after")
+
+        operations = SourceManifest(self._repository).select(base, head)
+
+        paths = sorted(
+            (operation.after or operation.base) for operation in operations
+        )
+        self.assertEqual(paths, ["module.py"])
+
+    def test_select_keeps_added_python_file(self) -> None:
+        before = {"module.py": "def foo():\n    return 1\n"}
+        after = {
+            "module.py": "def foo():\n    return 1\n",
+            "extra.py": "def bar():\n    return 2\n",
+            "CHANGELOG.md": "## v2\n",
+        }
+        base = self._fixture.commit(self._fixture.tree(before), [], "base")
+        head = self._fixture.commit(self._fixture.tree(after), [base], "after")
+
+        operations = SourceManifest(self._repository).select(base, head)
+
+        paths = sorted(
+            (operation.after or operation.base) for operation in operations
+        )
+        self.assertEqual(paths, ["extra.py"])
 
 
 if __name__ == "__main__":
