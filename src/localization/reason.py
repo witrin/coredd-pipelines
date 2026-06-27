@@ -1,45 +1,51 @@
 from __future__ import annotations
 
-from textwrap import dedent
-from typing import TypedDict
+import inspect
+from typing import Any, TypedDict
 
+from langchain_core.messages import HumanMessage
+from langgraph.prebuilt import ToolNode, create_react_agent
 from pydantic import BaseModel
 
 from benchmark.attribution.diff.reference import PatchFactory, PatchView
-from benchmark.attribution.domain import Anchor, Change, Slice
+from benchmark.attribution.domain import Change
 from benchmark.attribution.reason import HintItemState
+from benchmark.attribution.search import (
+    DuplicateCallGuard,
+    ResolvedErrorFilter,
+    TurnBudget,
+)
+from benchmark.localization.agent import LocateTool, LocateToolFactory
 
 
-class LocateLocationState(TypedDict, total=False):
-    """One resolved defect location in the defect revision."""
+class LocateLocationState(TypedDict):
+    """One defect location in the defect revision."""
 
     file: str
     line: int
-    excerpt: str
-    reason: str
 
 
 class LocateInput(TypedDict, total=False):
     correction: Change
     rationale: str
     causes: list[HintItemState]
-    expansion: str
     defect: Change
 
 
-class LocateOutput(TypedDict):
+class LocateOutput(TypedDict, total=False):
     defect: Change
     locations: list[LocateLocationState]
+    reason: str
 
 
 class LocateItemSchema(BaseModel):
+    file: str
     line: int
-    excerpt: str
-    reason: str
 
 
 class LocateResponseSchema(BaseModel):
     locations: list[LocateItemSchema]
+    reason: str | None = None
 
 
 class LocateNode:
@@ -48,165 +54,175 @@ class LocateNode:
     def __init__(
         self,
         factory: PatchFactory | None = None,
+        tool: LocateTool | LocateToolFactory | None = None,
         llm: object | None = None,
+        steps: int = 12,
     ) -> None:
+        if steps < 1:
+            raise ValueError("LocateNode steps must be positive.")
         self._factory = factory
+        self._tool = tool
         self._llm = llm
+        self._steps = steps
 
     def run(self, input: LocateInput) -> LocateOutput:
-        """Locate the defect statements within the known inducing commit."""
+        """Mark the defect locations in the inducing change via agentic search.
+
+        The agent searches the inducing change ``defect`` with snapshot-local
+        ``show``/``grep`` tools, guided by the root cause and the defect
+        statements from the correction, and returns the file and line of each
+        defect location. The locations are taken as the agent reports them; no
+        post-hoc validation is applied, mirroring attribution.
+        """
         correction = input.get("correction")
         rationale = input.get("rationale")
         causes = input.get("causes")
-        expansion = input.get("expansion")
         defect = input.get("defect")
-        if self._llm is None or self._factory is None:
+        if self._llm is None or self._factory is None or self._tool is None:
             raise ValueError(
-                "LocateNode requires correction, rationale, causes, expansion, "
-                "defect, factory, and llm."
+                "LocateNode requires correction, rationale, causes, defect, "
+                "factory, tool, and llm."
             )
-        if (
-            correction is None
-            or rationale is None
-            or causes is None
-            or expansion is None
-            or defect is None
-        ):
+        if correction is None or rationale is None or causes is None or defect is None:
             raise ValueError(
-                "LocateNode requires correction, rationale, causes, expansion, and defect."
+                "LocateNode requires correction, rationale, causes, and defect."
             )
-        if not rationale.strip() or not causes or not expansion.strip():
-            raise ValueError(
-                "LocateNode requires non-empty rationale, causes, and expansion."
-            )
+        if not rationale.strip() or not causes:
+            raise ValueError("LocateNode requires non-empty rationale and causes.")
 
-        source = expansion if expansion.endswith("\n") else f"{expansion}\n"
+        # The inducing change expanded to its enclosing context, given to the
+        # agent as a starting view to ground its search. Context only — the agent
+        # may read further with the tools and reports locations directly.
+        expansion = str(self._factory.expand(defect["base"], defect["after"]))
         try:
-            renderer = PatchView(source)
+            snippet = PatchView(expansion, numbered=True).after()
         except Exception as error:
             raise ValueError(
-                f"LocateNode requires parseable expanded patch content: {source!r}"
+                f"LocateNode requires parseable expanded patch content: {expansion!r}"
             ) from error
 
-        references = [
-            current["reference"]
-            for item in causes
-            for current in list(item.get("statements") or [])
+        tool = self._tool
+        if isinstance(tool, LocateToolFactory):
+            tool = tool.create(correction, defect)
+
+        payload = self._search(
+            rationale=rationale.strip(),
+            hints=self._hint(causes),
+            snippet=snippet,
+            tool=tool,
+        )
+
+        locations: list[LocateLocationState] = [
+            {"file": item.file, "line": item.line} for item in payload.locations
         ]
-        slices = self._slices(renderer.resolve(references), correction, defect)
-        if not slices:
-            return {"defect": defect, "locations": []}
+        output: LocateOutput = {"defect": defect, "locations": locations}
+        if payload.reason:
+            output["reason"] = payload.reason
+        return output
 
-        refinement = str(
-            self._factory.refine(
-                defect["base"],
-                defect["after"],
-                slices,
-                "after",
-                force=False,
-            )
-        )
-        try:
-            snippet = PatchView(refinement, numbered=True).after()
-        except Exception as error:
-            raise ValueError(
-                f"LocateNode requires parseable unified patch content: {refinement!r}"
-            ) from error
-        if not snippet.strip():
-            return {"defect": defect, "locations": []}
-
-        hints = self._hint(causes)
-        try:
-            model = self._llm.with_structured_output(
-                LocateResponseSchema,
-                method="json_schema",
-                strict=True,
-            )
-        except (AttributeError, TypeError) as error:
-            raise ValueError(
-                "LocateNode requires an llm that supports structured schema mode."
-            ) from error
-        payload = LocateResponseSchema.model_validate(
-            model.invoke(
-                self._locate_prompt(
-                    rationale=rationale.strip(),
-                    hints=hints,
-                    snippet=snippet,
-                )
-            )
-        )
-        index = self._index(snippet)
-        locations: list[LocateLocationState] = []
-        for item in payload.locations:
-            anchor = index.get(item.line)
-            if anchor is None:
-                continue
-            locations.append(
-                {
-                    "file": anchor[0],
-                    "line": item.line,
-                    "excerpt": anchor[1],
-                    "reason": item.reason,
-                }
-            )
-        return {"defect": defect, "locations": locations}
-
-    def _slices(
+    def _search(
         self,
-        slices: list[Slice],
-        correction: Change,
-        defect: Change,
-    ) -> list[Slice]:
-        commit = defect["after"]
-        grouped: dict[tuple[str | None, str | None], list[Anchor]] = {}
-        for current in slices:
-            path = current.file[0]
-            entries = [
-                (anchor.base[0], anchor.base[1] - 1)
-                for anchor in current.anchors
-                if anchor.base != (0, 0)
-            ]
-            if path is None or not entries:
-                continue
-            blamed = self._factory.repository.blame(path, correction["base"], entries)
-            for blame, _, origin in blamed:
-                if blame != commit or origin is None:
-                    continue
-                file = (
-                    (path if self._exists(defect["base"], path) else None),
-                    path,
-                )
-                grouped.setdefault(file, []).append(
-                    Anchor(
-                        base=(0, 0),
-                        after=(origin[0], origin[1] + 1),
+        *,
+        rationale: str,
+        hints: str,
+        snippet: str,
+        tool: LocateTool,
+    ) -> LocateResponseSchema:
+        node = ToolNode(
+            tool.tools(),
+            handle_tool_errors=lambda error: str(error),
+            wrap_tool_call=DuplicateCallGuard(),
+        )
+        budget = TurnBudget(self._steps, max_errors=3)
+        # Each react-agent cycle traverses 4 graph nodes (pre_model_hook, agent,
+        # post_model_hook, tools) plus a final cycle to reach the structured
+        # response.
+        limit = (self._steps + budget.max_errors + 1) * 4
+        graph = create_react_agent(
+            self._llm,
+            tools=node,
+            prompt=self._prompt(),
+            response_format=(
+                "Return the defect locations as a JSON object with a `locations` "
+                "array of {file, line} and an optional `reason`.",
+                LocateResponseSchema,
+            ),
+            pre_model_hook=ResolvedErrorFilter(),
+            post_model_hook=budget,
+        )
+        result = graph.invoke(
+            {
+                "messages": [
+                    HumanMessage(
+                        content=self._message(
+                            rationale=rationale,
+                            hints=hints,
+                            snippet=snippet,
+                        )
                     )
-                )
-        return [Slice(file=file, anchors=anchors) for file, anchors in grouped.items()]
+                ],
+                "remaining_steps": limit,
+            },
+            config={"recursion_limit": limit},
+        )
+        structured = (
+            result["structured_response"] if isinstance(result, dict) else result
+        )
+        if isinstance(structured, LocateResponseSchema):
+            return structured
+        return LocateResponseSchema.model_validate(structured)
 
-    def _exists(self, commit: str | None, path: str) -> bool:
-        if commit is None:
-            return False
-        try:
-            self._factory.repository.blob(commit, path)
-        except FileNotFoundError:
-            return False
-        return True
+    def _prompt(self) -> str:
+        # Task description and a high-level workflow. Tool semantics live in the
+        # tool docstrings, which the agent reads through the function-calling
+        # schemas; they are not restated here.
+        return inspect.cleandoc(
+            """
+            Locate the lines in the inducing change that carry the defect the
+            correction repairs.
 
-    def _index(self, snippet: str) -> dict[int, tuple[str, str]]:
-        result: dict[int, tuple[str, str]] = {}
-        path = ""
-        for line in snippet.splitlines():
-            if line.startswith("File: "):
-                path = line[len("File: ") :]
-                continue
-            head, _, text = line.partition(" | ")
-            try:
-                number = int(head)
-            except ValueError:
-                continue
-            result[number] = (path, text)
-        return result
+            You are given the root cause of the defect and the defect statements
+            identified in the correction. These describe the fix; the defect itself
+            lives in the inducing change. You are also given a starting view of the
+            inducing change. Use the tools to read further.
+
+            Workflow:
+            1. Read the inducing change. If the defect statements correspond
+               directly to lines there, that is your answer.
+            2. If the code the defect statements describe is not directly visible —
+               renamed, moved, or in another file — grep the inducing change
+               snapshot for that code and show the relevant file to read it.
+            3. You may read the correction to understand the intended fix or to
+               match code that was renamed between the two.
+            4. Report the file and line of each location that carries the defect.
+               Be conservative: report a line only if it carries the defect.
+
+            A defect lives in source code. Report only lines of source code. Never
+            report a line in documentation, configuration, data, or other non-code
+            files, even if it mentions the defect — you may read such files for
+            context, but they cannot be a defect location.
+            """
+        )
+
+    def _message(
+        self,
+        *,
+        rationale: str,
+        hints: str,
+        snippet: str,
+    ) -> str:
+        return inspect.cleandoc(
+            """
+            # Root cause
+            {rationale}
+
+            # Defect statements (from the correction)
+            {hints}
+
+            # Inducing change
+            {snippet}
+            """
+        ).format(rationale=rationale, hints=hints, snippet=snippet)
 
     def _hint(self, causes: list[object]) -> str:
         lines: list[str] = []
@@ -224,36 +240,3 @@ class LocateNode:
             lines.append("\n".join(statements))
         return "\n".join(lines)
 
-    def _locate_prompt(
-        self,
-        *,
-        rationale: str,
-        hints: str,
-        snippet: str,
-    ) -> str:
-        template = dedent(
-            """
-            Identify the exact lines in the provided code snippet where the defect sits.
-            Each line is prefixed with its line number and a pipe separator.
-            Return only line numbers that appear in the snippet and that carry the defect described by the root cause and defect statements.
-            Be conservative. If a line is unrelated to the defect, do not return it.
-            Your line numbers, excerpts, and reasons must agree.
-
-            Respond only in JSON.
-            Use this schema: {{"locations": [{{"line": integer, "excerpt": string, "reason": string}}]}}.
-
-            Root cause:
-            {rationale}
-
-            Defect statements:
-            {hints}
-
-            Code snippet:
-            {snippet}
-            """
-        ).strip()
-        return template.format(
-            rationale=rationale,
-            hints=hints,
-            snippet=snippet,
-        )

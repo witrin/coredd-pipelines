@@ -25,6 +25,7 @@ from benchmark.attribution.reason import (
     SummarizeNode,
 )
 from benchmark.attribution.tracing import Trace
+from benchmark.localization.agent import LocateToolFactory
 from benchmark.localization.graph import LocateGraph
 from benchmark.localization.reason import LocateNode
 from langchain_openai import ChatOpenAI
@@ -142,7 +143,11 @@ def localization_change_trace(
             expand=ExpandNode(factory=factory),
             hint=HintNode(factory=factory, llm=llm),
             refine=RefineNode(factory=factory),
-            locate=LocateNode(factory=factory, llm=llm),
+            locate=LocateNode(
+                factory=factory,
+                tool=LocateToolFactory(repository),
+                llm=llm,
+            ),
         )
         monitor = TraceMonitor(sink=context.log.info)
         trace = Trace(

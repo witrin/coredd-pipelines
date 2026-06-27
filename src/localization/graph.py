@@ -232,14 +232,12 @@ class LocateGraph:
 
     def _run_locate(self, state: LocateGraphState) -> dict[str, object]:
         nodes = state["nodes"]
-        expand = nodes["expand"]
         hint = nodes["hint"]
         output = self._locate.run(
             {
                 "correction": state["correction"],
                 "rationale": state["rationale"],
                 "causes": hint["causes"],
-                "expansion": expand["expansion"],
                 "defect": state["defect"],
             }
         )
