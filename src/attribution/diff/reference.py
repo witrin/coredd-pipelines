@@ -870,29 +870,20 @@ class PatchFactory:
             if (end - 1) in index[side]:
                 high[side] = index[side][end - 1]
 
+        # Expand both sides to the same paired context line. A context line only
+        # exists if it is unchanged in both revisions, so the base and after
+        # ranges must grow together: taking one side from a context pair without
+        # its partner yields an asymmetric hunk whose declared lengths no longer
+        # match the lines project() can emit (UnidiffParseError downstream).
+        lowest = min(low[0], low[1])
+        highest = max(high[0], high[1])
         low = (
-            (
-                context[min(low[0], low[1])][0]
-                if low[0] < float("inf") and min(low[0], low[1]) < float("inf")
-                else anchors[0][0]
-            ),
-            (
-                context[min(low[0], low[1])][1]
-                if low[1] < float("inf") and min(low[0], low[1]) < float("inf")
-                else anchors[1][0]
-            ),
+            context[lowest][0] if lowest < float("inf") else anchors[0][0],
+            context[lowest][1] if lowest < float("inf") else anchors[1][0],
         )
         high = (
-            (
-                context[max(high[0], high[1])][0]
-                if high[0] > -1 and max(high[0], high[1]) > -1
-                else anchors[0][1] - 1
-            ),
-            (
-                context[max(high[0], high[1])][1]
-                if high[0] > -1 and max(high[0], high[1]) > -1
-                else anchors[1][1] - 1
-            ),
+            context[highest][0] if highest > -1 else anchors[0][1] - 1,
+            context[highest][1] if highest > -1 else anchors[1][1] - 1,
         )
 
         return Context(
