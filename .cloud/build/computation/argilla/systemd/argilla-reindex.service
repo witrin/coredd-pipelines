@@ -4,15 +4,26 @@ After=argilla-server.service
 Requires=argilla-server.service
 PartOf=argilla-server.service
 # Unit-Version: ${unit_version}
-# Retry generously: a failed reindex (search engine or database not ready yet)
-# is retried until it succeeds. StartLimit is raised so systemd does not give
-# up during a slow Elasticsearch cold start.
-StartLimitIntervalSec=600
-StartLimitBurst=60
+# Retry indefinitely. A failed reindex (the argilla-server container not yet
+# created, or search engine / database not ready) must be retried until it
+# succeeds. StartLimitIntervalSec=0 disables systemd's start-rate limiter, so a
+# slow stack cold start can never burn through a finite burst and leave the unit
+# permanently failed -- which is exactly what the previous 60-burst limiter did:
+# the container did not exist yet at boot, the readiness check failed 60x in
+# 5 min, and systemd gave up for good.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# ExecStartPre is the readiness gate: a single non-blocking probe that the
+# argilla-server container exists and responds. If it does not yet (image pull
+# in argilla-server's ExecStartPre still running, container not created), this
+# whole unit fails and systemd reschedules it via Restart=on-failure -- no shell
+# loop, systemd owns the waiting. `After=argilla-server.service` alone is not
+# enough: Type=simple marks the server started once ExecStart is *invoked*, not
+# once `docker run` has created the container.
+ExecStartPre=/usr/bin/docker exec argilla-server true
 ExecStart=/usr/bin/docker exec argilla-server python -m argilla_server search-engine reindex
 Restart=on-failure
 RestartSec=5

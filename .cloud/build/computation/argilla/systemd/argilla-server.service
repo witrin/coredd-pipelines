@@ -4,8 +4,12 @@ After=argilla-elastisearch.service argilla-redis.service docker.service
 Requires=argilla-elastisearch.service argilla-redis.service docker.service
 # Unit-Version: ${unit_version}
 
+# Type=exec (not simple): the unit counts as started only once the ExecStart
+# binary has been exec'd, i.e. after the ExecStartPre image pull finishes and
+# `docker run` is actually executing. Units ordered After=argilla-server.service
+# (notably argilla-reindex) then no longer race the pull / container creation.
 [Service]
-Type=simple
+Type=exec
 RemainAfterExit=yes
 Restart=on-failure
 RestartSec=5
