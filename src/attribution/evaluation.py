@@ -546,8 +546,14 @@ class TraceMonitor:
             )
 
     def _on_llm_end(self, payload: dict[str, object]) -> None:
-        self._turn += 1
         tokens = self._tokens(payload)
+        # Some providers emit an llm_end without token usage (e.g. a streamed
+        # generation whose final chunk carries no usage_metadata). Such an event
+        # is not a distinct reasoning turn — skip it so the turn count and the log
+        # are not padded with zero-token lines.
+        if not tokens:
+            return
+        self._turn += 1
         self._total_input += tokens.get("input", 0)
         self._total_output += tokens.get("output", 0)
         self._total_cached += tokens.get("cached", 0)

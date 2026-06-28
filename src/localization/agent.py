@@ -41,23 +41,24 @@ class LocateTool:
             tool(self.grep),
         ]
 
+    def _commits(self) -> str:
+        # The two SHAs the agent may operate on, spelled out so every rejection
+        # names which SHA is the defective change and which is the corrective one.
+        return (
+            f"the defective change {self._defect['after']} "
+            f"or the corrective change {self._correction['after']}"
+        )
+
     def _resolve(self, commit: str) -> str:
         handle = self._repository.handle
         try:
             node = handle.revparse_single(commit)
             return str(node.peel(pygit2.Commit).id)
         except KeyError:
-            pass
-        for length in range(len(commit) - 1, 4, -1):
-            try:
-                node = handle.revparse_single(commit[:length])
-                sha = str(node.peel(pygit2.Commit).id)
-                raise ValueError(
-                    f"Commit {commit!r} does not exist. Did you mean {sha}?"
-                )
-            except KeyError:
-                continue
-        raise ValueError(f"Commit {commit!r} does not exist.")
+            raise ValueError(
+                f"Commit {commit!r} does not exist. Pass one of these two SHAs "
+                f"exactly: {self._commits()}."
+            )
 
     def _kind(self, commit: str) -> str:
         if commit in (self._defect["after"], self._defect["base"]):
@@ -65,17 +66,18 @@ class LocateTool:
         if commit in (self._correction["after"], self._correction["base"]):
             return "correction"
         raise ValueError(
-            "show and grep operate only on the inducing change "
-            f"({self._defect['after'][:12]}) or the correction "
-            f"({self._correction['after'][:12]})."
+            f"Commit {commit[:12]} is neither change. Pass one of these two SHAs "
+            f"exactly: {self._commits()}."
         )
 
     def show(self, commit: str, file: str) -> dict[str, Any]:
         """Show the regions one commit changed in one file, with surrounding code.
 
-        Returns the changed regions of `file` in `commit` expanded to their
-        enclosing functions, not the whole file. Lines of the inducing change are
-        prefixed with their line number; lines of the correction are not.
+        `commit` is one of the two SHAs from your initial message: the defective
+        change or the corrective change. Returns the changed regions of `file` in
+        `commit` expanded to their enclosing functions, not the whole file. Lines of
+        the defective change are prefixed with their line number; lines of the
+        corrective change are not.
         """
         commit = self._resolve(commit)
         kind = self._kind(commit)
@@ -114,8 +116,10 @@ class LocateTool:
     ) -> list[dict[str, Any]]:
         """Search the files of a commit snapshot with a regex.
 
-        Returns matching lines with their line number, across the whole snapshot
-        unless `path` restricts it. Defaults to the inducing change snapshot.
+        `commit`, when given, is one of the two SHAs from your initial message: the
+        defective change or the corrective change. Returns matching lines with their
+        line number across that commit's snapshot, restricted to `path` when given.
+        Defaults to the defective change.
         """
         if not needle:
             raise ValueError("grep needle must not be empty.")

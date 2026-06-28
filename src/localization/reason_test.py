@@ -135,8 +135,10 @@ class TestLocateNode(unittest.TestCase):
 
         message = agent.invoke.call_args.args[0]["messages"][0].content
         self.assertIn("# Root cause", message)
-        self.assertIn("# How the correction fixed it", message)
+        self.assertIn("# Refined context of the corrective change", message)
+        # The defective change's own diff is never revealed; the agent must search.
         self.assertNotIn("# Inducing change", message)
+        self.assertNotIn("# Defective change diff", message)
 
     def test_locate_requires_inputs(self) -> None:
         node = LocateNode()
@@ -179,6 +181,20 @@ class TestLocateTool(unittest.TestCase):
 
     def _tool(self) -> tuple[LocateTool, Mock]:
         repository = Mock()
+        # revparse_single resolves a known commit to itself; anything else raises
+        # KeyError, mirroring pygit2 so _resolve rejects unknown revisions.
+        known = {"da", "db", "ca", "cb"}
+
+        def revparse(commit: str):
+            if commit not in known:
+                raise KeyError(commit)
+            node = Mock()
+            peeled = Mock()
+            peeled.id = commit
+            node.peel.return_value = peeled
+            return node
+
+        repository.handle.revparse_single.side_effect = revparse
         tool = LocateTool(
             repository=repository,
             correction=self._correction(),

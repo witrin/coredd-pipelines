@@ -103,6 +103,8 @@ class LocateNode:
         payload = self._search(
             rationale=rationale.strip(),
             refinement=refinement.strip(),
+            defect=defect,
+            correction=correction,
             tool=tool,
         )
 
@@ -119,6 +121,8 @@ class LocateNode:
         *,
         rationale: str,
         refinement: str,
+        defect: Change,
+        correction: Change,
         tool: LocateTool,
     ) -> LocateResponseSchema:
         node = ToolNode(
@@ -150,6 +154,8 @@ class LocateNode:
                         content=self._message(
                             rationale=rationale,
                             refinement=refinement,
+                            defect=defect,
+                            correction=correction,
                         )
                     )
                 ],
@@ -170,29 +176,33 @@ class LocateNode:
         # schemas; they are not restated here.
         return inspect.cleandoc(
             """
-            Locate the lines in the inducing change that carry the defect the
-            correction repairs.
+            Locate the source lines in the defective change that carry the defect
+            the corrective change repairs.
 
-            You are given the root cause of the defect and the refined context of
-            how the correction fixed it. These describe the fix; the defect itself
-            lives in the inducing change, which is NOT shown to you — you must find
-            it with the tools.
+            Your initial message gives two inputs that describe the defect: the root
+            cause and the refined context of the corrective change. It also gives
+            two commit SHAs: the defective change and the corrective change. The
+            defective change is not shown to you; you locate the defect in it with
+            the tools. Every show and grep call takes one of these two SHAs.
 
             Workflow:
-            1. From the root cause and the fix, identify the code that carries the
-               defect. Grep the inducing change snapshot for that code and show the
-               relevant file to read it.
-            2. If the code is not directly present — renamed, moved, or in another
-               file — grep for related identifiers to find where it lives.
-            3. You may read the correction to understand the intended fix or to
-               match code that was renamed between the two.
-            4. Report the file and line of each location that carries the defect.
-               Be conservative: report a line only if it carries the defect.
+            1. From the root cause and the refined context, decide which code
+               carries the defect. Search the defective change with grep and read
+               the relevant file with show.
+            2. If that code is renamed, moved, or in another file, grep the
+               defective change for related identifiers until you locate it.
+            3. You may show or grep the corrective change as well, to understand the
+               repair or to match code that was renamed between the two changes.
+            4. Report each location that carries the defect, conservatively: a line
+               only if it carries the defect.
 
-            A defect lives in source code. Report only lines of source code. Never
-            report a line in documentation, configuration, data, or other non-code
-            files, even if it mentions the defect — you may read such files for
-            context, but they cannot be a defect location.
+            A defect lives in source code, so report only source-code lines. Never
+            report a line in documentation, configuration, data, or any other
+            non-code file. You may read such files for context, but they are never a
+            defect location.
+
+            Return a JSON object with a `locations` array of {file, line} objects
+            and an optional `reason` string.
             """
         )
 
@@ -201,14 +211,26 @@ class LocateNode:
         *,
         rationale: str,
         refinement: str,
+        defect: Change,
+        correction: Change,
     ) -> str:
         return inspect.cleandoc(
             """
+            # Commits
+            Defective change, where you locate the defect: {defect}
+            Corrective change, for reference: {correction}
+            Pass one of these two full SHAs to show and grep.
+
             # Root cause
             {rationale}
 
-            # How the correction fixed it (refined context)
+            # Refined context of the corrective change
             {refinement}
             """
-        ).format(rationale=rationale, refinement=refinement)
+        ).format(
+            rationale=rationale,
+            refinement=refinement,
+            defect=defect["after"],
+            correction=correction["after"],
+        )
 
