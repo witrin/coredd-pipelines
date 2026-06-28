@@ -293,6 +293,95 @@ def filter_change_corpus(
 
 @asset(
     metadata={"version": "1.0.0"},
+    group_name="filter",
+    kinds={"gcs"},
+    ins={
+        "scope_change_raw": dg.AssetIn(partition_mapping=dg.AllPartitionMapping()),
+    },
+)
+def filter_change_reference(
+    context: dg.AssetExecutionContext,
+    scope_change_raw: Dict[str, pa.Table],
+    filter_change_corpus: pa.Table,
+) -> pa.Table:
+    """One row per corpus pull request: its raw PR payload, every commit SHA that identifies it (branch commits and the trunk merge/squash commit), its cleaned title/body, and its Python-file count."""
+    corpus = pl.from_arrow(filter_change_corpus).with_columns(
+        pl.col("files")
+        .list.eval(
+            pl.element().struct.field("name").str.ends_with(".py").cast(pl.Int64)
+        )
+        .list.sum()
+        .alias("python")
+    ).select("name", "number", "title", "body", "python")
+
+    raw = pl.from_arrow(pa.concat_tables(scope_change_raw.values()))
+
+    # The raw PR payload (one per PR) and the trunk merge/squash SHA. Kept so
+    # PlatformCache can build Changes without re-pulling scope_change_raw.
+    prs = (
+        raw.lazy()
+        .filter(pl.col("type") == "pr")
+        .with_columns(
+            pl.col("payload").str.json_path_match("$.number").cast(pl.Int64).alias("number"),
+            pl.col("payload").str.json_path_match("$.merge_commit_sha").alias("merge"),
+        )
+        .select("name", "number", "payload", "merge")
+        .unique(subset=["name", "number"])
+    )
+
+    # Branch commit SHAs of each PR: pr.get_commits() (pre-squash). Aggregated to
+    # a list per PR so there is no per-SHA duplication of the cleaned text.
+    branch = (
+        raw.lazy()
+        .filter(pl.col("type") == "commit")
+        .select("name", pl.col("number").cast(pl.Int64), "payload")
+        .with_columns(
+            pl.col("payload")
+            .str.json_decode(pl.List(pl.Struct({"sha": pl.Utf8})))
+            .alias("items")
+        )
+        .drop("payload")
+        .explode("items")
+        .with_columns(pl.col("items").struct.field("sha").alias("sha"))
+        .drop("items")
+        .filter(pl.col("sha").is_not_null() & (pl.col("sha") != ""))
+        .group_by("name", "number")
+        .agg(pl.col("sha").alias("branch"))
+    )
+
+    evaluation = (
+        corpus.lazy()
+        .join(prs, on=["name", "number"], how="inner")
+        .join(branch, on=["name", "number"], how="left")
+        .with_columns(
+            pl.col("branch").fill_null(pl.lit([], dtype=pl.List(pl.Utf8)))
+        )
+        # The full set of SHAs that identify this PR: branch commits + the trunk
+        # merge/squash commit, deduplicated. The merge SHA is appended as a
+        # single-element list so it joins the branch list cleanly.
+        .with_columns(
+            pl.concat_list(
+                "branch",
+                pl.col("merge").fill_null("").str.split("\n").list.head(1),
+            )
+            .list.eval(pl.element().filter(pl.element() != ""))
+            .list.unique()
+            .alias("commits")
+        )
+        .select("name", "number", "payload", "title", "body", "python", "commits")
+        .collect()
+    )
+
+    context.log.info(
+        "Bundled %d corpus pull requests with their commit SHAs.",
+        evaluation.height,
+    )
+
+    return evaluation.to_arrow()
+
+
+@asset(
+    metadata={"version": "1.0.0"},
     partitions_def=partitions.filter_change_labels_partition,
     group_name="filter",
     kinds={"gcs"},
