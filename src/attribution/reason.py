@@ -6,7 +6,12 @@ from pydantic import BaseModel, ValidationError
 
 from benchmark.attribution.domain import Anchor, Change, FileOperation, JsonDict, OperationType, Slice
 from benchmark.attribution.diff.context import PatchScope
-from benchmark.attribution.diff.reference import PatchFactory, PatchView, SourceManifest
+from benchmark.attribution.diff.reference import (
+    Numbering,
+    PatchFactory,
+    PatchView,
+    SourceManifest,
+)
 
 
 class ExplainRunState(TypedDict, total=False):
@@ -655,7 +660,7 @@ class HintNode:
             )
 
         try:
-            renderer = PatchView(expansion)
+            renderer = PatchView(expansion, numbering=Numbering.REF)
         except Exception as error:
             raise ValueError(
                 f"HintNode requires parseable expanded patch content: {expansion!r}"

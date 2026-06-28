@@ -6,8 +6,8 @@ from unittest.mock import Mock, patch
 
 from unidiff import PatchSet
 
-from benchmark.attribution.diff.reference import PatchView
-from benchmark.attribution.domain import Change, FileOperation
+from benchmark.attribution.diff.reference import Numbering, PatchView
+from benchmark.attribution.domain import Change
 from benchmark.localization.agent import LocateTool, LocateToolFactory
 from benchmark.localization.graph import LocateGraph
 from benchmark.localization.reason import (
@@ -33,9 +33,9 @@ class TestPatchViewNumbered(unittest.TestCase):
         )
 
     def test_after_numbered(self) -> None:
-        out = PatchView(self._patch(), numbered=True).after()
+        out = PatchView(self._patch(), numbering=Numbering.AFTER).after()
 
-        self.assertEqual(out, "File: a.py\n4 | foo\n5 | bar\n6 | baz")
+        self.assertEqual(out, "File: a.py\nL4: foo\nL5: bar\nL6: baz")
 
     def test_after_plain_default(self) -> None:
         out = PatchView(self._patch()).after()
@@ -43,9 +43,9 @@ class TestPatchViewNumbered(unittest.TestCase):
         self.assertEqual(out, "File: a.py\nfoo\nbar\nbaz")
 
     def test_base_numbered(self) -> None:
-        out = PatchView(self._patch(), numbered=True).base()
+        out = PatchView(self._patch(), numbering=Numbering.BASE).base()
 
-        self.assertEqual(out, "File: a.py\n4 | foo\n5 | baz")
+        self.assertEqual(out, "File: a.py\nL4: foo\nL5: baz")
 
     def test_base_plain_default(self) -> None:
         out = PatchView(self._patch()).base()
@@ -164,22 +164,20 @@ class TestLocateTool(unittest.TestCase):
             number=0, base="db", after="da", description="Introduce"
         )
 
-    def _expansion(self) -> PatchSet:
-        return PatchSet(
-            "\n".join(
-                [
-                    "diff --git a/a.py b/a.py",
-                    "--- a/a.py",
-                    "+++ b/a.py",
-                    "@@ -4,2 +4,3 @@",
-                    " keep",
-                    "+buggy_line",
-                    " tail",
-                ]
-            )
+    def _diff_text(self) -> str:
+        return "\n".join(
+            [
+                "diff --git a/a.py b/a.py",
+                "--- a/a.py",
+                "+++ b/a.py",
+                "@@ -4,2 +4,3 @@",
+                " keep",
+                "+buggy_line",
+                " tail",
+            ]
         )
 
-    def _tool(self) -> tuple[LocateTool, Mock]:
+    def _tool(self, rendered: str | None = None) -> tuple[LocateTool, Mock]:
         repository = Mock()
         # revparse_single resolves a known commit to itself; anything else raises
         # KeyError, mirroring pygit2 so _resolve rejects unknown revisions.
@@ -195,44 +193,53 @@ class TestLocateTool(unittest.TestCase):
             return node
 
         repository.handle.revparse_single.side_effect = revparse
+        # show renders DiffRenderer().render(repository.diff(...)). The diff object
+        # is opaque to the test; DiffRenderer is patched to yield the unified text.
+        repository.diff.return_value = Mock()
         tool = LocateTool(
             repository=repository,
             correction=self._correction(),
             defect=self._defect(),
         )
-        tool._factory = Mock(spec_set=["expand"])
-        tool._factory.expand.return_value = self._expansion()
-        operation = FileOperation(base="a.py", after="a.py", operation=Mock())
-        repository.manifest.return_value = [operation]
+        self._rendered = (
+            rendered if rendered is not None else self._diff_text()
+        )
         return tool, repository
+
+    def _show(self, tool: LocateTool, **kwargs) -> dict:
+        with patch(
+            "benchmark.localization.agent.DiffRenderer.render",
+            return_value=self._rendered,
+        ):
+            return tool.show(**kwargs)
 
     def test_show_defect_is_numbered(self) -> None:
         tool, _ = self._tool()
 
-        out = tool.show(commit="da", file="a.py")
+        out = self._show(tool, commit="da", file="a.py")
 
-        self.assertIn("5 | buggy_line", out["patch"])
-        self.assertIn("File: a.py", out["patch"])
+        # The defect side renders a diff with after line numbers in grep format.
+        self.assertIn("L5: | +buggy_line", out["patch"])
 
     def test_show_correction_is_plain(self) -> None:
         tool, _ = self._tool()
 
-        out = tool.show(commit="ca", file="a.py")
+        out = self._show(tool, commit="ca", file="a.py")
 
-        self.assertIn("buggy_line", out["patch"])
-        self.assertNotIn("5 | buggy_line", out["patch"])
+        # The correction side renders the same diff without line numbers.
+        self.assertIn("+buggy_line", out["patch"])
+        self.assertNotIn("L5:", out["patch"])
 
     def test_show_rejects_unknown_commit(self) -> None:
         tool, _ = self._tool()
 
         with self.assertRaises(ValueError):
-            tool.show(commit="zz", file="a.py")
+            self._show(tool, commit="zz", file="a.py")
 
     def test_show_unmodified_file_returns_note(self) -> None:
-        tool, repository = self._tool()
-        repository.manifest.return_value = []
+        tool, _ = self._tool(rendered="")
 
-        out = tool.show(commit="da", file="other.py")
+        out = self._show(tool, commit="da", file="other.py")
 
         self.assertEqual(out["patch"], "")
 

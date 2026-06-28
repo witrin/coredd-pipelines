@@ -6,6 +6,7 @@ from textwrap import dedent
 
 import pygit2
 from benchmark.attribution.diff.reference import (
+    Numbering,
     PatchContext,
     PatchFactory,
     PatchView,
@@ -35,7 +36,8 @@ class TestPatchView(unittest.TestCase):
                     "+new",
                     " keep",
                 ]
-            )
+            ),
+            numbering=Numbering.REF,
         )
 
         lines = renderer.render().splitlines()
@@ -48,6 +50,31 @@ class TestPatchView(unittest.TestCase):
         self.assertIn("0-0-1 | +new", lines[5])
         self.assertIn("0-0-2 |  keep", lines[6])
         self.assertTrue(all(" | " in line for line in lines))
+
+    def test_render_after_numbers_diff_lines(self) -> None:
+        renderer = PatchView(
+            "\n".join(
+                [
+                    "diff --git a/a.py b/a.py",
+                    "--- a/a.py",
+                    "+++ b/a.py",
+                    "@@ -1,2 +1,2 @@",
+                    "-old",
+                    "+new",
+                    " keep",
+                ]
+            ),
+            numbering=Numbering.AFTER,
+        )
+
+        lines = renderer.render().splitlines()
+
+        # The diff markers stay; the left column is the after line number in grep
+        # format. The deleted line has no after number, so its column is blank.
+        self.assertIn("| -old", lines[4])
+        self.assertNotIn("L", lines[4].split("|")[0])
+        self.assertIn("L1: | +new", lines[5])
+        self.assertIn("L2: |  keep", lines[6])
 
     def test_resolve_validates_reference_bounds(self) -> None:
         renderer = PatchView(

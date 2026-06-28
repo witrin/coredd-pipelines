@@ -176,33 +176,37 @@ class LocateNode:
         # schemas; they are not restated here.
         return inspect.cleandoc(
             """
-            Locate the source lines in the defective change that carry the defect
-            the corrective change repairs.
+            Locate the source lines in the defective change that carry the defect the
+            corrective change repairs.
 
-            Your initial message gives two inputs that describe the defect: the root
-            cause and the refined context of the corrective change. It also gives
-            two commit SHAs: the defective change and the corrective change. The
-            defective change is not shown to you; you locate the defect in it with
-            the tools. Every show and grep call takes one of these two SHAs.
+            A line carries the defect if the root cause identifies it as responsible
+            for the defect. This is independent of the corrective change: a line can
+            carry the defect even if the corrective change never touches it, and a line
+            the corrective change only touches incidentally (refactoring, renaming,
+            formatting) does not.
+
+            Your initial message gives the root cause and the refined context of the
+            corrective change, plus two commit SHAs: the defective change and the
+            corrective change. The defective change is not shown to you; you locate the
+            defect in it with the tools. Every show and grep call takes one of these
+            two SHAs.
 
             Workflow:
-            1. From the root cause and the refined context, decide which code
-               carries the defect. Search the defective change with grep and read
-               the relevant file with show.
-            2. If that code is renamed, moved, or in another file, grep the
-               defective change for related identifiers until you locate it.
-            3. You may show or grep the corrective change as well, to understand the
-               repair or to match code that was renamed between the two changes.
-            4. Report each location that carries the defect, conservatively: a line
-               only if it carries the defect.
+            1. From the root cause, identify the responsible code. Grep the defective
+               change and read the relevant file with show.
+            2. If you cannot locate it directly, keep searching the defective change
+               until you do.
+            3. You may show or grep the corrective change too, only to locate code or
+               match it across the two changes.
+            4. Report each location conservatively: a line only if the root cause makes
+               it responsible, not if it is merely adjacent or incidentally touched.
 
-            A defect lives in source code, so report only source-code lines. Never
-            report a line in documentation, configuration, data, or any other
-            non-code file. You may read such files for context, but they are never a
-            defect location.
+            Report only code lines. Never report documentation, configuration, or data
+            lines; you may read such files for context, but they are never a defect
+            location.
 
-            Return a JSON object with a `locations` array of {file, line} objects
-            and an optional `reason` string.
+            Return a JSON object with a `locations` array of {file, line} objects and
+            an optional `reason` string.
             """
         )
 
@@ -230,7 +234,7 @@ class LocateNode:
         ).format(
             rationale=rationale,
             refinement=refinement,
-            defect=defect["after"],
-            correction=correction["after"],
+            defect=defect["after"][:12],
+            correction=correction["after"][:12],
         )
 

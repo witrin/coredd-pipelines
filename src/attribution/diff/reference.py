@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 from typing import Iterable, List, Tuple, overload
 
 import pygit2
@@ -22,9 +23,28 @@ from benchmark.attribution.history import VersionControl
 Interval = Tuple[int, int]
 
 
+class Numbering(enum.Enum):
+    """How a PatchView prefixes each rendered line.
+
+    NONE prefixes nothing. REF prefixes the file-hunk-line reference label (used by
+    HintNode to address lines). AFTER and BASE prefix the absolute line number in the
+    grep format ``L<n>:`` on the after / base revision; BOTH prefixes both numbers.
+    """
+
+    NONE = "none"
+    REF = "ref"
+    AFTER = "after"
+    BASE = "base"
+    BOTH = "both"
+
+
 class PatchView:
-    def __init__(self, source: patch.PatchSet | str, numbered: bool = False) -> None:
-        self._numbered = numbered
+    def __init__(
+        self,
+        source: patch.PatchSet | str,
+        numbering: Numbering = Numbering.NONE,
+    ) -> None:
+        self._numbering = numbering
         if isinstance(source, patch.PatchSet):
             self._patch = source
             return
@@ -46,7 +66,7 @@ class PatchView:
                 for line_index, line in enumerate(hunk):
                     rows.append(
                         (
-                            f"{file_index}-{hunk_index}-{line_index}",
+                            self._prefix(line, file_index, hunk_index, line_index),
                             str(line).rstrip("\n"),
                         )
                     )
@@ -55,6 +75,37 @@ class PatchView:
             f"{(reference or '').ljust(width)} | {line}"
             for reference, line in rows
         )
+
+    def _prefix(
+        self, line: patch.Line, file_index: int, hunk_index: int, line_index: int
+    ) -> str | None:
+        # The left-column label for a rendered diff line, per numbering mode. REF is
+        # the addressable file-hunk-line reference; AFTER/BASE/BOTH are absolute line
+        # numbers in grep format, blank where the line has no number on that side.
+        if self._numbering is Numbering.REF:
+            return f"{file_index}-{hunk_index}-{line_index}"
+        after = (
+            f"L{line.target_line_no}:"
+            if isinstance(line.target_line_no, int)
+            else ""
+        )
+        base = (
+            f"L{line.source_line_no}:"
+            if isinstance(line.source_line_no, int)
+            else ""
+        )
+        if self._numbering is Numbering.AFTER:
+            return after
+        if self._numbering is Numbering.BASE:
+            return base
+        if self._numbering is Numbering.BOTH:
+            return f"{base} {after}".strip()
+        return None
+
+    def _line_numbered(self) -> bool:
+        # The single-side snippet views show their line number when an absolute
+        # numbering mode is selected; REF and NONE render bare text.
+        return self._numbering in {Numbering.AFTER, Numbering.BASE, Numbering.BOTH}
 
     def base(self) -> str:
         blocks: list[str] = []
@@ -78,7 +129,9 @@ class PatchView:
                         [
                             f"File: {path}",
                             *[
-                                f"{line[0]} | {line[1]}" if self._numbered else line[1]
+                                f"L{line[0]}: {line[1]}"
+                                if self._line_numbered()
+                                else line[1]
                                 for line in lines
                             ],
                         ]
@@ -108,7 +161,9 @@ class PatchView:
                         [
                             f"File: {path}",
                             *[
-                                f"{line[0]} | {line[1]}" if self._numbered else line[1]
+                                f"L{line[0]}: {line[1]}"
+                                if self._line_numbered()
+                                else line[1]
                                 for line in lines
                             ],
                         ]

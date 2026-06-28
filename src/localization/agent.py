@@ -7,8 +7,9 @@ import pygit2
 from langchain_core.tools import BaseTool, tool
 from pathspec import PathSpec
 
-from benchmark.attribution.diff.reference import PatchFactory, PatchView
-from benchmark.attribution.domain import Change, FileOperation
+from benchmark.attribution.agent import DiffRenderer
+from benchmark.attribution.diff.reference import Numbering, PatchView
+from benchmark.attribution.domain import Change
 from benchmark.attribution.history import VersionControl
 
 
@@ -33,7 +34,6 @@ class LocateTool:
         self._repository = repository
         self._correction = correction
         self._defect = defect
-        self._factory = PatchFactory(repository)
 
     def tools(self) -> list[BaseTool]:
         return [
@@ -42,11 +42,11 @@ class LocateTool:
         ]
 
     def _commits(self) -> str:
-        # The two SHAs the agent may operate on, spelled out so every rejection
-        # names which SHA is the defective change and which is the corrective one.
+        # The two commits the agent may operate on. Abbreviated SHAs suffice — the
+        # agent passes them back through _resolve, which expands any prefix.
         return (
-            f"the defective change {self._defect['after']} "
-            f"or the corrective change {self._correction['after']}"
+            f"the defective change {self._defect['after'][:12]} "
+            f"or the corrective change {self._correction['after'][:12]}"
         )
 
     def _resolve(self, commit: str) -> str:
@@ -71,40 +71,32 @@ class LocateTool:
         )
 
     def show(self, commit: str, file: str) -> dict[str, Any]:
-        """Show the regions one commit changed in one file, with surrounding code.
+        """Show what one commit changed in one file, as a diff with line numbers.
 
         `commit` is one of the two SHAs from your initial message: the defective
-        change or the corrective change. Returns the changed regions of `file` in
-        `commit` expanded to their enclosing functions, not the whole file. Lines of
-        the defective change are prefixed with their line number; lines of the
-        corrective change are not.
+        change or the corrective change. Returns the unified diff of `file` in
+        `commit` with three lines of surrounding context. Each line is prefixed with
+        its absolute line number in the grep format ``L<n>:``; deleted lines have no
+        number on the after revision shown for the defective change.
         """
         commit = self._resolve(commit)
         kind = self._kind(commit)
         if kind == "defect":
             base, after = self._defect["base"], self._defect["after"]
-            numbered = True
+            numbering = Numbering.AFTER
         else:
             base, after = self._correction["base"], self._correction["after"]
-            numbered = False
+            numbering = Numbering.NONE
 
-        operation = self._operation(base, after, file)
-        if operation is None:
+        diff = self._repository.diff(base, after, context=3)
+        rendered = DiffRenderer().render(diff, file)
+        if not rendered.strip():
             return {
                 "file": file,
                 "patch": "",
                 "note": f"{file!r} was not modified by this commit.",
             }
-
-        expansion = str(
-            self._factory.expand(base, after, files=[operation])
-        )
-        if not expansion.strip():
-            return {"file": file, "patch": "", "note": "No changes to render."}
-
-        # numbered=True renders `File:` + `<n> | <text>` so the agent can cite a
-        # line; numbered=False renders `File:` + bare text only.
-        patch = PatchView(expansion, numbered=numbered).after()
+        patch = PatchView(rendered, numbering=numbering).render()
         return {"file": file, "patch": patch}
 
     def grep(
@@ -170,17 +162,6 @@ class LocateTool:
             if total >= max:
                 break
         return result
-
-    def _operation(
-        self,
-        base: str,
-        after: str,
-        file: str,
-    ) -> FileOperation | None:
-        for operation in self._repository.manifest(base, after):
-            if file in (operation.after, operation.base):
-                return operation
-        return None
 
 
 class LocateToolFactory:
