@@ -134,7 +134,7 @@ class HintOutput(TypedDict):
 class RefineInput(TypedDict, total=False):
     correction: Change
     expansion: str
-    causes: list[HintItemState]
+    statements: list[HintItemState]
 
 
 class RefineOutput(TypedDict, total=False):
@@ -715,6 +715,7 @@ class HintNode:
             Put fix lines only in `corrections`.
             Do not place fix lines in `causes`.
             Do not place defect lines in `corrections`.
+            Keep each list focused on the statements most directly responsible: list at most 3 reference labels in `causes` and at most 3 in `corrections`.
             Use the reference labels from the left column exactly as provided.
 
             Respond only in JSON.
@@ -748,20 +749,29 @@ class HintNode:
                 raise ValueError(
                     "HintNode entries must include non-empty string references."
                 )
+            statements = [
+                resolved
+                for reference in references
+                if (
+                    resolved := self._resolve(
+                        correction,
+                        renderer,
+                        reference,
+                        side,
+                        scope,
+                        paths,
+                    )
+                )
+                is not None
+            ]
+            # An item whose references all dropped carries no statement; skip it
+            # rather than emitting an empty hint.
+            if not statements:
+                continue
             parsed.append(
                 {
                     "reason": item.reason,
-                    "statements": [
-                        self._resolve(
-                            correction,
-                            renderer,
-                            reference,
-                            side,
-                            scope,
-                            paths,
-                        )
-                        for reference in references
-                    ],
+                    "statements": statements,
                 }
             )
         return parsed
@@ -774,22 +784,28 @@ class HintNode:
         side: str,
         scope: PatchScope,
         paths: dict[tuple[str | None, str | None], object],
-    ) -> HintStatementState:
+    ) -> HintStatementState | None:
+        # A reference may not resolve on the selected side (e.g. a pure addition
+        # has no base statement) or may live in a non-code file the scope binder
+        # cannot parse. Both are expected for the diverse corrective changes this
+        # node sees; the statement is dropped rather than raised, mirroring the
+        # original LLM4SZZ which silently skips statements it cannot place.
         for current in renderer.resolve([reference]):
-            path = self._path(correction, current.file, scope, paths)
+            try:
+                path = self._path(correction, current.file, scope, paths)
+            except ValueError:
+                return None
             for anchor in current.anchors:
                 base, after = path.resolve(anchor)
                 statement = base if side == "base" else after
                 if statement is None:
-                    raise ValueError(
-                        "HintNode references must resolve on the selected side."
-                    )
+                    return None
                 return {
                     "reference": reference,
                     "scope": statement.scope,
                     "excerpt": statement.excerpt,
                 }
-        raise ValueError("HintNode references must resolve to one statement.")
+        return None
 
     def _path(
         self,
@@ -824,8 +840,13 @@ class HintNode:
 class RefineNode:
     """Reduce the expansion context to a focused view."""
 
-    def __init__(self, factory: PatchFactory | None = None) -> None:
+    def __init__(
+        self, factory: PatchFactory | None = None, side: str = "base"
+    ) -> None:
+        if side not in {"base", "after"}:
+            raise ValueError("RefineNode side must be 'base' or 'after'.")
         self._factory = factory
+        self._side = side
 
     def _anchors(
         self,
@@ -848,22 +869,27 @@ class RefineNode:
         return result
 
     def run(self, input: RefineInput) -> RefineOutput:
-        """Reduce the expansion context to a focused view."""
+        """Reduce the expansion context to a focused view.
+
+        The statements to refine the context around are read from ``statements``:
+        the defect statements in attribution, the correction's fix statements in
+        localization.
+        """
         correction = input.get("correction")
         expansion = input.get("expansion")
-        causes = input.get("causes")
+        statements = input.get("statements")
         if correction is None or self._factory is None:
             raise ValueError(
-                "RefineNode requires correction, expansion, causes, and factory."
+                "RefineNode requires correction, expansion, statements, and factory."
             )
-        if expansion is None or causes is None:
-            raise ValueError("RefineNode requires expansion and causes.")
-        if not expansion.strip() or not causes:
-            raise ValueError("RefineNode requires non-empty expansion and causes.")
+        if expansion is None or statements is None:
+            raise ValueError("RefineNode requires expansion and statements.")
+        if not expansion.strip() or not statements:
+            raise ValueError("RefineNode requires non-empty expansion and statements.")
 
         references = [
             current["reference"]
-            for item in causes
+            for item in statements
             for current in list(item.get("statements") or [])
         ]
         try:
@@ -871,13 +897,13 @@ class RefineNode:
                 PatchView(
                     expansion if expansion.endswith("\n") else f"{expansion}\n"
                 ).resolve(references),
-                "base",
+                self._side,
             )
             refinement = self._factory.refine(
                 correction["base"],
                 correction["after"],
                 slices,
-                "base",
+                self._side,
                 force=True,
             )
         except Exception as error:

@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from unidiff import PatchSet
 
-from benchmark.attribution.diff.reference import PatchFactory, PatchView
+from benchmark.attribution.diff.reference import PatchView
 from benchmark.attribution.domain import Change, FileOperation
 from benchmark.localization.agent import LocateTool, LocateToolFactory
 from benchmark.localization.graph import LocateGraph
@@ -54,37 +54,11 @@ class TestPatchViewNumbered(unittest.TestCase):
 
 
 class TestLocateNode(unittest.TestCase):
-    """The locate node searches N(c) with an agent and resolves marks against it."""
+    """The locate node searches the inducing change guided by the fix context."""
 
-    def _expansion(self) -> PatchSet:
-        # The inducing change N(c): numbered after-lines are 4,5,6.
-        return PatchSet(
-            "\n".join(
-                [
-                    "diff --git a/a.py b/a.py",
-                    "--- a/a.py",
-                    "+++ b/a.py",
-                    "@@ -4,2 +4,3 @@",
-                    " keep",
-                    "+buggy_line",
-                    " tail",
-                ]
-            )
-        )
-
-    def _causes(self) -> list[dict[str, object]]:
-        return [
-            {
-                "reason": "Old line.",
-                "statements": [
-                    {
-                        "reference": "0-0-1",
-                        "scope": "scope:program",
-                        "excerpt": "bar",
-                    }
-                ],
-            }
-        ]
+    def _refinement(self) -> str:
+        # The refined context of the correction's fix — the agent's query.
+        return "File: a.py\n+if value is None:\n     return"
 
     def _inputs(self) -> dict[str, object]:
         return {
@@ -95,7 +69,7 @@ class TestLocateNode(unittest.TestCase):
                 description="Fix bar",
             ),
             "rationale": "The old line is faulty.",
-            "causes": self._causes(),
+            "refinement": self._refinement(),
             "defect": Change(
                 number=0,
                 base="defect-base",
@@ -105,11 +79,9 @@ class TestLocateNode(unittest.TestCase):
         }
 
     def _node(self, response: object) -> tuple[LocateNode, Mock]:
-        factory = PatchFactory.__new__(PatchFactory)
-        factory.repository = Mock()
         tool = Mock(spec_set=["tools"])
         tool.tools.return_value = []
-        node = LocateNode(factory=factory, tool=tool, llm=Mock())
+        node = LocateNode(tool=tool, llm=Mock())
 
         agent = Mock(spec_set=["invoke"])
         agent.invoke.return_value = {"structured_response": response}
@@ -124,9 +96,7 @@ class TestLocateNode(unittest.TestCase):
         )
         node, agent = self._node(response)
 
-        with patch.object(
-            PatchFactory, "expand", autospec=True, return_value=self._expansion()
-        ), patch(
+        with patch(
             "benchmark.localization.reason.create_react_agent", return_value=agent
         ):
             result = node.run(self._inputs())
@@ -142,9 +112,7 @@ class TestLocateNode(unittest.TestCase):
         )
         node, agent = self._node(response)
 
-        with patch.object(
-            PatchFactory, "expand", autospec=True, return_value=self._expansion()
-        ), patch(
+        with patch(
             "benchmark.localization.reason.create_react_agent", return_value=agent
         ):
             result = node.run(self._inputs())
@@ -152,11 +120,29 @@ class TestLocateNode(unittest.TestCase):
         self.assertEqual(result["locations"], [{"file": "other.py", "line": 99}])
         self.assertNotIn("reason", result)
 
+    def test_locate_does_not_reveal_inducing_change(self) -> None:
+        # The inducing change diff must NOT be handed to the agent — that would
+        # trivialise the search. The message carries only root cause + fix context.
+        response = LocateResponseSchema.model_validate(
+            {"locations": [{"file": "a.py", "line": 5}]}
+        )
+        node, agent = self._node(response)
+
+        with patch(
+            "benchmark.localization.reason.create_react_agent", return_value=agent
+        ):
+            node.run(self._inputs())
+
+        message = agent.invoke.call_args.args[0]["messages"][0].content
+        self.assertIn("# Root cause", message)
+        self.assertIn("# How the correction fixed it", message)
+        self.assertNotIn("# Inducing change", message)
+
     def test_locate_requires_inputs(self) -> None:
         node = LocateNode()
 
         with self.assertRaises(ValueError):
-            node.run({"rationale": "r", "causes": self._causes()})
+            node.run({"rationale": "r", "refinement": self._refinement()})
 
     def test_locate_rejects_nonpositive_steps(self) -> None:
         with self.assertRaises(ValueError):
@@ -315,7 +301,7 @@ class TestLocateGraph(unittest.TestCase):
                     number=0, base="defect-base", after="defect-sha", description="d"
                 ),
                 "nodes": {
-                    "hint": {"causes": [{"reason": "x", "statements": []}]},
+                    "refine": {"refinement": "File: a.py\n+if x is None:"},
                 },
             }
         )
@@ -323,6 +309,8 @@ class TestLocateGraph(unittest.TestCase):
         locate.run.assert_called_once()
         call = locate.run.call_args.args[0]
         self.assertNotIn("expansion", call)
+        # The locate node receives the refined fix context, not the raw causes.
+        self.assertEqual(call["refinement"], "File: a.py\n+if x is None:")
         self.assertEqual(
             result["locations"],
             [{"file": "a.py", "line": 5}],

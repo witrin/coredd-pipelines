@@ -216,11 +216,14 @@ class LocateGraph:
         nodes = state["nodes"]
         expand = nodes["expand"]
         hint = nodes["hint"]
+        # Refine the fix side (corrections): the agent receives the contiguous
+        # code around the correction's fix statements as its query, then searches
+        # the inducing change for the corresponding defect.
         output = self._refine.run(
             {
                 "correction": state["correction"],
                 "expansion": expand["expansion"],
-                "causes": hint["causes"],
+                "statements": hint["corrections"],
             }
         )
         return {
@@ -232,12 +235,12 @@ class LocateGraph:
 
     def _run_locate(self, state: LocateGraphState) -> dict[str, object]:
         nodes = state["nodes"]
-        hint = nodes["hint"]
+        refine = nodes["refine"]
         output = self._locate.run(
             {
                 "correction": state["correction"],
                 "rationale": state["rationale"],
-                "causes": hint["causes"],
+                "refinement": refine["refinement"],
                 "defect": state["defect"],
             }
         )

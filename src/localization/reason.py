@@ -7,9 +7,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import ToolNode, create_react_agent
 from pydantic import BaseModel
 
-from benchmark.attribution.diff.reference import PatchFactory, PatchView
 from benchmark.attribution.domain import Change
-from benchmark.attribution.reason import HintItemState
 from benchmark.attribution.search import (
     DuplicateCallGuard,
     ResolvedErrorFilter,
@@ -28,7 +26,7 @@ class LocateLocationState(TypedDict):
 class LocateInput(TypedDict, total=False):
     correction: Change
     rationale: str
-    causes: list[HintItemState]
+    refinement: str
     defect: Change
 
 
@@ -53,14 +51,12 @@ class LocateNode:
 
     def __init__(
         self,
-        factory: PatchFactory | None = None,
         tool: LocateTool | LocateToolFactory | None = None,
         llm: object | None = None,
         steps: int = 12,
     ) -> None:
         if steps < 1:
             raise ValueError("LocateNode steps must be positive.")
-        self._factory = factory
         self._tool = tool
         self._llm = llm
         self._steps = steps
@@ -69,37 +65,36 @@ class LocateNode:
         """Mark the defect locations in the inducing change via agentic search.
 
         The agent searches the inducing change ``defect`` with snapshot-local
-        ``show``/``grep`` tools, guided by the root cause and the defect
-        statements from the correction, and returns the file and line of each
-        defect location. The locations are taken as the agent reports them; no
-        post-hoc validation is applied, mirroring attribution.
+        ``show``/``grep`` tools, guided by the root cause and the refined context
+        of the correction's fix, and returns the file and line of each defect
+        location. The locations are taken as the agent reports them; no post-hoc
+        validation is applied, mirroring attribution.
+
+        The inducing change is deliberately NOT shown up front: revealing its
+        diff would hand the agent the answer instead of letting it search.
         """
         correction = input.get("correction")
         rationale = input.get("rationale")
-        causes = input.get("causes")
+        refinement = input.get("refinement")
         defect = input.get("defect")
-        if self._llm is None or self._factory is None or self._tool is None:
+        if self._llm is None or self._tool is None:
             raise ValueError(
-                "LocateNode requires correction, rationale, causes, defect, "
-                "factory, tool, and llm."
+                "LocateNode requires correction, rationale, refinement, defect, "
+                "tool, and llm."
             )
-        if correction is None or rationale is None or causes is None or defect is None:
+        if (
+            correction is None
+            or rationale is None
+            or refinement is None
+            or defect is None
+        ):
             raise ValueError(
-                "LocateNode requires correction, rationale, causes, and defect."
+                "LocateNode requires correction, rationale, refinement, and defect."
             )
-        if not rationale.strip() or not causes:
-            raise ValueError("LocateNode requires non-empty rationale and causes.")
-
-        # The inducing change expanded to its enclosing context, given to the
-        # agent as a starting view to ground its search. Context only — the agent
-        # may read further with the tools and reports locations directly.
-        expansion = str(self._factory.expand(defect["base"], defect["after"]))
-        try:
-            snippet = PatchView(expansion, numbered=True).after()
-        except Exception as error:
+        if not rationale.strip() or not refinement.strip():
             raise ValueError(
-                f"LocateNode requires parseable expanded patch content: {expansion!r}"
-            ) from error
+                "LocateNode requires non-empty rationale and refinement."
+            )
 
         tool = self._tool
         if isinstance(tool, LocateToolFactory):
@@ -107,8 +102,7 @@ class LocateNode:
 
         payload = self._search(
             rationale=rationale.strip(),
-            hints=self._hint(causes),
-            snippet=snippet,
+            refinement=refinement.strip(),
             tool=tool,
         )
 
@@ -124,8 +118,7 @@ class LocateNode:
         self,
         *,
         rationale: str,
-        hints: str,
-        snippet: str,
+        refinement: str,
         tool: LocateTool,
     ) -> LocateResponseSchema:
         node = ToolNode(
@@ -156,8 +149,7 @@ class LocateNode:
                     HumanMessage(
                         content=self._message(
                             rationale=rationale,
-                            hints=hints,
-                            snippet=snippet,
+                            refinement=refinement,
                         )
                     )
                 ],
@@ -181,17 +173,17 @@ class LocateNode:
             Locate the lines in the inducing change that carry the defect the
             correction repairs.
 
-            You are given the root cause of the defect and the defect statements
-            identified in the correction. These describe the fix; the defect itself
-            lives in the inducing change. You are also given a starting view of the
-            inducing change. Use the tools to read further.
+            You are given the root cause of the defect and the refined context of
+            how the correction fixed it. These describe the fix; the defect itself
+            lives in the inducing change, which is NOT shown to you — you must find
+            it with the tools.
 
             Workflow:
-            1. Read the inducing change. If the defect statements correspond
-               directly to lines there, that is your answer.
-            2. If the code the defect statements describe is not directly visible —
-               renamed, moved, or in another file — grep the inducing change
-               snapshot for that code and show the relevant file to read it.
+            1. From the root cause and the fix, identify the code that carries the
+               defect. Grep the inducing change snapshot for that code and show the
+               relevant file to read it.
+            2. If the code is not directly present — renamed, moved, or in another
+               file — grep for related identifiers to find where it lives.
             3. You may read the correction to understand the intended fix or to
                match code that was renamed between the two.
             4. Report the file and line of each location that carries the defect.
@@ -208,35 +200,15 @@ class LocateNode:
         self,
         *,
         rationale: str,
-        hints: str,
-        snippet: str,
+        refinement: str,
     ) -> str:
         return inspect.cleandoc(
             """
             # Root cause
             {rationale}
 
-            # Defect statements (from the correction)
-            {hints}
-
-            # Inducing change
-            {snippet}
+            # How the correction fixed it (refined context)
+            {refinement}
             """
-        ).format(rationale=rationale, hints=hints, snippet=snippet)
-
-    def _hint(self, causes: list[object]) -> str:
-        lines: list[str] = []
-        seen: set[tuple[str, str]] = set()
-        for item in causes:
-            statements: list[str] = []
-            for current in list(item.get("statements") or []):
-                scope = current["scope"]
-                excerpt = current["excerpt"]
-                key = (scope, excerpt)
-                if key in seen:
-                    continue
-                seen.add(key)
-                statements.append(f"- {scope} {excerpt}")
-            lines.append("\n".join(statements))
-        return "\n".join(lines)
+        ).format(rationale=rationale, refinement=refinement)
 

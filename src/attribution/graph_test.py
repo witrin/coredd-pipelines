@@ -984,6 +984,89 @@ class TestLLM4SZZGraph(unittest.TestCase):
         self.assertIn("Root cause rationale:", structured.invoke.call_args.args[0])
         self.assertIn("Expanded context:", structured.invoke.call_args.args[0])
 
+    def test_hint_prompt_limits_statements(self) -> None:
+        # Paper-conform: the LLM must pick few, directly-responsible statements
+        # (LLM4SZZ "may not exceed 3"), not split the whole patch into old/new.
+        llm = Mock(spec_set=["with_structured_output"])
+        structured = Mock(spec_set=["invoke"])
+        llm.with_structured_output.return_value = structured
+        structured.invoke.return_value = {
+            "causes": [{"references": ["0-0-0"], "reason": "x"}],
+            "corrections": [{"references": ["0-0-1"], "reason": "y"}],
+        }
+        HintNode(factory=self._hint_factory(), llm=llm).run(
+            {
+                "correction": self._correction(),
+                "rationale": "r",
+                "expansion": "\n".join(
+                    [
+                        "diff --git a/a.py b/a.py",
+                        "--- a/a.py",
+                        "+++ b/a.py",
+                        "@@ -1,2 +1,2 @@",
+                        "-old",
+                        "+new",
+                        " context",
+                    ]
+                ),
+            }
+        )
+
+        prompt = structured.invoke.call_args.args[0]
+        self.assertIn("at most 3 reference labels in `causes`", prompt)
+        self.assertIn("at most 3 in `corrections`", prompt)
+
+    def test_hint_skips_unresolvable_statements(self) -> None:
+        # A diverse correction can put an added (pure-add) line or a non-code
+        # reference into causes. Neither resolves on the base side, but the node
+        # must NOT crash: such statements are dropped, the resolvable ones kept.
+        # Here causes mixes a deletion (0-0-0, resolvable on base) with an added
+        # line (0-0-1, base side is None) — the deletion survives, the add drops.
+        llm = Mock(spec_set=["with_structured_output"])
+        structured = Mock(spec_set=["invoke"])
+        llm.with_structured_output.return_value = structured
+        structured.invoke.return_value = {
+            "causes": [
+                {"references": ["0-0-0", "0-0-1"], "reason": "mixed"}
+            ],
+            "corrections": [{"references": ["0-0-1"], "reason": "the fix"}],
+        }
+        node = HintNode(factory=self._hint_factory(), llm=llm)
+
+        result = node.run(
+            {
+                "correction": self._correction(),
+                "rationale": "r",
+                "expansion": "\n".join(
+                    [
+                        "diff --git a/a.py b/a.py",
+                        "--- a/a.py",
+                        "+++ b/a.py",
+                        "@@ -1,2 +1,2 @@",
+                        "-old",
+                        "+new",
+                        " context",
+                    ]
+                ),
+            }
+        )
+
+        # No raise. The added-line reference (0-0-1) dropped from base-side causes;
+        # the deletion (0-0-0) survived.
+        cause_refs = [
+            statement["reference"]
+            for item in result["causes"]
+            for statement in item["statements"]
+        ]
+        self.assertEqual(cause_refs, ["0-0-0"])
+        # corrections resolve on the after side, where the added line exists.
+        correction_refs = [
+            statement["reference"]
+            for item in result["corrections"]
+            for statement in item["statements"]
+        ]
+        self.assertEqual(correction_refs, ["0-0-1"])
+
     def test_hint_json(self) -> None:
         llm = Mock(spec_set=["with_structured_output"])
         structured = Mock(spec_set=["invoke"])
@@ -1009,6 +1092,8 @@ class TestLLM4SZZGraph(unittest.TestCase):
             )
 
     def test_hint_reference(self) -> None:
+        # A reference that resolves to nothing is dropped, not raised. With its
+        # only reference gone, the cause item carries no statement and is skipped.
         llm = Mock(spec_set=["with_structured_output"])
         structured = Mock(spec_set=["invoke"])
         llm.with_structured_output.return_value = structured
@@ -1018,25 +1103,29 @@ class TestLLM4SZZGraph(unittest.TestCase):
         }
         node = HintNode(factory=self._hint_factory(), llm=llm)
 
-        with self.assertRaises(ValueError):
-            node.run(
-                {
-                    "correction": self._correction(),
-                    "rationale": "Validation fails before normalization.",
-                    "expansion": "\n".join(
-                        [
-                            "diff --git a/a.py b/a.py",
-                            "--- a/a.py",
-                            "+++ b/a.py",
-                            "@@ -1 +1 @@",
-                            "-old",
-                            "+new",
-                        ]
-                    ),
-                }
-            )
+        result = node.run(
+            {
+                "correction": self._correction(),
+                "rationale": "Validation fails before normalization.",
+                "expansion": "\n".join(
+                    [
+                        "diff --git a/a.py b/a.py",
+                        "--- a/a.py",
+                        "+++ b/a.py",
+                        "@@ -1 +1 @@",
+                        "-old",
+                        "+new",
+                    ]
+                ),
+            }
+        )
+
+        self.assertEqual(result["causes"], [])
 
     def test_hint_fix_side(self) -> None:
+        # An added line (0-0-1) placed in causes has no base statement. It is
+        # dropped rather than raised — the diverse-correction case (pure-add
+        # defect) must survive without crashing the whole hint.
         llm = Mock(spec_set=["with_structured_output"])
         structured = Mock(spec_set=["invoke"])
         llm.with_structured_output.return_value = structured
@@ -1046,23 +1135,24 @@ class TestLLM4SZZGraph(unittest.TestCase):
         }
         node = HintNode(factory=self._hint_factory(), llm=llm)
 
-        with self.assertRaises(ValueError):
-            node.run(
-                {
-                    "correction": self._correction(),
-                    "rationale": "Validation fails before normalization.",
-                    "expansion": "\n".join(
-                        [
-                            "diff --git a/a.py b/a.py",
-                            "--- a/a.py",
-                            "+++ b/a.py",
-                            "@@ -1 +1 @@",
-                            "-old",
-                            "+new",
-                        ]
-                    ),
-                }
-            )
+        result = node.run(
+            {
+                "correction": self._correction(),
+                "rationale": "Validation fails before normalization.",
+                "expansion": "\n".join(
+                    [
+                        "diff --git a/a.py b/a.py",
+                        "--- a/a.py",
+                        "+++ b/a.py",
+                        "@@ -1 +1 @@",
+                        "-old",
+                        "+new",
+                    ]
+                ),
+            }
+        )
+
+        self.assertEqual(result["causes"], [])
 
     def test_hint_scope(self) -> None:
         llm = Mock(spec_set=["with_structured_output"])
@@ -1246,7 +1336,7 @@ class TestLLM4SZZGraph(unittest.TestCase):
                             "+new",
                         ]
                     ),
-                    "causes": [
+                    "statements": [
                         {
                             "reason": "Bug line.",
                             "statements": [
@@ -1298,6 +1388,84 @@ class TestLLM4SZZGraph(unittest.TestCase):
         )
         self.assertIn("--- a/a.py", result["refinement"])
 
+    def test_refine_after_side(self) -> None:
+        # Localization refines the fix (after) side: a pure-add statement
+        # (base=(0,0)) is kept because its after anchor exists, and "after" is
+        # passed through to factory.refine.
+        repository = object.__new__(VersionControl)
+        factory = PatchFactory(repository)
+        node = RefineNode(factory=factory, side="after")
+
+        with patch.object(
+            PatchFactory,
+            "refine",
+            autospec=True,
+            return_value=PatchSet(
+                "\n".join(
+                    [
+                        "diff --git a/a.py b/a.py",
+                        "--- a/a.py",
+                        "+++ b/a.py",
+                        "@@ -1 +1 @@",
+                        "-old",
+                        "+new",
+                    ]
+                )
+            ),
+        ) as materialize:
+            node.run(
+                {
+                    "correction": Change(
+                        number=1,
+                        base="base-sha",
+                        after="after-sha",
+                        description="Fix parser",
+                    ),
+                    "expansion": "\n".join(
+                        [
+                            "diff --git a/a.py b/a.py",
+                            "--- a/a.py",
+                            "+++ b/a.py",
+                            "@@ -1 +1 @@",
+                            "-old",
+                            "+new",
+                        ]
+                    ),
+                    "statements": [
+                        {
+                            "reason": "The fix line.",
+                            "statements": [
+                                {
+                                    "reference": "0-0-1",
+                                    "scope": None,
+                                    "excerpt": None,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+
+        materialize.assert_called_once()
+        # The selected anchor is the added line's after interval, and the side
+        # threaded to refine is "after".
+        self.assertEqual(
+            materialize.call_args.args[3:5],
+            (
+                [
+                    Slice(
+                        file=("a.py", "a.py"),
+                        anchors=[Anchor(base=(0, 0), after=(1, 2))],
+                    )
+                ],
+                "after",
+            ),
+        )
+
+    def test_refine_rejects_bad_side(self) -> None:
+        with self.assertRaises(ValueError):
+            RefineNode(side="middle")
+
     def test_refine_inputs(self) -> None:
         with self.assertRaises(ValueError):
             RefineNode().run({})
@@ -1326,7 +1494,7 @@ class TestLLM4SZZGraph(unittest.TestCase):
                             "+new",
                         ]
                     ),
-                    "causes": [],
+                    "statements": [],
                 }
             )
 

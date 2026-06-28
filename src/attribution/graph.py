@@ -335,7 +335,7 @@ class LLM4SZZGraph:
             {
                 "correction": state["correction"],
                 "expansion": expand["expansion"],
-                "causes": hint["causes"],
+                "statements": hint["causes"],
             }
         )
         return {

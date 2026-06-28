@@ -142,9 +142,8 @@ def localization_change_trace(
             aggregate=AggregateNode(llm=llm),
             expand=ExpandNode(factory=factory),
             hint=HintNode(factory=factory, llm=llm),
-            refine=RefineNode(factory=factory),
+            refine=RefineNode(factory=factory, side="after"),
             locate=LocateNode(
-                factory=factory,
                 tool=LocateToolFactory(repository),
                 llm=llm,
             ),
