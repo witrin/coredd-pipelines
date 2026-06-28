@@ -232,6 +232,16 @@ class PatchView:
 
 class PatchContext:
     @staticmethod
+    def _terminate(line: str) -> str:
+        # splitlines(keepends=True) preserves the original terminators, so the
+        # final line of a file without a trailing newline comes back without one.
+        # Emitting it verbatim glues that body line to the next rendered line
+        # (e.g. "-foo" followed by "+foo" collapses into "-foo+foo"), which both
+        # corrupts the hunk body count and makes the patch unparseable. We append
+        # a newline to every emitted line; the trailing content is unchanged.
+        return line if line.endswith(("\n", "\r")) else f"{line}\n"
+
+    @staticmethod
     def project(
         file: FileOperation,
         base: bytes | None,
@@ -259,51 +269,49 @@ class PatchContext:
         )
 
         for h in hunks:
-            # In unified diff, a hunk that affects zero lines is rendered
-            # as an insertion after line N. Our internal model stores
-            # boundaries before line k, so when a range contains no lines
-            # we subtract one from the start when writing the header.
-            # See also https://www.gnu.org/software/diffutils/manual/html_node/Detailed-Unified.html
-            hunk = patch.Hunk(
-                src_start=(
-                    max(0, h.base[0] - 1) if (h.base[1] - h.base[0]) == 0 else h.base[0]
-                ),
-                src_len=(h.base[1] - h.base[0]),
-                tgt_start=(
-                    max(0, h.after[0] - 1)
-                    if (h.after[1] - h.after[0]) == 0
-                    else h.after[0]
-                ),
-                tgt_len=(h.after[1] - h.after[0]),
-                section_header="",
-            )
-
+            # Emit the hunk body first, then derive the @@ header lengths from the
+            # lines actually emitted. A context line is one unchanged line shared
+            # by both revisions, so its source and target advance together; the
+            # gaps between consecutive changes are equal on both axes for any
+            # well-formed hunk. We render context from the source side and count
+            # what we emit, so the declared header can never disagree with the body.
+            lines: list[patch.Line] = []
             cursor = (h.base[0], h.after[0])  # (base_cursor, after_cursor)
 
             for change in h.changes:
-                for line in source[
-                    cursor[0]
-                    - 1 : cursor[0]
-                    - 1
-                    + min(change.base[0] - cursor[0], change.after[0] - cursor[1])
-                ]:
-                    hunk.append(patch.Line(line, " "))
+                lead = change.base[0] - cursor[0]
+                for line in source[cursor[0] - 1 : cursor[0] - 1 + lead]:
+                    lines.append(patch.Line(PatchContext._terminate(line), " "))
 
                 for line in source[change.base[0] - 1 : change.base[1] - 1]:
-                    hunk.append(patch.Line(line, "-"))
+                    lines.append(patch.Line(PatchContext._terminate(line), "-"))
 
                 for line in target[change.after[0] - 1 : change.after[1] - 1]:
-                    hunk.append(patch.Line(line, "+"))
+                    lines.append(patch.Line(PatchContext._terminate(line), "+"))
 
                 cursor = (change.base[1], change.after[1])
 
-            for line in source[
-                cursor[0]
-                - 1 : cursor[0]
-                - 1
-                + min(h.base[1] - cursor[0], h.after[1] - cursor[1])
-            ]:
-                hunk.append(patch.Line(line, " "))
+            tail = h.base[1] - cursor[0]
+            for line in source[cursor[0] - 1 : cursor[0] - 1 + tail]:
+                lines.append(patch.Line(PatchContext._terminate(line), " "))
+
+            base_len = sum(1 for line in lines if line.line_type in (" ", "-"))
+            after_len = sum(1 for line in lines if line.line_type in (" ", "+"))
+
+            # In unified diff, a hunk that affects zero lines on one side is
+            # rendered as an insertion/deletion after line N. Our internal model
+            # stores boundaries before line k, so when a side contributes no lines
+            # we subtract one from its start when writing the header.
+            # See also https://www.gnu.org/software/diffutils/manual/html_node/Detailed-Unified.html
+            hunk = patch.Hunk(
+                src_start=max(0, h.base[0] - 1) if base_len == 0 else h.base[0],
+                src_len=base_len,
+                tgt_start=max(0, h.after[0] - 1) if after_len == 0 else h.after[0],
+                tgt_len=after_len,
+                section_header="",
+            )
+            for line in lines:
+                hunk.append(line)
 
             result.append(hunk)
 
@@ -463,13 +471,8 @@ class PatchFactory:
         n: int = 3,
     ) -> patch.PatchSet:
         result = patch.PatchSet("")
-        diff = self.repository.diff(base, after)
 
         for file in files or self.repository.manifest(base, after):
-            delta = self._locate(diff, file)
-            if delta is None:
-                continue
-
             source = self.read(base, file.base)
             target = self.read(after, file.after)
             hunks: List[Context] = []
@@ -491,20 +494,22 @@ class PatchFactory:
                     target.decode("utf-8", "ignore").splitlines(),
                 ]
 
+                # Diff the two file contents directly rather than reusing the
+                # commit diff. The commit diff carries rename/copy detection,
+                # which can pair this path with an unrelated file that shares
+                # content (e.g. a common license header) and thereby drop the
+                # file's real change. The endpoints named by the FileOperation
+                # are authoritative; diffing their bytes is what the operation
+                # actually means, independent of how the commit diff grouped it.
                 changes: List[Anchor] = []
-                for hunk in delta.hunks:
+                for hunk in pygit2.Patch.create_from(
+                    source,
+                    target,
+                    old_as_path=path,
+                    new_as_path=path,
+                    context_lines=0,
+                ).hunks:
                     changes.extend(PatchContext.extract(hunk))
-                changes = [
-                    change
-                    for change in changes
-                    if any(
-                        line.strip()
-                        for line in (
-                            lines[0][change.base[0] - 1 : change.base[1] - 1]
-                            + lines[1][change.after[0] - 1 : change.after[1] - 1]
-                        )
-                    )
-                ]
 
                 context = self._context(changes, [len(lines[0]), len(lines[1])])
 
@@ -772,9 +777,20 @@ class PatchFactory:
         )
 
     def _locate(self, diff: pygit2.Diff, file: FileOperation) -> pygit2.Patch | None:
+        # A renamed path can carry two deltas in one diff: the rename itself
+        # (old=base, new=after) and a same-path delete (old=after, new=after).
+        # Both match `after`, so matching either endpoint alone may pick the
+        # empty delete and drop every added line. When the operation names both
+        # endpoints we require the delta to match both; otherwise the present
+        # endpoint alone identifies a pure addition or deletion.
         for item in diff:
-            if (file.after and item.delta.new_file.path == file.after) or (
-                file.base and item.delta.old_file.path == file.base
+            base_ok = item.delta.old_file.path == file.base
+            after_ok = item.delta.new_file.path == file.after
+            if file.base is not None and file.after is not None:
+                if base_ok and after_ok:
+                    return item
+            elif (file.after is not None and after_ok) or (
+                file.base is not None and base_ok
             ):
                 return item
         return None

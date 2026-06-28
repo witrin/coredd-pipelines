@@ -707,8 +707,47 @@ class VersionControl:
             rename_limit=1000,
         )
 
-        ops: list[FileOperation] = []
+        # Rename/copy detection can split a plain modification into a
+        # self-delete (old == new path) plus a spurious rename/copy of the same
+        # destination from an unrelated source that happens to share content
+        # (e.g. two __init__.py files with the same license header). The pair
+        # collides on the destination path and, because the rename side carries
+        # the empty side of the split, drops the file's real added lines. We
+        # detect a destination that is both a self-delete and a foreign
+        # rename/copy target, and restore it to the modification it actually is.
+        collided: set[str] = set()
+        self_deleted: set[str] = set()
+        foreign_target: set[str] = set()
         for delta in diff.deltas:
+            old = delta.old_file.path
+            new = delta.new_file.path
+            if delta.status == pygit2.GIT_DELTA_DELETED and old == new:
+                self_deleted.add(old)
+            elif (
+                delta.status in {pygit2.GIT_DELTA_RENAMED, pygit2.GIT_DELTA_COPIED}
+                and old != new
+            ):
+                foreign_target.add(new)
+        collided = self_deleted & foreign_target
+
+        ops: list[FileOperation] = []
+        for path in sorted(collided):
+            ops.append(
+                FileOperation(
+                    base=path,
+                    after=path,
+                    operation=OperationType.EDIT,
+                )
+            )
+        for delta in diff.deltas:
+            old = delta.old_file.path
+            new = delta.new_file.path
+            # Skip the two colliding deltas for a restored destination.
+            if (delta.status == pygit2.GIT_DELTA_DELETED and old in collided) or (
+                delta.status in {pygit2.GIT_DELTA_RENAMED, pygit2.GIT_DELTA_COPIED}
+                and new in collided
+            ):
+                continue
             if delta.status in {
                 pygit2.GIT_DELTA_ADDED,
             }:

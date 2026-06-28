@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from textwrap import dedent
 
+import pygit2
 from benchmark.attribution.diff.reference import (
     PatchContext,
     PatchFactory,
@@ -19,7 +20,7 @@ from benchmark.attribution.domain import (
 )
 from benchmark.attribution.history import VersionControl
 from benchmark.attribution.history_fixture import HistoryFixture
-from unidiff import PatchSet
+from unidiff import PatchSet, patch
 
 class TestPatchView(unittest.TestCase):
     def test_render_aligns_references_with_separator(self) -> None:
@@ -2560,8 +2561,17 @@ class TestPatchFactory(unittest.TestCase):
             n=0,
         )
 
-        # GumTree AST ignores whitespace-only changes
-        self.assertEqual(len(patch), 0)
+        # A diff renders text changes verbatim: a whitespace-only insertion is a
+        # real added line and must appear in the patch, not be filtered out.
+        self.assertEqual(len(patch), 1)
+        added = [
+            line
+            for hunk in patch[0]
+            for line in hunk
+            if line.line_type == "+"
+        ]
+        self.assertEqual(len(added), 1)
+        self.assertEqual(added[0].value.strip(), "")
 
     def test_js_whitespace_only(self) -> None:
         base_sha, after_sha = self._commit(
@@ -2612,8 +2622,17 @@ class TestPatchFactory(unittest.TestCase):
             n=0,
         )
 
-        # GumTree AST ignores whitespace-only changes
-        self.assertEqual(len(patch), 0)
+        # A diff renders text changes verbatim: a whitespace-only insertion is a
+        # real added line and must appear in the patch, not be filtered out.
+        self.assertEqual(len(patch), 1)
+        added = [
+            line
+            for hunk in patch[0]
+            for line in hunk
+            if line.line_type == "+"
+        ]
+        self.assertEqual(len(added), 1)
+        self.assertEqual(added[0].value.strip(), "")
 
     # == K. Encoding edge (n=1) =======================================
 
@@ -3717,6 +3736,130 @@ class TestPatchFactory(unittest.TestCase):
         """
             ),
         )
+
+
+class TestPatchFactoryFidelity(unittest.TestCase):
+    """Regression cases: every commit must render to a parseable patch whose
+    +/- lines equal the direct content diff of each file operation, with no line
+    dropped, glued, or invented, and with the @@ header agreeing with the body.
+    """
+
+    def setUp(self) -> None:
+        self._fixture = HistoryFixture()
+        self._fixture.__enter__()
+        self._repository = VersionControl(self._fixture.repository)
+        self._candidate = PatchFactory(self._repository)
+
+    def tearDown(self) -> None:
+        self._fixture.__exit__(None, None, None)
+
+    def _commit_files(
+        self,
+        before: dict[str, str] | None,
+        after: dict[str, str] | None,
+    ) -> tuple[str, str]:
+        base = self._fixture.commit(
+            self._fixture.tree(before or {}), [], "base"
+        )
+        head = self._fixture.commit(
+            self._fixture.tree(after or {}), [base], "after"
+        )
+        return base, head
+
+    def _expand(self, base: str, after: str) -> patch.PatchSet:
+        return self._candidate.expand(
+            base=base,
+            after=after,
+            files=self._repository.manifest(base, after),
+        )
+
+    def _added_removed(self, patchset: patch.PatchSet) -> set[tuple[str, str, str]]:
+        result: set[tuple[str, str, str]] = set()
+        for patched in patchset:
+            path = patched.path
+            for hunk in patched:
+                for line in hunk:
+                    if line.is_added:
+                        result.add(("+", path, line.value.rstrip("\n")))
+                    elif line.is_removed:
+                        result.add(("-", path, line.value.rstrip("\n")))
+        return result
+
+    def test_patch_is_parseable_and_headers_match_body(self) -> None:
+        # Fix 2: the @@ header lengths are derived from the emitted body, so a
+        # round trip through unidiff always succeeds.
+        base, after = self._commit_files(
+            {"file.py": "def foo():\n    return 1\n"},
+            {"file.py": "def foo():\n    bar = 2\n    return bar\n"},
+        )
+        rendered = str(self._expand(base, after))
+        reparsed = patch.PatchSet(
+            rendered if rendered.endswith("\n") else rendered + "\n"
+        )
+        self.assertTrue(len(reparsed) >= 1)
+
+    def test_no_trailing_newline_does_not_glue_lines(self) -> None:
+        # Fix 3: a final line without a trailing newline is terminated so it does
+        # not merge with the next rendered line.
+        no_newline = self._fixture.repository.create_blob(b"def foo():\n    return 1")
+        with_change = self._fixture.repository.create_blob(b"def foo():\n    return 2")
+        builder = self._fixture.repository.TreeBuilder()
+        builder.insert("file.py", no_newline, pygit2.GIT_FILEMODE_BLOB)
+        base = self._fixture.commit(builder.write(), [], "base")
+        builder = self._fixture.repository.TreeBuilder()
+        builder.insert("file.py", with_change, pygit2.GIT_FILEMODE_BLOB)
+        after = self._fixture.commit(builder.write(), [base], "after")
+
+        rendered = str(self._expand(base, after))
+        # every body line carries exactly one diff marker; none is glued.
+        self.assertNotIn("-    return 1+", rendered)
+        patch.PatchSet(rendered if rendered.endswith("\n") else rendered + "\n")
+
+    def test_rename_with_small_change_keeps_real_change(self) -> None:
+        # Fix 4/6: a rename detected by find_similar still renders the actual
+        # content change between the two paths, not an empty or self-deleting
+        # hunk that drops the added lines.
+        body = "\n".join(f"line{i}" for i in range(1, 41)) + "\n"
+        changed = body.replace("line40", "line40_changed")
+        base, after = self._commit_files(
+            {"old/mod.py": body},
+            {"new/mod.py": changed},
+        )
+        marks = self._added_removed(self._expand(base, after))
+        # the one real change survives the rename
+        self.assertIn(("+", "new/mod.py", "line40_changed"), marks)
+        self.assertIn(("-", "new/mod.py", "line40"), marks)
+
+    def test_collision_destination_renders_its_modification(self) -> None:
+        # Fix 5: when find_similar splits a plain modification into a self-delete
+        # plus a spurious rename of the same destination from a content-similar
+        # source, the destination's real added lines are not dropped.
+        header = "\n".join(f"# h{i}" for i in range(1, 9)) + "\n"
+        base, after = self._commit_files(
+            {
+                "pkg/a.py": header,
+                "pkg/b.py": header + "x = 1\n",
+            },
+            {
+                # b.py modified in place; a.py deleted -> find_similar may pair
+                # a.py's content into b.py and collide on b.py.
+                "pkg/b.py": header + "x = 2\n",
+            },
+        )
+        marks = self._added_removed(self._expand(base, after))
+        self.assertIn(("+", "pkg/b.py", "x = 2"), marks)
+        self.assertIn(("-", "pkg/b.py", "x = 1"), marks)
+
+    def test_whitespace_only_change_is_rendered(self) -> None:
+        # Fix 1: a diff renders text as text; a whitespace-only edit is not
+        # filtered away.
+        base, after = self._commit_files(
+            {"file.py": "def foo():\n    return 1\n"},
+            {"file.py": "def foo():\n\n    return 1\n"},
+        )
+        rendered = str(self._expand(base, after))
+        self.assertTrue(rendered.strip())
+        patch.PatchSet(rendered if rendered.endswith("\n") else rendered + "\n")
 
 
 class TestSourceManifest(unittest.TestCase):
