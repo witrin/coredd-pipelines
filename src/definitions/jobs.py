@@ -861,7 +861,7 @@ def audit_change_request_op(
     for asset in (
         "audit-change-sample",
         "scope-repository-stationary",
-        "scope-change-raw",
+        "filter-change-reference",
         "scope-change-outline",
         "localization-change-trace",
     ):
@@ -895,7 +895,7 @@ def audit_change_request_op(
         pools[asset] = pa.concat_tables(tables, promote_options="permissive")
 
     selection = pl.from_arrow(pools["audit-change-sample"])
-    changes = pl.from_arrow(pools["scope-change-raw"])
+    changes = pl.from_arrow(pools["filter-change-reference"])
     names = sorted(
         pl.from_arrow(pools["scope-repository-stationary"])["name"].to_list()
     )
