@@ -221,6 +221,55 @@ def benchmark_correction_sensor(
 
 
 @asset_sensor(
+    asset_key="localization_inducer_reference",
+)
+def localization_inducer_sensor(
+    context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
+):
+    """Synchronize localization inducer partitions over Python-PR inducers.
+
+    One partition per (correction, bic) pair that is a Python pull request. Each pair
+    is encoded as a compact Shard key; non-Python and orphan inducers (python == 0)
+    are reported by the asset but never localized.
+    """
+    import polars as pl
+
+    instance = context.instance
+    storage = TableAssetStorage()
+    table = storage.load(context, event=asset_event)
+
+    if table is None or table.num_rows == 0:
+        return None
+
+    frame = pl.from_arrow(table).filter(pl.col("python") > 0)
+    keys = {
+        Shard.to_space([f"{correction}#{bic}"])
+        for correction, bic in zip(
+            frame["correction"].to_list(), frame["bic"].to_list()
+        )
+    }
+
+    existing = set(instance.get_dynamic_partitions("localization_inducer"))
+    to_add = keys - existing
+    to_remove = existing - keys
+
+    if to_add:
+        instance.add_dynamic_partitions("localization_inducer", list(to_add))
+
+    if to_remove:
+        for key in to_remove:
+            instance.delete_dynamic_partition("localization_inducer", key)
+
+    context.log.info(
+        "Updated localization_inducer partitions with +%d / -%d",
+        len(to_add),
+        len(to_remove),
+    )
+
+    return None
+
+
+@asset_sensor(
     asset_key="scope_repository_pool",
 )
 def scope_repository_pool_batch_sensor(

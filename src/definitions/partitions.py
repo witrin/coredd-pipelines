@@ -268,3 +268,7 @@ benchmark_attribution_partition = dg.MultiPartitionsDefinition(
         "run": benchmark_run_partition,
     }
 )
+
+localization_inducer_partition = dg.DynamicPartitionsDefinition(
+    name="localization_inducer"
+)

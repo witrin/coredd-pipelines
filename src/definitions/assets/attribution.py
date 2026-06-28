@@ -82,16 +82,13 @@ class AttributionEvaluationConfig(dg.Config):
         "filter_change_labels": dg.AssetIn(
             partition_mapping=dg.AllPartitionMapping()
         ),
-        "scope_change_raw": dg.AssetIn(
-            partition_mapping=dg.AllPartitionMapping()
-        ),
     },
 )
 def attribution_change_trace(
     context: dg.AssetExecutionContext,
     config: BenchmarkConfig,
     filter_change_labels: dict,
-    scope_change_raw: dict,
+    filter_change_reference: pa.Table,
     scope_repository_stationary: pa.Table,
 ) -> pa.Table:
     """One AgentSZZ attribution trace per (correction, run) partition."""
@@ -110,7 +107,7 @@ def attribution_change_trace(
     name, number = pair.split("#")
     number = int(number)
 
-    changes = pl.from_arrow(pa.concat_tables(scope_change_raw.values()))
+    reference = pl.from_arrow(filter_change_reference)
     names = sorted(pl.from_arrow(scope_repository_stationary)["name"].to_list())
     enricher = PullRequestEnricher(name)
     repository = VersionControl.create(
@@ -122,7 +119,7 @@ def attribution_change_trace(
         partition=Shard.to_space(names, name),
         filter=enricher.enrich,
     )
-    enricher.attach(repository, changes)
+    enricher.attach(repository, reference)
     platform = PlatformCache(
         enricher.table(), repository=repository, filter=enricher.enrich
     )

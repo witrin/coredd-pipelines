@@ -33,19 +33,76 @@ from langchain_openai import ChatOpenAI
 
 @asset(
     metadata={"version": "1.0.0"},
-    partitions_def=partitions.benchmark_correction_partition,
+    group_name="localization",
+    kinds={"gcs"},
+    ins={
+        "attribution_change_trace": dg.AssetIn(
+            partition_mapping=dg.AllPartitionMapping()
+        ),
+    },
+)
+def localization_inducer_reference(
+    context: dg.AssetExecutionContext,
+    attribution_change_trace: dict,
+    filter_change_reference: pa.Table,
+) -> pa.Table:
+    """Each attribution inducer (BIC) resolved to its pull request and Python-file count, classified for localization: python>0 is processed, otherwise reported (non-Python PR, or orphan when the SHA belongs to no corpus PR)."""
+    trace = pl.from_arrow(
+        pa.concat_tables(attribution_change_trace.values())
+    )
+    inducers = (
+        trace.filter(~pl.col("aborted"))
+        .filter(pl.col("introducer").is_not_null())
+        .select("name", "number", pl.col("introducer").alias("bic"))
+        .unique()
+        .with_columns(
+            pl.struct("name", "number")
+            .map_elements(
+                lambda row: Shard.to_space([f"{row['name']}#{row['number']}"]),
+                return_dtype=pl.Utf8,
+            )
+            .alias("correction")
+        )
+    )
+
+    # Resolve each BIC SHA to its corpus PR by exploding the reference commit lists.
+    resolved = (
+        pl.from_arrow(filter_change_reference)
+        .explode("commits")
+        .select(
+            pl.col("commits").alias("bic"),
+            pl.col("number").alias("pr"),
+            "python",
+        )
+        .unique(subset=["bic"])
+    )
+
+    reference = (
+        inducers.join(resolved, on="bic", how="left")
+        # Orphans (SHA in no corpus PR) get python=null/0 and a null PR.
+        .with_columns(pl.col("python").fill_null(0))
+        .select("correction", "bic", "name", "number", "pr", "python")
+        .sort("correction", "bic")
+    )
+
+    processed = reference.filter(pl.col("python") > 0).height
+    context.log.info(
+        "Resolved %d inducers; %d Python-PR (processed), %d reported.",
+        reference.height,
+        processed,
+        reference.height - processed,
+    )
+
+    return reference.to_arrow()
+
+
+@asset(
+    metadata={"version": "2.0.0"},
+    partitions_def=partitions.localization_inducer_partition,
     group_name="localization",
     pool="default",
     ins={
-        "attribution_change_trace": dg.AssetIn(
-            partition_mapping=dg.MultiToSingleDimensionPartitionMapping(
-                partition_dimension_name="correction",
-            )
-        ),
-        "filter_change_labels": dg.AssetIn(
-            partition_mapping=dg.AllPartitionMapping()
-        ),
-        "scope_change_raw": dg.AssetIn(
+        "localization_inducer_reference": dg.AssetIn(
             partition_mapping=dg.AllPartitionMapping()
         ),
     },
@@ -53,53 +110,32 @@ from langchain_openai import ChatOpenAI
 def localization_change_trace(
     context: dg.AssetExecutionContext,
     config: BenchmarkConfig,
-    attribution_change_trace: pa.Table,
-    filter_change_labels: dict,
-    scope_change_raw: dict,
+    localization_inducer_reference: pa.Table,
+    filter_change_reference: pa.Table,
     scope_repository_stationary: pa.Table,
 ) -> pa.Table:
-    """Localization traces over the deduplicated inducer candidates per correction."""
-    correction = context.partition_key
-
-    frame = pl.from_arrow(pa.concat_tables(filter_change_labels.values())).filter(
-        pl.col("labels").list.contains("Intrinsic")
+    """One localization trace per (correction, bug-inducing commit) partition."""
+    inducers = pl.from_arrow(localization_inducer_reference).filter(
+        pl.col("python") > 0
     )
     pairs = [
-        f"{name}#{number}"
-        for name, number in zip(frame["name"].to_list(), frame["number"].to_list())
-    ]
-    pair = next(p for p in pairs if Shard.to_space([p]) == correction)
-    name, number = pair.split("#")
-    number = int(number)
-
-    candidates = (
-        pl.from_arrow(attribution_change_trace)
-        .filter(~pl.col("aborted"))
-        .filter(pl.col("introducer").is_not_null())
-        .get_column("introducer")
-        .unique()
-        .to_list()
-    )
-    if not candidates:
-        context.log.info("No inducer candidates for %s/%s.", name, number)
-        return pa.table(
-            {
-                "trace": pa.array([], type=pa.string()),
-                "sequence": pa.array([], type=pa.int64()),
-                "timestamp": pa.array([], type=pa.timestamp("us", tz="UTC")),
-                "node": pa.array([], type=pa.string()),
-                "span": pa.array([], type=pa.string()),
-                "parent": pa.array([], type=pa.string()),
-                "event": pa.array([], type=pa.string()),
-                "payload": pa.array([], type=pa.string()),
-                "name": pa.array([], type=pa.string()),
-                "number": pa.array([], type=pa.int64()),
-                "defect": pa.array([], type=pa.string()),
-                "locations": pa.array([], type=pa.string()),
-            }
+        f"{correction}#{bic}"
+        for correction, bic in zip(
+            inducers["correction"].to_list(), inducers["bic"].to_list()
         )
+    ]
+    pair = next(
+        p for p in pairs if Shard.to_space([p]) == context.partition_key
+    )
+    correction, sha = pair.split("#", 1)
 
-    changes = pl.from_arrow(pa.concat_tables(scope_change_raw.values()))
+    inducer = inducers.filter(
+        (pl.col("correction") == correction) & (pl.col("bic") == sha)
+    )
+    row = inducer.row(0, named=True)
+    name, number = row["name"], int(row["number"])
+
+    reference = pl.from_arrow(filter_change_reference)
     names = sorted(pl.from_arrow(scope_repository_stationary)["name"].to_list())
     enricher = PullRequestEnricher(name)
     repository = VersionControl.create(
@@ -111,7 +147,7 @@ def localization_change_trace(
         partition=Shard.to_space(names, name),
         filter=enricher.enrich,
     )
-    enricher.attach(repository, changes)
+    enricher.attach(repository, reference)
     platform = PlatformCache(
         enricher.table(), repository=repository, filter=enricher.enrich
     )
@@ -126,56 +162,54 @@ def localization_change_trace(
         streaming=True,
     )
 
-    tables: list[pa.Table] = []
-    for sha in candidates:
-        defect = Change(
-            number=0,
-            description=repository.meta(sha).message,
-            base=repository.parents(sha)[0],
-            after=sha,
+    defect = Change(
+        number=0,
+        description=repository.meta(sha).message,
+        base=repository.parents(sha)[0],
+        after=sha,
+    )
+    graph = LocateGraph(
+        summarize=SummarizeNode(factory=factory, llm=llm),
+        explain=ExplainNode(
+            factory=factory, llm=llm, context=config.context, samples=config.samples
+        ),
+        aggregate=AggregateNode(llm=llm),
+        expand=ExpandNode(factory=factory),
+        hint=HintNode(factory=factory, llm=llm),
+        refine=RefineNode(factory=factory, side="after"),
+        locate=LocateNode(
+            tool=LocateToolFactory(repository),
+            llm=llm,
+        ),
+    )
+    monitor = TraceMonitor(sink=context.log.info)
+    trace = Trace(
+        seed=f"localization-{correction}-{sha[:8]}",
+        hook=lambda event: monitor({"event": event}),
+    )
+    try:
+        result = graph.invoke(change, defect=defect, trace=trace)
+        locations = json.dumps(result.get("locations") or [], sort_keys=True)
+    except Exception as error:
+        context.log.warning(
+            "Localization failed for %s/%s defect %s: %s",
+            name,
+            number,
+            sha[:8],
+            error,
         )
-        graph = LocateGraph(
-            summarize=SummarizeNode(factory=factory, llm=llm),
-            explain=ExplainNode(
-                factory=factory, llm=llm, context=config.context, samples=config.samples
-            ),
-            aggregate=AggregateNode(llm=llm),
-            expand=ExpandNode(factory=factory),
-            hint=HintNode(factory=factory, llm=llm),
-            refine=RefineNode(factory=factory, side="after"),
-            locate=LocateNode(
-                tool=LocateToolFactory(repository),
-                llm=llm,
-            ),
-        )
-        monitor = TraceMonitor(sink=context.log.info)
-        trace = Trace(
-            seed=f"localization-{correction}-{sha[:8]}",
-            hook=lambda event: monitor({"event": event}),
-        )
-        try:
-            result = graph.invoke(change, defect=defect, trace=trace)
-            locations = json.dumps(result.get("locations") or [], sort_keys=True)
-        except Exception as error:
-            context.log.warning(
-                "Localization failed for %s/%s defect %s: %s",
-                name,
-                number,
-                sha[:8],
-                error,
-            )
-            locations = json.dumps([])
-        table = trace.to_table()
-        rows = table.num_rows
-        table = (
-            table
-            .append_column("name", pa.array([name] * rows, type=pa.string()))
-            .append_column("number", pa.array([number] * rows, type=pa.int64()))
-            .append_column("defect", pa.array([sha] * rows, type=pa.string()))
-            .append_column("locations", pa.array([locations] * rows, type=pa.string()))
-        )
-        tables.append(table)
+        locations = json.dumps([])
 
-        context.log.info("Localized %s/%s defect %s", name, number, sha[:8])
+    table = trace.to_table()
+    rows = table.num_rows
+    table = (
+        table
+        .append_column("name", pa.array([name] * rows, type=pa.string()))
+        .append_column("number", pa.array([number] * rows, type=pa.int64()))
+        .append_column("defect", pa.array([sha] * rows, type=pa.string()))
+        .append_column("locations", pa.array([locations] * rows, type=pa.string()))
+    )
 
-    return pa.concat_tables(tables, promote_options="permissive")
+    context.log.info("Localized %s/%s defect %s", name, number, sha[:8])
+
+    return table

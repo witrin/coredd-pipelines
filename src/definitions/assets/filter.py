@@ -245,12 +245,31 @@ def filter_change_corpus(
         )
     )
 
+    # scope_change_raw is hundreds of MB across many partitions; concatenating it
+    # all at once exhausts memory. Stream blob by blob, keeping only the commit
+    # rows for sampled repositories before accumulating.
+    commit_parts: list[pl.DataFrame] = []
+    for table in scope_change_raw.values():
+        frame = pl.from_arrow(table)
+        if "name" not in frame.columns:
+            continue
+        frame = frame.filter(
+            pl.col("name").is_in(names) & (pl.col("type") == "commit")
+        )
+        if frame.height:
+            commit_parts.append(
+                frame.select("name", pl.col("number").cast(pl.Int64), "payload")
+            )
+
+    raw_commits = (
+        pl.concat(commit_parts, how="vertical")
+        if commit_parts
+        else pl.DataFrame(
+            schema={"name": pl.Utf8, "number": pl.Int64, "payload": pl.Utf8}
+        )
+    )
     commits = (
-        pl.from_arrow(pa.concat_tables(scope_change_raw.values()))
-        .lazy()
-        .filter(pl.col("name").is_in(names))
-        .filter(pl.col("type") == "commit")
-        .select("name", pl.col("number").cast(pl.Int64), "payload")
+        raw_commits.lazy()
         .join(direct.lazy(), on=["name", "number"], how="inner")
         .with_columns(
             pl.col("payload")
@@ -314,39 +333,63 @@ def filter_change_reference(
         .alias("python")
     ).select("name", "number", "title", "body", "python")
 
-    raw = pl.from_arrow(pa.concat_tables(scope_change_raw.values()))
+    # scope_change_raw is ~hundreds of partitions / hundreds of MB; concatenating
+    # them all at once exhausts memory. Stream blob by blob, keep only the rows for
+    # repositories present in the (small) corpus, and accumulate just those.
+    repositories = set(corpus["name"].to_list())
+    pr_parts: list[pl.DataFrame] = []
+    commit_parts: list[pl.DataFrame] = []
+    for table in scope_change_raw.values():
+        frame = pl.from_arrow(table)
+        if "name" not in frame.columns:
+            continue
+        frame = frame.filter(pl.col("name").is_in(repositories))
+        if frame.height == 0:
+            continue
+        prs = frame.filter(pl.col("type") == "pr")
+        if prs.height:
+            pr_parts.append(
+                prs.with_columns(
+                    pl.col("payload").str.json_path_match("$.number").cast(pl.Int64).alias("number"),
+                    pl.col("payload").str.json_path_match("$.merge_commit_sha").alias("merge"),
+                ).select("name", "number", "payload", "merge")
+            )
+        commits = frame.filter(pl.col("type") == "commit")
+        if commits.height:
+            commit_parts.append(
+                commits.select("name", pl.col("number").cast(pl.Int64), "payload")
+                .with_columns(
+                    pl.col("payload")
+                    .str.json_decode(pl.List(pl.Struct({"sha": pl.Utf8})))
+                    .alias("items")
+                )
+                .drop("payload")
+                .explode("items")
+                .with_columns(pl.col("items").struct.field("sha").alias("sha"))
+                .drop("items")
+                .filter(pl.col("sha").is_not_null() & (pl.col("sha") != ""))
+                .select("name", "number", "sha")
+            )
 
     # The raw PR payload (one per PR) and the trunk merge/squash SHA. Kept so
     # PlatformCache can build Changes without re-pulling scope_change_raw.
     prs = (
-        raw.lazy()
-        .filter(pl.col("type") == "pr")
-        .with_columns(
-            pl.col("payload").str.json_path_match("$.number").cast(pl.Int64).alias("number"),
-            pl.col("payload").str.json_path_match("$.merge_commit_sha").alias("merge"),
-        )
-        .select("name", "number", "payload", "merge")
+        pl.concat(pr_parts, how="vertical")
+        .lazy()
         .unique(subset=["name", "number"])
     )
 
     # Branch commit SHAs of each PR: pr.get_commits() (pre-squash). Aggregated to
     # a list per PR so there is no per-SHA duplication of the cleaned text.
-    branch = (
-        raw.lazy()
-        .filter(pl.col("type") == "commit")
-        .select("name", pl.col("number").cast(pl.Int64), "payload")
-        .with_columns(
-            pl.col("payload")
-            .str.json_decode(pl.List(pl.Struct({"sha": pl.Utf8})))
-            .alias("items")
+    commits = (
+        pl.concat(commit_parts, how="vertical")
+        if commit_parts
+        else pl.DataFrame(
+            schema={"name": pl.Utf8, "number": pl.Int64, "sha": pl.Utf8}
         )
-        .drop("payload")
-        .explode("items")
-        .with_columns(pl.col("items").struct.field("sha").alias("sha"))
-        .drop("items")
-        .filter(pl.col("sha").is_not_null() & (pl.col("sha") != ""))
-        .group_by("name", "number")
-        .agg(pl.col("sha").alias("branch"))
+    )
+    branch = commits.lazy().group_by("name", "number").agg(
+        pl.col("sha").alias("branch")
     )
 
     evaluation = (

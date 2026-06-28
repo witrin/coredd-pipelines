@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import pygit2
 from langchain_core.tools import BaseTool, tool
 from pathspec import PathSpec
 
@@ -40,6 +41,24 @@ class LocateTool:
             tool(self.grep),
         ]
 
+    def _resolve(self, commit: str) -> str:
+        handle = self._repository.handle
+        try:
+            node = handle.revparse_single(commit)
+            return str(node.peel(pygit2.Commit).id)
+        except KeyError:
+            pass
+        for length in range(len(commit) - 1, 4, -1):
+            try:
+                node = handle.revparse_single(commit[:length])
+                sha = str(node.peel(pygit2.Commit).id)
+                raise ValueError(
+                    f"Commit {commit!r} does not exist. Did you mean {sha}?"
+                )
+            except KeyError:
+                continue
+        raise ValueError(f"Commit {commit!r} does not exist.")
+
     def _kind(self, commit: str) -> str:
         if commit in (self._defect["after"], self._defect["base"]):
             return "defect"
@@ -58,6 +77,7 @@ class LocateTool:
         enclosing functions, not the whole file. Lines of the inducing change are
         prefixed with their line number; lines of the correction are not.
         """
+        commit = self._resolve(commit)
         kind = self._kind(commit)
         if kind == "defect":
             base, after = self._defect["base"], self._defect["after"]
@@ -104,7 +124,7 @@ class LocateTool:
         except re.error as error:
             raise ValueError(f"Invalid grep regex: {error}") from error
 
-        commit = commit or self._defect["after"]
+        commit = self._resolve(commit or self._defect["after"])
         self._kind(commit)
 
         paths = self._repository.tree(commit)

@@ -57,7 +57,7 @@ class ConfidenceComputation:
     def _resolve(
         self,
         predictions: pl.DataFrame,
-        changes: pl.DataFrame,
+        reference: pl.DataFrame,
         names: list[str],
     ) -> list[dict[str, object]]:
         rows: list[dict[str, object]] = []
@@ -72,7 +72,7 @@ class ConfidenceComputation:
                 partition=Shard.to_space(names, name),
                 filter=enricher.enrich,
             )
-            enricher.attach(repository, changes)
+            enricher.attach(repository, reference)
             platform = PlatformCache(
                 enricher.table(), repository=repository, filter=enricher.enrich
             )
@@ -105,8 +105,8 @@ class ConfidenceComputation:
                 )
         return rows
 
-    def compute(self, changes: pl.DataFrame, names: list[str]) -> pa.Table:
-        rows = self._resolve(self._predictions(), changes, names)
+    def compute(self, reference: pl.DataFrame, names: list[str]) -> pa.Table:
+        rows = self._resolve(self._predictions(), reference, names)
         if not rows:
             return pa.table(
                 {
