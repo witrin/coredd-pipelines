@@ -143,6 +143,11 @@ services:
         tty: true
         stdin_open: true
 
+    trace:
+        image: ghcr.io/metafab/otel-gui:latest
+        ports:
+            - "4318:4318"
+
 volumes:
     argilla:
         name: ${COMPOSE_PROJECT_NAME}-argilla
