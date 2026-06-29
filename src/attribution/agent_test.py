@@ -1002,6 +1002,25 @@ class TestRepositoryTool(unittest.TestCase):
             self.assertIn("return 1", result["patch"])
             self.assertIn("return 2", result["patch"])
 
+    def test_show_stat_lists_changed_files(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "def foo():\n    return 1\n"})
+            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree({"foo.py": "def foo():\n    return 2\n"})
+            target = fixture.commit(tree, [base], "bump return value")
+            tree = fixture.tree({"foo.py": "def foo():\n    return 2\n"})
+            after = fixture.commit(tree, [target], "correction")
+
+            repository = VersionControl(fixture.repository)
+            tool = RepositoryTool(repository=repository, after=after)
+
+            result = tool.show(target, stat=True)
+
+            self.assertEqual([f["path"] for f in result["files"]], ["foo.py"])
+            self.assertEqual(result["files"][0]["added"], 1)
+            self.assertEqual(result["files"][0]["deleted"], 1)
+            self.assertNotIn("patch", result)
+
     def test_show_scoped_to_path(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree(

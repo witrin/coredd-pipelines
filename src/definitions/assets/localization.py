@@ -18,10 +18,7 @@ from benchmark.attribution.evaluation import TraceMonitor
 from benchmark.attribution.history import PlatformCache, VersionControl
 from benchmark.attribution.reason import (
     AggregateNode,
-    ExpandNode,
     ExplainNode,
-    HintNode,
-    RefineNode,
     SummarizeNode,
 )
 from benchmark.attribution.tracing import Trace
@@ -174,9 +171,6 @@ def localization_change_trace(
             factory=factory, llm=llm, context=config.context, samples=config.samples
         ),
         aggregate=AggregateNode(llm=llm),
-        expand=ExpandNode(factory=factory),
-        hint=HintNode(factory=factory, llm=llm),
-        refine=RefineNode(factory=factory, side="after"),
         locate=LocateNode(
             tool=LocateToolFactory(repository),
             llm=llm,

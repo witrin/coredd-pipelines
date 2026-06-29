@@ -56,9 +56,9 @@ class TestPatchViewNumbered(unittest.TestCase):
 class TestLocateNode(unittest.TestCase):
     """The locate node searches the inducing change guided by the fix context."""
 
-    def _refinement(self) -> str:
-        # The refined context of the correction's fix — the agent's query.
-        return "File: a.py\n+if value is None:\n     return"
+    def _files(self) -> list[str]:
+        # The suspect files of the correction — the agent's starting point.
+        return ["a.py", "b.py"]
 
     def _inputs(self) -> dict[str, object]:
         return {
@@ -69,7 +69,7 @@ class TestLocateNode(unittest.TestCase):
                 description="Fix bar",
             ),
             "rationale": "The old line is faulty.",
-            "refinement": self._refinement(),
+            "files": self._files(),
             "defect": Change(
                 number=0,
                 base="defect-base",
@@ -135,7 +135,8 @@ class TestLocateNode(unittest.TestCase):
 
         message = agent.invoke.call_args.args[0]["messages"][0].content
         self.assertIn("# Root cause", message)
-        self.assertIn("# Refined context of the corrective change", message)
+        self.assertIn("# Suspect files of the corrective change", message)
+        self.assertIn("a.py", message)
         # The defective change's own diff is never revealed; the agent must search.
         self.assertNotIn("# Inducing change", message)
         self.assertNotIn("# Defective change diff", message)
@@ -144,7 +145,7 @@ class TestLocateNode(unittest.TestCase):
         node = LocateNode()
 
         with self.assertRaises(ValueError):
-            node.run({"rationale": "r", "refinement": self._refinement()})
+            node.run({"rationale": "r", "files": self._files()})
 
     def test_locate_rejects_nonpositive_steps(self) -> None:
         with self.assertRaises(ValueError):
@@ -243,6 +244,30 @@ class TestLocateTool(unittest.TestCase):
 
         self.assertEqual(out["patch"], "")
 
+    def test_show_stat_lists_changed_files(self) -> None:
+        tool, _ = self._tool()
+
+        with patch(
+            "benchmark.localization.agent.DiffRenderer.stat",
+            return_value=[{"path": "a.py", "added": 2, "deleted": 1}],
+        ):
+            out = tool.show(commit="da", stat=True)
+
+        self.assertEqual(out["files"], [{"path": "a.py", "added": 2, "deleted": 1}])
+        self.assertNotIn("patch", out)
+
+    def test_show_without_file_defaults_to_stat(self) -> None:
+        tool, _ = self._tool()
+
+        with patch(
+            "benchmark.localization.agent.DiffRenderer.stat",
+            return_value=[{"path": "a.py", "added": 2, "deleted": 1}],
+        ):
+            out = tool.show(commit="da")
+
+        self.assertIn("files", out)
+        self.assertNotIn("patch", out)
+
     def test_grep_defaults_to_defect_snapshot(self) -> None:
         tool, repository = self._tool()
         repository.tree.return_value = ["a.py"]
@@ -274,9 +299,6 @@ class TestLocateGraph(unittest.TestCase):
             summarize=Mock(spec_set=["run"]),
             explain=Mock(spec_set=["run"]),
             aggregate=Mock(spec_set=["run"]),
-            expand=Mock(spec_set=["run"]),
-            hint=Mock(spec_set=["run"]),
-            refine=Mock(spec_set=["run"]),
             locate=Mock(spec_set=["run"]),
         )
 
@@ -308,9 +330,6 @@ class TestLocateGraph(unittest.TestCase):
             summarize=Mock(spec_set=["run"]),
             explain=Mock(spec_set=["run"]),
             aggregate=Mock(spec_set=["run"]),
-            expand=Mock(spec_set=["run"]),
-            hint=Mock(spec_set=["run"]),
-            refine=Mock(spec_set=["run"]),
             locate=locate,
         )
 
@@ -320,20 +339,19 @@ class TestLocateGraph(unittest.TestCase):
                     number=1, base="cb", after="ca", description="c"
                 ),
                 "rationale": "r",
+                "files": ["a.py", "b.py"],
                 "defect": Change(
                     number=0, base="defect-base", after="defect-sha", description="d"
                 ),
-                "nodes": {
-                    "refine": {"refinement": "File: a.py\n+if x is None:"},
-                },
+                "nodes": {},
             }
         )
 
         locate.run.assert_called_once()
         call = locate.run.call_args.args[0]
-        self.assertNotIn("expansion", call)
-        # The locate node receives the refined fix context, not the raw causes.
-        self.assertEqual(call["refinement"], "File: a.py\n+if x is None:")
+        self.assertNotIn("refinement", call)
+        # The locate node receives the suspect files, not a refined fix context.
+        self.assertEqual(call["files"], ["a.py", "b.py"])
         self.assertEqual(
             result["locations"],
             [{"file": "a.py", "line": 5}],

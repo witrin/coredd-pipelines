@@ -27,27 +27,18 @@ class LocateGraph:
         summarize: Any | None = None,
         explain: Any | None = None,
         aggregate: Any | None = None,
-        expand: Any | None = None,
-        hint: Any | None = None,
-        refine: Any | None = None,
         locate: Any | None = None,
     ) -> None:
         if (
             summarize is None
             or explain is None
             or aggregate is None
-            or expand is None
-            or hint is None
-            or refine is None
             or locate is None
         ):
             raise ValueError("LocateGraph requires explicit semantic nodes.")
         self._summarize = summarize
         self._explain = explain
         self._aggregate = aggregate
-        self._expand = expand
-        self._hint = hint
-        self._refine = refine
         self._locate = locate
         self._graph: AttributionRunnable | None = None
 
@@ -69,18 +60,6 @@ class LocateGraph:
             RunnableLambda(self._run_aggregate).with_config(run_name="aggregate"),
         )
         graph.add_node(
-            "expand",
-            RunnableLambda(self._run_expand).with_config(run_name="expand"),
-        )
-        graph.add_node(
-            "hint",
-            RunnableLambda(self._run_hint).with_config(run_name="hint"),
-        )
-        graph.add_node(
-            "refine",
-            RunnableLambda(self._run_refine).with_config(run_name="refine"),
-        )
-        graph.add_node(
             "locate",
             RunnableLambda(self._run_locate).with_config(run_name="locate"),
         )
@@ -92,10 +71,7 @@ class LocateGraph:
             self.route_explain,
             {"explain": "explain", "aggregate": "aggregate"},
         )
-        graph.add_edge("aggregate", "expand")
-        graph.add_edge("expand", "hint")
-        graph.add_edge("hint", "refine")
-        graph.add_edge("refine", "locate")
+        graph.add_edge("aggregate", "locate")
         graph.add_edge("locate", END)
         return AttributionRunnable(graph.compile())
 
@@ -180,67 +156,13 @@ class LocateGraph:
             },
         }
 
-    def _run_expand(self, state: LocateGraphState) -> dict[str, object]:
-        nodes = state["nodes"]
-        output = self._expand.run(
-            {
-                "correction": state["correction"],
-                "files": state["files"],
-            }
-        )
-        return {
-            "nodes": {
-                **nodes,
-                "expand": output,
-            },
-        }
-
-    def _run_hint(self, state: LocateGraphState) -> dict[str, object]:
-        nodes = state["nodes"]
-        expand = nodes["expand"]
-        output = self._hint.run(
-            {
-                "correction": state["correction"],
-                "rationale": state["rationale"],
-                "expansion": expand["expansion"],
-            }
-        )
-        return {
-            "nodes": {
-                **nodes,
-                "hint": output,
-            },
-        }
-
-    def _run_refine(self, state: LocateGraphState) -> dict[str, object]:
-        nodes = state["nodes"]
-        expand = nodes["expand"]
-        hint = nodes["hint"]
-        # Refine the fix side (corrections): the agent receives the contiguous
-        # code around the correction's fix statements as its query, then searches
-        # the inducing change for the corresponding defect.
-        output = self._refine.run(
-            {
-                "correction": state["correction"],
-                "expansion": expand["expansion"],
-                "statements": hint["corrections"],
-            }
-        )
-        return {
-            "nodes": {
-                **nodes,
-                "refine": output,
-            },
-        }
-
     def _run_locate(self, state: LocateGraphState) -> dict[str, object]:
         nodes = state["nodes"]
-        refine = nodes["refine"]
         output = self._locate.run(
             {
                 "correction": state["correction"],
                 "rationale": state["rationale"],
-                "refinement": refine["refinement"],
+                "files": list(state["files"]),
                 "defect": state["defect"],
             }
         )

@@ -26,7 +26,7 @@ class LocateLocationState(TypedDict):
 class LocateInput(TypedDict, total=False):
     correction: Change
     rationale: str
-    refinement: str
+    files: list[str]
     defect: Change
 
 
@@ -65,36 +65,34 @@ class LocateNode:
         """Mark the defect locations in the inducing change via agentic search.
 
         The agent searches the inducing change ``defect`` with snapshot-local
-        ``show``/``grep`` tools, guided by the root cause and the refined context
-        of the correction's fix, and returns the file and line of each defect
-        location. The locations are taken as the agent reports them; no post-hoc
-        validation is applied, mirroring attribution.
+        ``show``/``grep`` tools, guided by the root cause and the suspect files of
+        the correction, and returns the file and line of each defect location. The
+        locations are taken as the agent reports them; no post-hoc validation is
+        applied, mirroring attribution.
 
         The inducing change is deliberately NOT shown up front: revealing its
         diff would hand the agent the answer instead of letting it search.
         """
         correction = input.get("correction")
         rationale = input.get("rationale")
-        refinement = input.get("refinement")
+        files = input.get("files")
         defect = input.get("defect")
         if self._llm is None or self._tool is None:
             raise ValueError(
-                "LocateNode requires correction, rationale, refinement, defect, "
+                "LocateNode requires correction, rationale, files, defect, "
                 "tool, and llm."
             )
         if (
             correction is None
             or rationale is None
-            or refinement is None
+            or files is None
             or defect is None
         ):
             raise ValueError(
-                "LocateNode requires correction, rationale, refinement, and defect."
+                "LocateNode requires correction, rationale, files, and defect."
             )
-        if not rationale.strip() or not refinement.strip():
-            raise ValueError(
-                "LocateNode requires non-empty rationale and refinement."
-            )
+        if not rationale.strip():
+            raise ValueError("LocateNode requires non-empty rationale.")
 
         tool = self._tool
         if isinstance(tool, LocateToolFactory):
@@ -102,7 +100,7 @@ class LocateNode:
 
         payload = self._search(
             rationale=rationale.strip(),
-            refinement=refinement.strip(),
+            files=list(files),
             defect=defect,
             correction=correction,
             tool=tool,
@@ -120,7 +118,7 @@ class LocateNode:
         self,
         *,
         rationale: str,
-        refinement: str,
+        files: list[str],
         defect: Change,
         correction: Change,
         tool: LocateTool,
@@ -153,7 +151,7 @@ class LocateNode:
                     HumanMessage(
                         content=self._message(
                             rationale=rationale,
-                            refinement=refinement,
+                            files=files,
                             defect=defect,
                             correction=correction,
                         )
@@ -185,7 +183,7 @@ class LocateNode:
             the corrective change only touches incidentally (refactoring, renaming,
             formatting) does not.
 
-            Your initial message gives the root cause and the refined context of the
+            Your initial message gives the root cause and the suspect files of the
             corrective change, plus two commit SHAs: the defective change and the
             corrective change. The defective change is not shown to you; you locate the
             defect in it with the tools. Every show and grep call takes one of these
@@ -214,10 +212,11 @@ class LocateNode:
         self,
         *,
         rationale: str,
-        refinement: str,
+        files: list[str],
         defect: Change,
         correction: Change,
     ) -> str:
+        listing = "\n".join(files) if files else "(none)"
         return inspect.cleandoc(
             """
             # Commits
@@ -228,12 +227,12 @@ class LocateNode:
             # Root cause
             {rationale}
 
-            # Refined context of the corrective change
-            {refinement}
+            # Suspect files of the corrective change
+            {files}
             """
         ).format(
             rationale=rationale,
-            refinement=refinement,
+            files=listing,
             defect=defect["after"][:12],
             correction=correction["after"][:12],
         )

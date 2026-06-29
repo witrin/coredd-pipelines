@@ -41,6 +41,17 @@ class DiffRenderer:
 
         return "\n".join(parts).strip()
 
+    def stat(self, diff: pygit2.Diff) -> list[dict[str, object]]:
+        """Return one entry per changed file with its path and churn counts."""
+        result: list[dict[str, object]] = []
+        for value in diff:
+            path = value.delta.new_file.path or value.delta.old_file.path
+            if path is None:
+                continue
+            _, additions, deletions = value.line_stats
+            result.append({"path": path, "added": additions, "deleted": deletions})
+        return result
+
 
 class KnowledgeGraphTool:
     """Tool-oriented interface for temporal knowledge graph search."""
@@ -455,11 +466,12 @@ class RepositoryTool:
             return False
         return repo.descendant_of(after_oid, oid)
 
-    def show(self, commit: str, path: str | None = None) -> dict[str, Any]:
+    def show(self, commit: str, path: str | None = None, stat: bool = False) -> dict[str, Any]:
         """Show one commit and its patch.
 
         Use this to inspect what a commit changed. Optionally restrict the diff
-        to one path.
+        to one path. Pass stat to get only the list of changed files with their
+        added/deleted line counts instead of the full diff; path is ignored then.
         """
         commit = self._resolve(commit)
         if commit == self._after:
@@ -472,6 +484,18 @@ class RepositoryTool:
             )
         meta = self._repository.meta(commit)
         parents = self._repository.parents(commit)
+        if stat:
+            files: list[dict[str, object]] = []
+            if parents:
+                diff = self._repository.diff(parents[0], commit, context=3)
+                files = self._renderer.stat(diff)
+            return {
+                "sha": commit,
+                "message": meta.message,
+                "timestamp": self._timestamp(meta.time),
+                "parents": parents,
+                "files": files,
+            }
         patch = ""
         if parents:
             diff = self._repository.diff(parents[0], commit, context=3)

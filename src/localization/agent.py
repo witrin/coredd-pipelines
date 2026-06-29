@@ -70,14 +70,18 @@ class LocateTool:
             f"exactly: {self._commits()}."
         )
 
-    def show(self, commit: str, file: str) -> dict[str, Any]:
-        """Show what one commit changed in one file, as a diff with line numbers.
+    def show(
+        self, commit: str, file: str | None = None, stat: bool = False
+    ) -> dict[str, Any]:
+        """Show what one commit changed, as a diff with line numbers.
 
         `commit` is one of the two SHAs from your initial message: the defective
-        change or the corrective change. Returns the unified diff of `file` in
-        `commit` with three lines of surrounding context. Each line is prefixed with
-        its absolute line number in the grep format ``L<n>:``; deleted lines have no
-        number on the after revision shown for the defective change.
+        change or the corrective change. With `file`, returns the unified diff of
+        that file with three lines of surrounding context, each line prefixed with
+        its absolute line number in the grep format ``L<n>:`` (deleted lines have no
+        number on the after revision shown for the defective change). With `stat`
+        (or no `file`), returns only the list of changed files with their
+        added/deleted line counts, so you can see what the change touches first.
         """
         commit = self._resolve(commit)
         kind = self._kind(commit)
@@ -89,6 +93,10 @@ class LocateTool:
             numbering = Numbering.NONE
 
         diff = self._repository.diff(base, after, context=3)
+
+        if stat or file is None:
+            return {"commit": commit[:12], "files": DiffRenderer().stat(diff)}
+
         rendered = DiffRenderer().render(diff, file)
         if not rendered.strip():
             return {
