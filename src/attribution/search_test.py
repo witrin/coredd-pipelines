@@ -366,6 +366,48 @@ class TestRepositorySeedNode(unittest.TestCase):
             },
         )
 
+    def test_repository_seed_rejects_unknown_strategy(self) -> None:
+        with self.assertRaises(ValueError):
+            RepositorySeedNode(strategy="bogus")
+
+    @patch("benchmark.attribution.search.DiffRenderer.stat")
+    @patch.object(VersionControl, "diff", autospec=True)
+    @patch.object(VersionControl, "meta", autospec=True)
+    def test_repository_seed_stat_strategy(
+        self,
+        meta: Mock,
+        diff: Mock,
+        stat: Mock,
+    ) -> None:
+        repository = object.__new__(VersionControl)
+        node = RepositorySeedNode(repository=repository, strategy="stat")
+        correction = Change(
+            number=1,
+            base="base-sha",
+            after="after-sha",
+            description="Fix parser",
+        )
+        meta.return_value = Commit(
+            sha="after-sha",
+            message="Fix parser",
+            time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            author="a",
+        )
+        diff.return_value = object()
+        stat.return_value = [
+            {"path": "foo.py", "added": 2, "deleted": 1},
+            {"path": "bar.py", "added": 0, "deleted": 3},
+        ]
+
+        result = node.run({"correction": correction})
+
+        titles = [item["title"] for item in result["seed"]]
+        self.assertNotIn("Fix Diff", titles)
+        self.assertEqual(
+            result["seed"][-1],
+            {"title": "Modified Files", "body": "foo.py  +2 -1\nbar.py  +0 -3"},
+        )
+
     @patch("benchmark.attribution.search.DiffRenderer.render")
     @patch.object(VersionControl, "manifest", autospec=True)
     @patch.object(VersionControl, "diff", autospec=True)

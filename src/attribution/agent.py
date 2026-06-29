@@ -426,9 +426,11 @@ class RepositoryTool:
         self,
         repository: VersionControl,
         after: str,
+        strategy: str = "diff",
     ) -> None:
         self._repository = repository
         self._after = after
+        self._strategy = strategy
         self._renderer = DiffRenderer()
 
     def tools(self) -> list[BaseTool]:
@@ -474,11 +476,14 @@ class RepositoryTool:
         added/deleted line counts instead of the full diff; path is ignored then.
         """
         commit = self._resolve(commit)
-        if commit == self._after:
+        if commit == self._after and self._strategy == "diff":
+            # In diff mode the correction's full diff is already in the seed, so
+            # showing it again is redundant. In stat mode the seed only lists the
+            # changed files, so the agent is allowed to fetch the correction diff.
             raise ValueError(
                 "This is the correction commit. Its full diff is already provided in your initial message. Inspect candidates before the correction instead."
             )
-        if not self._is_ancestor(commit):
+        if commit != self._after and not self._is_ancestor(commit):
             raise ValueError(
                 f"Commit {commit[:12]} is not before the correction. The introducer must predate the correction."
             )
@@ -891,11 +896,13 @@ class RepositoryTool:
 
 
 class RepositoryToolFactory:
-    def __init__(self, repository: VersionControl) -> None:
+    def __init__(self, repository: VersionControl, strategy: str = "diff") -> None:
         self._repository = repository
+        self._strategy = strategy
 
     def create(self, base: str, after: str) -> RepositoryTool:
         return RepositoryTool(
             repository=self._repository,
             after=after,
+            strategy=self._strategy,
         )

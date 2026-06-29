@@ -442,9 +442,14 @@ class TurnBudget:
 class RepositorySeedNode:
     """Build the repository-native seed presented to the AgentSZZ search flow."""
 
-    def __init__(self, repository: VersionControl | None = None) -> None:
+    def __init__(
+        self, repository: VersionControl | None = None, strategy: str = "diff"
+    ) -> None:
+        if strategy not in {"diff", "stat"}:
+            raise ValueError("RepositorySeedNode strategy must be 'diff' or 'stat'.")
         self._repository = repository
         self._renderer = DiffRenderer()
+        self._strategy = strategy
 
     def run(self, input: SeedInput) -> SeedOutput:
         correction = input.get("correction")
@@ -460,14 +465,24 @@ class RepositorySeedNode:
             seed.append({"title": "Commit Message", "body": message})
 
         diff = self._repository.diff(base, after, context=3)
-        patch = self._renderer.render(diff)
-        if patch:
-            seed.append({"title": "Fix Diff", "body": patch})
-
-        operations = self._repository.manifest(base, after)
-        files = self._files(operations)
-        if files:
-            seed.append({"title": "Modified Files", "body": "\n".join(files)})
+        if self._strategy == "diff":
+            # Full fix diff plus a plain list of the modified files.
+            patch = self._renderer.render(diff)
+            if patch:
+                seed.append({"title": "Fix Diff", "body": patch})
+            operations = self._repository.manifest(base, after)
+            files = self._files(operations)
+            if files:
+                seed.append({"title": "Modified Files", "body": "\n".join(files)})
+        else:
+            # No full diff: only the changed files with their churn. The agent
+            # pulls any file's diff on demand via show/grep.
+            body = "\n".join(
+                f"{entry['path']}  +{entry['added']} -{entry['deleted']}"
+                for entry in self._renderer.stat(diff)
+            )
+            if body:
+                seed.append({"title": "Modified Files", "body": body})
 
         return {
             "base": base,

@@ -1021,6 +1021,35 @@ class TestRepositoryTool(unittest.TestCase):
             self.assertEqual(result["files"][0]["deleted"], 1)
             self.assertNotIn("patch", result)
 
+    def test_show_correction_rejected_in_diff_strategy(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "def foo():\n    return 1\n"})
+            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree({"foo.py": "def foo():\n    return 2\n"})
+            after = fixture.commit(tree, [base], "correction")
+
+            tool = RepositoryTool(repository=VersionControl(fixture.repository), after=after)
+
+            # diff strategy (default): the correction diff is in the seed already.
+            with self.assertRaises(ValueError):
+                tool.show(after)
+
+    def test_show_correction_allowed_in_stat_strategy(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "def foo():\n    return 1\n"})
+            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree({"foo.py": "def foo():\n    return 2\n"})
+            after = fixture.commit(tree, [base], "correction")
+
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository), after=after, strategy="stat"
+            )
+
+            # stat strategy: the seed has no diff, so the agent may fetch the
+            # correction itself.
+            result = tool.show(after)
+            self.assertIn("return 2", result["patch"])
+
     def test_show_scoped_to_path(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree(

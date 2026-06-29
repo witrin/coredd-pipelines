@@ -62,6 +62,7 @@ class BenchmarkConfig(dg.Config):
     context: int = 3
     samples: int = 3
     compute: str = "default"
+    strategy: str = "diff"
 
 
 class AttributionEvaluationConfig(dg.Config):
@@ -71,6 +72,7 @@ class AttributionEvaluationConfig(dg.Config):
     api: str = "https://api.together.xyz/v1"
     key: str = "TOGETHER_AI_API_KEY"
     compute: str = "default"
+    strategy: str = "diff"
 
 
 @asset(
@@ -134,9 +136,11 @@ def attribution_change_trace(
     )
 
     graph = AgentSZZGraph(
-        seed=RepositorySeedNode(repository=repository),
+        seed=RepositorySeedNode(repository=repository, strategy=config.strategy),
         search=RepositorySearchNode(
-            tool=RepositoryToolFactory(repository=repository),
+            tool=RepositoryToolFactory(
+                repository=repository, strategy=config.strategy
+            ),
             llm=llm,
         ),
         steps=config.steps,
@@ -415,9 +419,13 @@ def attribution_agent_szz_evaluation(
 
         [run] = ValidationExecutor(
             candidate=AgentSZZGraphBuilder(
-                seed=lambda repository: RepositorySeedNode(repository=repository),
+                seed=lambda repository: RepositorySeedNode(
+                    repository=repository, strategy=config.strategy
+                ),
                 search=lambda repository: RepositorySearchNode(
-                    tool=RepositoryToolFactory(repository=repository),
+                    tool=RepositoryToolFactory(
+                        repository=repository, strategy=config.strategy
+                    ),
                     llm=llm,
                 ),
                 steps=config.steps,
