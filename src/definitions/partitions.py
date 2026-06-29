@@ -256,16 +256,22 @@ attribution_evaluation_partition = dg.MultiPartitionsDefinition(
     }
 )
 
-benchmark_correction_partition = dg.DynamicPartitionsDefinition(
+# The name= strings keep the legacy "benchmark_*" keys on purpose: they are the
+# live dynamic-partition keys registered in the (prod) instance, so renaming them
+# would orphan the registered corrections/runs and their materialized partitions.
+# Only the Python symbols follow the <stage>_<entity>_<qualifier> convention.
+filter_change_correction_partition = dg.DynamicPartitionsDefinition(
     name="benchmark_correction"
 )
 
-benchmark_run_partition = dg.DynamicPartitionsDefinition(name="benchmark_run")
+attribution_change_run_partition = dg.DynamicPartitionsDefinition(
+    name="benchmark_run"
+)
 
-benchmark_attribution_partition = dg.MultiPartitionsDefinition(
+attribution_change_partition = dg.MultiPartitionsDefinition(
     {
-        "correction": benchmark_correction_partition,
-        "run": benchmark_run_partition,
+        "correction": filter_change_correction_partition,
+        "run": attribution_change_run_partition,
     }
 )
 

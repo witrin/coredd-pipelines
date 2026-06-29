@@ -167,10 +167,14 @@ def filter_change_labels_sensor(
 @asset_sensor(
     asset_key="filter_change_labels",
 )
-def benchmark_correction_sensor(
+def filter_change_correction_sensor(
     context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
 ):
-    """Synchronize benchmark correction partitions over intrinsic changes."""
+    """Synchronize the correction partitions over intrinsic changes.
+
+    The dynamic-partition key is the legacy "benchmark_correction" set (kept for
+    prod-state continuity); only this sensor's symbol follows the stage convention.
+    """
     import polars as pl
 
     instance = context.instance

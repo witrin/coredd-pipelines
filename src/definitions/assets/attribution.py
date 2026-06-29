@@ -77,7 +77,7 @@ class AttributionEvaluationConfig(dg.Config):
 
 @asset(
     metadata={"version": "2.0.0"},
-    partitions_def=partitions.benchmark_attribution_partition,
+    partitions_def=partitions.attribution_change_partition,
     group_name="attribution",
     pool="default",
     ins={
