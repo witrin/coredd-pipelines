@@ -569,10 +569,12 @@ class TestLLM4SZZGraph(unittest.TestCase):
                 },
             ],
         )
-        self.assertIn(
+        # The raw PR description is no longer injected as its own block; the
+        # cleaned description reaches the model through the commit messages.
+        self.assertNotIn(
             "Pull request description:", structured.invoke.call_args_list[0].args[0]
         )
-        self.assertIn("Fix the parser", structured.invoke.call_args_list[0].args[0])
+        self.assertNotIn("Fix the parser", structured.invoke.call_args_list[0].args[0])
         self.assertIn(
             "Commit messages in (base, after]:",
             structured.invoke.call_args_list[0].args[0],

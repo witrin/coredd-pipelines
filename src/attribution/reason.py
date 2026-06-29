@@ -328,7 +328,6 @@ class ExplainNode:
         commit_messages = self._commit_messages(correction)
         prompt = self._build_prompt(
             summary=summary,
-            description=correction["description"],
             commit_messages=commit_messages,
             patch_text=patch,
         )
@@ -440,24 +439,18 @@ class ExplainNode:
         self,
         *,
         summary: str,
-        description: str,
         commit_messages: list[str],
         patch_text: str,
     ) -> str:
         messages = "\n".join(commit_messages) if commit_messages else "(none)"
         template = dedent(
             """
-            Use the modification summary, the pull request description, the commit messages, and the patch to identify the likely root cause and the related files among the changed files.
+            Use the modification summary, the commit messages, and the patch to identify the likely root cause and the related files among the changed files.
             Respond only in JSON.
             Use this schema: {{"rationale": string, "files": [string, ...]}}.
 
             Summary:
             {summary}
-
-            Pull request description:
-            ```markdown
-            {description}
-            ```
 
             Commit messages in (base, after]:
             {messages}
@@ -470,7 +463,6 @@ class ExplainNode:
         ).strip()
         return template.format(
             summary=summary,
-            description=description or "(none)",
             messages=messages,
             patch_text=patch_text,
         )
