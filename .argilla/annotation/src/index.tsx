@@ -199,20 +199,21 @@ function App({
           overflow: "hidden",
         }}
       >
-        {!collapsed && (
-          <Sidebar
-            data={data}
-            state={annotations.selection}
-            activeSha={active?.sha ?? null}
-            activePath={active?.path ?? null}
-            navigation={navigation}
-            onFile={onFile}
-            onSuggestion={onNavigate}
-            onAnnotation={onNavigate}
-            collapsed={collapsed}
-            onToggle={() => setCollapsed((v) => !v)}
-          />
-        )}
+        {/* Always mounted: collapsing hides the sidebar via display:none rather
+            than unmounting it, so each CommitRow keeps its per-commit UI state
+            (filter, open, expanded folders) across a collapse and expand. */}
+        <Sidebar
+          data={data}
+          state={annotations.selection}
+          activeSha={active?.sha ?? null}
+          activePath={active?.path ?? null}
+          navigation={navigation}
+          onFile={onFile}
+          onSuggestion={onNavigate}
+          onAnnotation={onNavigate}
+          collapsed={collapsed}
+          onToggle={() => setCollapsed((v) => !v)}
+        />
         {active && change !== undefined ? (
           <Editor
             sha={active.sha}

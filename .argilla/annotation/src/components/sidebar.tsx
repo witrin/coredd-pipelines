@@ -656,6 +656,7 @@ export function Sidebar({
   onFile,
   onSuggestion,
   onAnnotation,
+  collapsed,
   onToggle,
 }: Properties) {
   const [width, setWidth] = useState(280);
@@ -724,7 +725,7 @@ export function Sidebar({
         minWidth: 200,
         maxWidth: 600,
         flexShrink: 0,
-        display: "flex",
+        display: collapsed ? "none" : "flex",
         flexDirection: "column",
         height: "100%",
         background: "var(--av-surface)",

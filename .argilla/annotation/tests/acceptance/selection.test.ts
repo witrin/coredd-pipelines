@@ -1043,4 +1043,156 @@ test.describe("Selection interactions", () => {
       expect(visible).toBe(true);
     });
   });
+
+  test.describe("when the sidebar is collapsed and expanded", () => {
+    test("a target commit keeps its toggled changed-only filter", async ({
+      page,
+    }) => {
+      // The target commit defaults to all files, shown by its changed count in
+      // the muted colour. Toggle it to changed only and wait for the accent.
+      await page.evaluate(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        for (const row of Array.from(root?.querySelectorAll(".av-row") ?? [])) {
+          if (!row.textContent?.includes("baz: introduce defect")) continue;
+          const count = row.querySelector(
+            "span.av-changed-count",
+          ) as HTMLElement | null;
+          count?.click();
+          return;
+        }
+        throw new Error("changed count not found for the target commit");
+      });
+      await page.waitForFunction(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        for (const row of Array.from(root?.querySelectorAll(".av-row") ?? [])) {
+          if (!row.textContent?.includes("baz: introduce defect")) continue;
+          const count = row.querySelector(
+            "span.av-changed-count",
+          ) as HTMLElement | null;
+          return count?.style.color.includes("--av-accent") ?? false;
+        }
+        return false;
+      });
+
+      // Collapse the sidebar via its header toggle.
+      await page.click("code-annotation >> button[title='Collapse sidebar']");
+      await page.waitForFunction(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        const sidebar = root?.querySelector(
+          "div.av-no-select",
+        ) as HTMLElement | null;
+        return sidebar?.style.display === "none";
+      });
+
+      // Expand it again via the editor navigation bar button.
+      await page.evaluate(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        for (const button of Array.from(
+          root?.querySelectorAll("button") ?? [],
+        )) {
+          if (button.textContent?.trim() === "☰") {
+            (button as HTMLButtonElement).click();
+            return;
+          }
+        }
+        throw new Error("expand button not found");
+      });
+      await page.waitForFunction(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        const sidebar = root?.querySelector(
+          "div.av-no-select",
+        ) as HTMLElement | null;
+        return sidebar?.style.display === "flex";
+      });
+
+      // The filter must still be changed only, so the accent colour persists
+      // rather than resetting to the muted all-files default.
+      const stillChanged = await page.evaluate(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        for (const row of Array.from(root?.querySelectorAll(".av-row") ?? [])) {
+          if (!row.textContent?.includes("baz: introduce defect")) continue;
+          const count = row.querySelector(
+            "span.av-changed-count",
+          ) as HTMLElement | null;
+          return count?.style.color.includes("--av-accent") ?? false;
+        }
+        return false;
+      });
+      expect(stillChanged).toBe(true);
+    });
+
+    test("the context commit keeps its toggled all-files filter", async ({
+      page,
+    }) => {
+      // The context commit defaults to changed only, shown by its changed count
+      // in the accent colour. Toggle it to all files and wait for the muted.
+      await page.evaluate(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        for (const row of Array.from(root?.querySelectorAll(".av-row") ?? [])) {
+          if (!row.textContent?.includes("foo: base implementation")) continue;
+          const count = row.querySelector(
+            "span.av-changed-count",
+          ) as HTMLElement | null;
+          count?.click();
+          return;
+        }
+        throw new Error("changed count not found for the context commit");
+      });
+      await page.waitForFunction(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        for (const row of Array.from(root?.querySelectorAll(".av-row") ?? [])) {
+          if (!row.textContent?.includes("foo: base implementation")) continue;
+          const count = row.querySelector(
+            "span.av-changed-count",
+          ) as HTMLElement | null;
+          return count?.style.color.includes("--av-muted") ?? false;
+        }
+        return false;
+      });
+
+      await page.click("code-annotation >> button[title='Collapse sidebar']");
+      await page.waitForFunction(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        const sidebar = root?.querySelector(
+          "div.av-no-select",
+        ) as HTMLElement | null;
+        return sidebar?.style.display === "none";
+      });
+
+      await page.evaluate(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        for (const button of Array.from(
+          root?.querySelectorAll("button") ?? [],
+        )) {
+          if (button.textContent?.trim() === "☰") {
+            (button as HTMLButtonElement).click();
+            return;
+          }
+        }
+        throw new Error("expand button not found");
+      });
+      await page.waitForFunction(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        const sidebar = root?.querySelector(
+          "div.av-no-select",
+        ) as HTMLElement | null;
+        return sidebar?.style.display === "flex";
+      });
+
+      // The filter must still be all files, so the muted colour persists rather
+      // than resetting to the accent changed-only default.
+      const stillAll = await page.evaluate(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        for (const row of Array.from(root?.querySelectorAll(".av-row") ?? [])) {
+          if (!row.textContent?.includes("foo: base implementation")) continue;
+          const count = row.querySelector(
+            "span.av-changed-count",
+          ) as HTMLElement | null;
+          return count?.style.color.includes("--av-muted") ?? false;
+        }
+        return false;
+      });
+      expect(stillAll).toBe(true);
+    });
+  });
 });
