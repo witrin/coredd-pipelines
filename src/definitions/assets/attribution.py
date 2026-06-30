@@ -63,6 +63,7 @@ class BenchmarkConfig(dg.Config):
     samples: int = 3
     compute: str = "default"
     strategy: str = "diff"
+    logprobs: bool = False
 
 
 class AttributionEvaluationConfig(dg.Config):
@@ -73,6 +74,7 @@ class AttributionEvaluationConfig(dg.Config):
     key: str = "TOGETHER_AI_API_KEY"
     compute: str = "default"
     strategy: str = "diff"
+    logprobs: bool = False
 
 
 @asset(
@@ -133,6 +135,8 @@ def attribution_change_trace(
         temperature=config.temperature,
         max_tokens=8000,
         streaming=True,
+        logprobs=config.logprobs,
+        top_logprobs=5 if config.logprobs else None,
     )
 
     graph = AgentSZZGraph(
@@ -244,6 +248,8 @@ def attribution_agentic_szz_evaluation(
         base_url=config.api,
         temperature=config.temperature,
         max_tokens=4096,
+        logprobs=config.logprobs,
+        top_logprobs=5 if config.logprobs else None,
     )
 
     tables: list[pa.Table] = []
@@ -394,8 +400,8 @@ def attribution_agent_szz_evaluation(
         base_url=config.api,
         temperature=config.temperature,
         max_tokens=4096,
-        logprobs=True,
-        top_logprobs=5,
+        logprobs=config.logprobs,
+        top_logprobs=5 if config.logprobs else None,
     )
 
     tables: list[pa.Table] = []
