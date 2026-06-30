@@ -451,29 +451,22 @@ button { font-family: inherit; font-size: inherit; }
   get value(): Entry[] {
     const selection = this.#selection.current;
     if (!selection) return [];
-    const map = new Map<string, Entry>();
-    for (const a of selection.project()) {
-      if (a.origin === "suggestion" && a.status !== "accepted") continue;
-      const key = `${a.sha}\0${a.path}`;
-      const existing = map.get(key);
-      if (existing) {
-        existing.lines = [...existing.lines, ...a.lines].sort(
-          (a, b) => a[0] - b[0],
-        );
-      } else {
-        map.set(key, { sha: a.sha, path: a.path, lines: [...a.lines] });
-      }
-    }
-    return [...map.values()];
+    // One entry per annotation, no per-file merge: hydrate() replays each as a
+    // separate add, so distinct selections keep their identity across a reload
+    // and stay individually removable. Touching selections are already merged
+    // upstream by Selection, so this never splits a single logical unit.
+    return selection
+      .project()
+      .filter((a) => !(a.origin === "suggestion" && a.status !== "accepted"))
+      .map((a) => ({ sha: a.sha, path: a.path, lines: [...a.lines] }));
   }
 
   set value(entries: Entry[]) {
-    const sel = this.#selection.current;
-    if (!sel) {
+    if (!this.#selection.current) {
       this.#pending = entries;
       return;
     }
-    sel.hydrate(entries);
+    this.#selection.current.hydrate(entries);
   }
 
   /**
