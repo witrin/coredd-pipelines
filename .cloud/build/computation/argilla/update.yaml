@@ -37,7 +37,7 @@ osPolicies:
             validate:
               interpreter: SHELL
               script: |
-                [ -f /etc/argilla.env ] && [ -f /etc/argilla/release.env ] && exit 100 || exit 101
+                [ -f /etc/argilla.env ] && grep -qx "IMAGE_TAG=${IMAGE}" /etc/argilla/release.env 2>/dev/null && exit 100 || exit 101
             enforce:
               interpreter: SHELL
               script: |
