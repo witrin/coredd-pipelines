@@ -90,6 +90,11 @@ COPY --from=annotation /usr/local/annotation/dist/ \
      /opt/venv/lib/python3.13/site-packages/argilla_server/static/annotation/
 COPY .argilla/annotation.js \
      /opt/venv/lib/python3.13/site-packages/argilla_server/static/annotation/adapter.js
+COPY .argilla/permissions.py \
+     /opt/venv/lib/python3.13/site-packages/argilla_overrides.py
+COPY .argilla/permissions.pth \
+     /opt/venv/lib/python3.13/site-packages/permissions.pth
+
 FROM pipelines AS notebooks
 
 USER root
