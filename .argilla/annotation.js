@@ -28,7 +28,11 @@ class Adapter {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
+          // PATCH /records replaces the whole fields dict, it does not merge.
+          // Resend every field, mutating only annotation, or the server rejects
+          // the request with 422 "missing required value for field: ...".
           fields: {
+            ...this.#record.fields,
             annotation: {
               url: this.#record.fields.annotation.url,
               selections,
