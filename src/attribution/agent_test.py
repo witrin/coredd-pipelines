@@ -1112,6 +1112,26 @@ class TestRepositoryTool(unittest.TestCase):
             )
             self.assertEqual(second["commits"], {middle: "replace beta"})
 
+    def test_blame_rejects_out_of_range_with_valid_interval(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "alpha\nbeta\n"})
+            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree({"foo.py": "alpha\ngamma\n"})
+            after = fixture.commit(tree, [base], "correction")
+
+            tool = RepositoryTool(
+                repository=VersionControl(fixture.repository),
+                after=after,
+            )
+
+            # foo.py has 2 lines at base; asking up to 400 must error clearly,
+            # naming the valid range, not silently blank out every line.
+            with self.assertRaises(ValueError) as ctx:
+                tool.blame("foo.py", base, 1, 400)
+            message = str(ctx.exception)
+            self.assertIn("1-2", message)
+            self.assertIn("2 lines", message)
+
     def test_pickaxe_emits_commits_with_changed_count(self) -> None:
         with HistoryFixture() as fixture:
             tree = fixture.tree({"foo.py": "x = 0\n"})
@@ -1557,6 +1577,47 @@ class TestDiffRenderer(unittest.TestCase):
             self.assertIn("bar.py", full)
             self.assertIn("foo.py", scoped)
             self.assertNotIn("bar.py", scoped)
+
+
+class TestRepositoryToolValidation(unittest.TestCase):
+    def _tool(self, fixture, after):
+        return RepositoryTool(repository=VersionControl(fixture.repository), after=after)
+
+    def test_max_must_be_positive(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "pass\n"})
+            base = fixture.commit(tree, [], "base")
+            after = fixture.commit(tree, [base], "correction")
+            tool = self._tool(fixture, after)
+            for call in (
+                lambda: tool.pickaxe("x", path="foo.py", max=0),
+                lambda: tool.trace("x", path="foo.py", max=0),
+                lambda: tool.grep("x", base, max=0),
+            ):
+                with self.assertRaises(ValueError):
+                    call()
+
+    def test_trace_unsupported_language_names_python(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"README.md": "# hi\n"})
+            base = fixture.commit(tree, [], "base")
+            after = fixture.commit(tree, [base], "correction")
+            tool = self._tool(fixture, after)
+            with self.assertRaises(ValueError) as ctx:
+                tool.trace("x", path="README.md")
+            self.assertIn(".py", str(ctx.exception))
+
+    def test_show_notes_unmodified_path(self) -> None:
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": "a\n", "bar.py": "b\n"})
+            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree({"foo.py": "a2\n", "bar.py": "b\n"})
+            target = fixture.commit(tree, [base], "touch foo")
+            after = fixture.commit(tree, [target], "correction")
+            tool = self._tool(fixture, after)
+            result = tool.show(target, path="bar.py")
+            self.assertEqual(result["patch"], "")
+            self.assertIn("not modified", result["note"])
 
 
 if __name__ == "__main__":

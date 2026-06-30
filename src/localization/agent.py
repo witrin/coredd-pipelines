@@ -123,6 +123,8 @@ class LocateTool:
         """
         if not needle:
             raise ValueError("grep needle must not be empty.")
+        if max < 1:
+            raise ValueError("grep max must be a positive integer.")
         try:
             pattern = re.compile(needle)
         except re.error as error:

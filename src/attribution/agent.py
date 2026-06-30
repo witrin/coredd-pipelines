@@ -505,7 +505,7 @@ class RepositoryTool:
         if parents:
             diff = self._repository.diff(parents[0], commit, context=3)
             patch = self._compress_patch(self._renderer.render(diff, path))
-        return {
+        result = {
             "sha": commit,
             "message": meta.message,
             "timestamp": self._timestamp(meta.time),
@@ -513,6 +513,14 @@ class RepositoryTool:
             "path": path,
             "patch": patch,
         }
+        # An empty patch is ambiguous; tell the agent why so it does not read it
+        # as "nothing changed" when in fact the path or the commit is the reason.
+        if not patch:
+            if not parents:
+                result["note"] = f"{commit[:12]} is a root commit and has no diff."
+            elif path is not None:
+                result["note"] = f"{path!r} was not modified by this commit."
+        return result
 
     def blame(
         self,
@@ -535,16 +543,23 @@ class RepositoryTool:
                 f"Commit {commit[:12]} is not before the correction. The introducer must predate the correction. Use {self._after[:12]}~1 to start."
             )
         try:
-            raw = self._repository.blame(path, commit, [(start, end)])
-        except KeyError:
+            data = self._repository.blob(commit, path).decode("utf-8", errors="replace")
+        except (FileNotFoundError, KeyError, ValueError):
             raise ValueError(
                 f"The path {path!r} does not exist at commit {commit[:12]}."
             )
-        try:
-            data = self._repository.blob(commit, path).decode("utf-8", errors="replace")
-        except (FileNotFoundError, KeyError, ValueError):
-            data = ""
         source = data.splitlines()
+        # Reject out-of-bounds ranges with a clear message instead of clamping:
+        # blame() discards a whole range the moment one line is out of bounds, so
+        # a guessed end (e.g. 400 on a 397-line file) would otherwise blank out
+        # every line. Telling the agent the valid interval lets it retry correctly.
+        last = len(source)
+        if start < 1 or end < start or end > last:
+            raise ValueError(
+                f"Invalid line range {start}-{end} for {path!r} at {commit[:12]}: "
+                f"the file has {last} lines, so the valid range is 1-{last}."
+            )
+        raw = self._repository.blame(path, commit, [(start, end)])
 
         lines: list[str] = []
         commits: dict[str, str] = {}
@@ -580,6 +595,8 @@ class RepositoryTool:
         """
         if not needle:
             raise ValueError("pickaxe needle must not be empty.")
+        if max < 1:
+            raise ValueError("pickaxe max must be a positive integer.")
 
         if path is None:
             return self._pickaxe_repository(needle, max)
@@ -618,6 +635,8 @@ class RepositoryTool:
         Use this to follow the history of functions, methods, or classes when
         line-based blame is not enough.
         """
+        if max < 1:
+            raise ValueError("trace max must be a positive integer.")
         try:
             matcher = re.compile(pattern)
         except re.error as error:
@@ -625,7 +644,9 @@ class RepositoryTool:
 
         language = self._language(path)
         if language is None:
-            raise ValueError(f"Unsupported language for path {path!r}.")
+            raise ValueError(
+                f"Cannot trace {path!r}: only Python source files (.py) are supported."
+            )
 
         try:
             walker = VersionControlPathWalker(
@@ -671,6 +692,8 @@ class RepositoryTool:
         """
         if not needle:
             raise ValueError("grep needle must not be empty.")
+        if max < 1:
+            raise ValueError("grep max must be a positive integer.")
 
         try:
             pattern = re.compile(needle)
@@ -697,6 +720,7 @@ class RepositoryTool:
             )
         result: list[dict[str, Any]] = []
         total = 0
+        skipped: list[str] = []
         for current in paths:
             try:
                 data = self._repository.blob(commit, current)
@@ -705,6 +729,7 @@ class RepositoryTool:
             try:
                 text = data.decode("utf-8")
             except UnicodeDecodeError:
+                skipped.append(current)
                 continue
             matches: list[str] = []
             for index, line in enumerate(text.splitlines(), start=1):
@@ -719,6 +744,16 @@ class RepositoryTool:
             total += len(matches)
             if total >= max:
                 break
+        # If nothing matched and the only candidates were binary, say so rather
+        # than returning an empty list the agent would read as "no occurrences".
+        if not result and skipped:
+            result.append(
+                {
+                    "path": "(skipped)",
+                    "note": f"{len(skipped)} binary/undecodable file(s) skipped: "
+                    + ", ".join(skipped[:5]),
+                }
+            )
         return result
 
     def _pickaxe_delta(self, entry: Any, needle: str) -> int | None:
