@@ -35,11 +35,23 @@ class DiffRenderer:
 
             for hunk in value.hunks:
                 parts.append(hunk.header.rstrip("\n"))
-                parts.extend(
-                    f"{line.origin}{line.content}".rstrip("\n") for line in hunk.lines
-                )
+                for line in hunk.lines:
+                    # pygit2 emits the "no newline at end of file" detail as its own
+                    # line whose origin is an EOFNL marker (< > =), not a real diff
+                    # origin. Rendering "{origin}{content}" would put a bare ">" line
+                    # into the body, which is not valid unified-diff and makes the
+                    # patch unparseable downstream. Emit the canonical marker line
+                    # instead; it does not count toward the hunk's @@ line counts.
+                    if line.origin in {"<", ">", "="}:
+                        parts.append("\\ No newline at end of file")
+                        continue
+                    parts.append(f"{line.origin}{line.content}".rstrip("\n"))
 
-        return "\n".join(parts).strip()
+        # A blank context line renders as a lone " ", so a trailing .strip() would
+        # eat the final hunk's blank context lines and leave its body shorter than
+        # the @@ header promises, which makes the patch unparseable downstream. Only
+        # the join artifact may go: nothing whitespace-bearing.
+        return "\n".join(parts)
 
     def stat(self, diff: pygit2.Diff) -> list[dict[str, object]]:
         """Return one entry per changed file with its path and churn counts."""

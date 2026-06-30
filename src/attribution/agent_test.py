@@ -1578,6 +1578,95 @@ class TestDiffRenderer(unittest.TestCase):
             self.assertIn("foo.py", scoped)
             self.assertNotIn("bar.py", scoped)
 
+    def test_preserves_trailing_blank_context(self) -> None:
+        # A change whose last hunk ends in blank context lines must still render a
+        # patch whose body matches its @@ header. A trailing strip() used to eat
+        # those blank lines, leaving the final hunk shorter than promised and
+        # unparseable downstream (PatchView / unidiff).
+        from benchmark.attribution.diff.reference import PatchView
+
+        # Edit followed by two blank lines, then an unchanged block too far away to
+        # close the hunk: the last hunk's trailing context is the blank lines.
+        base_body = (
+            "def f():\n    x = 1\n    return x\n\n\n"
+            "def g():\n    pass\n    pass\n    pass\n    pass\n"
+        )
+        after_body = (
+            "def f():\n    x = 1\n    x += 1\n    return x\n\n\n"
+            "def g():\n    pass\n    pass\n    pass\n    pass\n"
+        )
+        with HistoryFixture() as fixture:
+            tree = fixture.tree({"foo.py": base_body})
+            base = fixture.commit(tree, [], "base")
+            tree = fixture.tree({"foo.py": after_body})
+            after = fixture.commit(tree, [base], "edit before blank context")
+
+            repository = VersionControl(fixture.repository)
+            diff = repository.diff(base, after, context=3)
+            rendered = DiffRenderer().render(diff, path="foo.py")
+
+            # The blank context lines render as a lone space and must survive.
+            self.assertTrue(rendered.endswith(" \n "))
+            # Must not raise UnidiffParseError; the body has to match the header.
+            PatchView(rendered)
+
+    @staticmethod
+    def _raw_tree(fixture, files: dict[str, bytes]):
+        # HistoryFixture.tree() forces a trailing newline, which cannot reproduce
+        # the no-newline-at-EOF marker; build the tree from raw blob bytes instead.
+        import pygit2
+
+        builder = fixture.repository.TreeBuilder()
+        for name, content in sorted(files.items()):
+            blob = fixture.repository.create_blob(content)
+            builder.insert(name, blob, pygit2.GIT_FILEMODE_BLOB)
+        return builder.write()
+
+    def test_renders_no_newline_at_eof_marker(self) -> None:
+        # When a revision lacks a trailing newline, pygit2 emits a synthetic line
+        # whose origin is an EOFNL marker (< > =), not a real diff origin. Rendering
+        # "{origin}{content}" used to put a bare ">" line into the body, which is not
+        # valid unified-diff and made the patch unparseable downstream (PatchView).
+        from benchmark.attribution.diff.reference import Numbering, PatchView
+
+        with HistoryFixture() as fixture:
+            tree = self._raw_tree(fixture, {"foo.py": b"a = 1\nb = 2\n"})
+            base = fixture.commit(tree, [], "base")
+            # after revision has no trailing newline -> ADD_EOFNL marker line.
+            tree = self._raw_tree(fixture, {"foo.py": b"a = 1\nb = 3"})
+            after = fixture.commit(tree, [base], "edit without trailing newline")
+
+            repository = VersionControl(fixture.repository)
+            diff = repository.diff(base, after, context=3)
+            rendered = DiffRenderer().render(diff, path="foo.py")
+
+            self.assertIn("\\ No newline at end of file", rendered)
+            # No bare marker line, and the patch must parse.
+            self.assertNotIn("\n>", rendered)
+            self.assertNotIn("\n<", rendered)
+            PatchView(rendered, numbering=Numbering.AFTER)
+
+    def test_renders_full_file_deletion_without_trailing_newline(self) -> None:
+        # A deleted file with no trailing newline combines a "+0,0" header with the
+        # EOFNL marker on the deleted side (origin "<"). This is exactly the Olive
+        # case that crashed the localization graph.
+        from benchmark.attribution.diff.reference import Numbering, PatchView
+
+        with HistoryFixture() as fixture:
+            tree = self._raw_tree(
+                fixture, {"foo.py": b"x = 1\ny = 2", "keep.py": b"z = 3\n"}
+            )
+            base = fixture.commit(tree, [], "base")
+            tree = self._raw_tree(fixture, {"keep.py": b"z = 3\n"})
+            after = fixture.commit(tree, [base], "delete foo.py")
+
+            repository = VersionControl(fixture.repository)
+            diff = repository.diff(base, after, context=3)
+            rendered = DiffRenderer().render(diff, path="foo.py")
+
+            self.assertIn("\\ No newline at end of file", rendered)
+            PatchView(rendered, numbering=Numbering.AFTER)
+
 
 class TestRepositoryToolValidation(unittest.TestCase):
     def _tool(self, fixture, after):
