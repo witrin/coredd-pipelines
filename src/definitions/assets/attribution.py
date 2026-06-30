@@ -56,7 +56,7 @@ from langchain_openai import ChatOpenAI
 
 
 class BenchmarkConfig(dg.Config):
-    model: str = "deepseek-ai/DeepSeek-V4-Pro"
+    model: str = "zai-org/GLM-5.2"
     temperature: float = 0.0
     steps: int = 15
     context: int = 3
