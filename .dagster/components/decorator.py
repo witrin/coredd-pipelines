@@ -159,11 +159,21 @@ def asset(*asset_args, **asset_kwargs):
             def wrapped(
                 context: dg.AssetExecutionContext, config=None, *args, **kwargs
             ):
-                if (
-                    config is not None
-                    and getattr(config, "compute", "default") == "force"
-                ):
+                # Assets without a typed dg.Config do not get the `config`
+                # parameter injected (it stays None); their run config still
+                # arrives as a plain dict on context.op_config. Read compute from
+                # the typed object when present, else from op_config.
+                op_config = context.op_config
+                if config is not None:
+                    compute = getattr(config, "compute", "default")
+                elif isinstance(op_config, dict):
+                    compute = op_config.get("compute", "default")
+                else:
+                    compute = "default"
+                if compute == "force":
                     context.log.info("Forced compute for %s", context.asset_key)
+                    if config is None:
+                        return fn(context, *args, **kwargs)
                     return fn(context, config, *args, **kwargs)
 
                 cache = AssetCache(context)
