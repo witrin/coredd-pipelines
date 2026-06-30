@@ -1,5 +1,5 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
-import type { Data, Entry, Interval } from "../types/index.js";
+import type { Data, Entry } from "../types/index.js";
 import { Selection } from "../lib/selection.js";
 import { Intervals } from "../lib/interval.js";
 
@@ -18,18 +18,11 @@ export interface AnnotationsResult {
 }
 
 function toEntries(selection: Selection): Entry[] {
-  const map = new Map<string, Interval[]>();
+  const result: Entry[] = [];
   for (const a of selection.project()) {
     if (a.origin === "suggestion" && a.status !== "accepted") continue;
-    const key = `${a.sha}\0${a.path}`;
-    const current = map.get(key) ?? [];
-    map.set(key, Intervals.union(current, a.lines));
-  }
-  const result: Entry[] = [];
-  for (const [key, lines] of map) {
-    const [sha, path] = key.split("\0");
-    if (lines.length > 0)
-      result.push({ sha, path, lines: Intervals.merge(lines) });
+    if (a.lines.length > 0)
+      result.push({ sha: a.sha, path: a.path, lines: Intervals.merge(a.lines) });
   }
   return result;
 }
