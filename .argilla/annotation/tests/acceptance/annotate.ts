@@ -1,7 +1,14 @@
 import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
 
-type ChangeDetail = { sha: string; path: string; lines: [number, number][] }[];
+type ChangeEntry = {
+  sha: string;
+  path: string;
+  lines: [number, number][];
+  origin: "suggestion" | "manual";
+  status: "pending" | "accepted" | "rejected" | "blocked" | "absorbed";
+};
+type ChangeDetail = ChangeEntry[];
 
 /**
  * Helpers for interacting with annotation selections in acceptance tests.
@@ -17,7 +24,9 @@ export class Annotate {
       ) as HTMLElement | null;
       (window as any).__changeEvents = [];
       element?.addEventListener("change", (e: Event) => {
-        (window as any).__changeEvents.push((e as CustomEvent).detail);
+        // The change detail is a SelectionRecord {state, annotation}; tests
+        // assert against the annotation projection.
+        (window as any).__changeEvents.push((e as CustomEvent).detail.annotation);
       });
     });
   }

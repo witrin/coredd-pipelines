@@ -43,11 +43,16 @@ test.describe("Selection interactions", () => {
       });
     });
 
-    test("fires change event with empty export", async ({ page }) => {
+    test("fires change event exporting the rejected suggestion", async ({
+      page,
+    }) => {
       await Annotate.suggestion(page, "reject");
       await Annotate.wait(page);
       const detail = await Annotate.last(page);
-      expect(detail).toHaveLength(0);
+      expect(detail).toHaveLength(1);
+      expect(detail[0].origin).toBe("suggestion");
+      expect(detail[0].status).toBe("rejected");
+      expect(detail[0].lines).toEqual([[3, 6]]);
     });
   });
 

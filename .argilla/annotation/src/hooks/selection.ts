@@ -1,7 +1,7 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
-import type { Data, Entry } from "../types/index.js";
+import type { Data } from "../types/index.js";
 import { Selection } from "../lib/selection.js";
-import { Intervals } from "../lib/interval.js";
+import type { SelectionRecord } from "../lib/selection.js";
 
 /**
  * Return value of the useAnnotations hook.
@@ -12,19 +12,26 @@ export interface AnnotationsResult {
    */
   selection: Selection;
   /**
-   * The current exported annotation entries.
+   * The current record: raw state checkpoint plus annotation projection.
    */
-  exported: Entry[];
+  record: SelectionRecord;
 }
 
-function toEntries(selection: Selection): Entry[] {
-  const result: Entry[] = [];
+function toRecord(selection: Selection): SelectionRecord {
+  const annotation: SelectionRecord["annotation"] = [];
   for (const a of selection.project()) {
-    if (a.origin === "suggestion" && a.status !== "accepted") continue;
-    if (a.lines.length > 0)
-      result.push({ sha: a.sha, path: a.path, lines: Intervals.merge(a.lines) });
+    if (a.origin === "suggestion" && a.status !== "accepted" && a.status !== "rejected")
+      continue;
+    if (a.lines.length === 0) continue;
+    annotation.push({
+      sha: a.sha,
+      path: a.path,
+      lines: a.lines,
+      origin: a.origin,
+      status: a.status,
+    });
   }
-  return result;
+  return { state: selection.state, annotation };
 }
 
 /**
@@ -32,7 +39,7 @@ function toEntries(selection: Selection): Entry[] {
  */
 export function useAnnotations(
   data: Data | null,
-  onChange: React.RefObject<((detail: Entry[]) => void) | null>,
+  onChange: React.RefObject<((detail: SelectionRecord) => void) | null>,
 ): AnnotationsResult {
   const selectionRef = useRef<Selection | null>(null);
   const dataRef = useRef<Data | null>(null);
@@ -64,10 +71,10 @@ export function useAnnotations(
   useEffect(
     () =>
       selection.subscribe(() => {
-        onChange.current?.(toEntries(selection));
+        onChange.current?.(toRecord(selection));
       }),
     [selection],
   );
 
-  return { selection, exported: toEntries(selection) };
+  return { selection, record: toRecord(selection) };
 }

@@ -65,15 +65,6 @@ export type Status =
   | "absorbed";
 
 /**
- * A single entry in the change event output.
- */
-export interface Entry {
-  sha: string;
-  path: string;
-  lines: Interval[];
-}
-
-/**
  * A single annotation in the runtime state.
  */
 export interface Annotation {
@@ -85,6 +76,13 @@ export interface Annotation {
   status: Status;
   description: string;
 }
+
+/**
+ * An annotation as projected for output — the annotator-facing form the backend
+ * consumes. The session-local identifier and the description are dropped. Output
+ * only; it is never fed back in.
+ */
+export type Projection = Omit<Annotation, "identifier" | "description">;
 
 /**
  * Severity of a status notification.

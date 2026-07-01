@@ -54,13 +54,16 @@ test.describe("read-only mode — no targets", () => {
         });
       });
 
-      test("value returns empty array", async ({ page }) => {
+      test("value returns an empty record", async ({ page }) => {
         await setSrc(page, fixture.src);
         await shadowText(page, "foo: base implementation");
         const value = await page.evaluate(() => {
           return (document.querySelector("code-annotation") as any)?.value;
         });
-        expect(value).toEqual([]);
+        expect(value).toEqual({
+          state: { events: [], counter: 0 },
+          annotation: [],
+        });
       });
     });
   }

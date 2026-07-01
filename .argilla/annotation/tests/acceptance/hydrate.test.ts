@@ -11,9 +11,11 @@ test.describe("element.value hydration", () => {
     await page.evaluate(() => {
       const element = document.querySelector("code-annotation")!;
       element.setAttribute("src", "/tests/fixtures/meta.json");
-      (element as any).value = [
-        { sha: "baz", path: "src/bar.ts", lines: [[3, 6]] },
-      ];
+      // Restore a state that accepts the first suggestion (identifier "1").
+      (element as any).value = {
+        state: { events: [{ type: "accept", identifier: "1" }], counter: 1 },
+        annotation: [],
+      };
     });
 
     // Size the component so Monaco actually renders.
@@ -92,9 +94,11 @@ test.describe("element.value hydration", () => {
 
     await page.evaluate(() => {
       const element = document.querySelector("code-annotation")!;
-      (element as any).value = [
-        { sha: "baz", path: "src/bar.ts", lines: [[3, 6]] },
-      ];
+      // Restore a state that accepts the first suggestion (identifier "1").
+      (element as any).value = {
+        state: { events: [{ type: "accept", identifier: "1" }], counter: 1 },
+        annotation: [],
+      };
     });
 
     await page.waitForFunction(

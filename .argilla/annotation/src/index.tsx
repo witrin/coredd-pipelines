@@ -3,8 +3,8 @@ import { useState, useCallback, useMemo, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import createCache from "@emotion/cache";
 import { CacheProvider } from "@emotion/react";
-import type { Entry, Level } from "./types/index.js";
-import type { Selection } from "./lib/selection.js";
+import type { Level } from "./types/index.js";
+import type { Selection, SelectionRecord } from "./lib/selection.js";
 import { Toasts } from "./lib/toasts.js";
 import { useData } from "./hooks/data.js";
 import { useAnnotations } from "./hooks/selection.js";
@@ -28,10 +28,10 @@ function App({
   toasts,
 }: {
   src: string;
-  notify: { current: ((detail: Entry[]) => void) | null };
+  notify: { current: ((detail: SelectionRecord) => void) | null };
   shadow: ShadowRoot;
   selection: { current: Selection | null };
-  drain: () => Entry[] | null;
+  drain: () => SelectionRecord | null;
   toasts: Toasts;
 }) {
   const cache = useMemo(
@@ -49,9 +49,9 @@ function App({
   useEffect(() => {
     if (data) {
       selection.current = annotations.selection;
-      const entries = drain();
-      if (entries) {
-        annotations.selection.hydrate(entries);
+      const pending = drain();
+      if (pending) {
+        annotations.selection.state = pending.state;
       }
     }
     return () => {
@@ -327,11 +327,11 @@ function App({
 
 class AnnotationView extends HTMLElement {
   #root: ReturnType<typeof createRoot> | null = null;
-  #notify: { current: ((detail: Entry[]) => void) | null } = {
+  #notify: { current: ((detail: SelectionRecord) => void) | null } = {
     current: null,
   };
   #selection: { current: Selection | null } = { current: null };
-  #pending: Entry[] | null = null;
+  #pending: SelectionRecord | null = null;
   #shadow: ShadowRoot | null = null;
   #observer: MutationObserver | null = null;
   #toasts = new Toasts();
@@ -430,7 +430,7 @@ button { font-family: inherit; font-size: inherit; }
   #paint(): void {
     if (!this.#root || !this.#shadow) return;
     const src = this.getAttribute("src") ?? "";
-    this.#notify.current = (detail: Entry[]) => {
+    this.#notify.current = (detail: SelectionRecord) => {
       this.dispatchEvent(new CustomEvent("change", { detail, bubbles: false }));
     };
     this.#root.render(
@@ -440,34 +440,44 @@ button { font-family: inherit; font-size: inherit; }
         shadow={this.#shadow}
         selection={this.#selection}
         drain={() => {
-          const entries = this.#pending;
+          const pending = this.#pending;
           this.#pending = null;
-          return entries;
+          return pending;
         }}
         toasts={this.#toasts}
       />,
     );
   }
 
-  get value(): Entry[] {
+  /**
+   * The current output value: the raw state checkpoint (for reload) plus the
+   * annotator-facing projection. Only `state` is ever read back via the setter.
+   */
+  get value(): SelectionRecord | null {
     const selection = this.#selection.current;
-    if (!selection) return [];
-    // One entry per annotation, no per-file merge: hydrate() replays each as a
-    // separate add, so distinct selections keep their identity across a reload
-    // and stay individually removable. Touching selections are already merged
-    // upstream by Selection, so this never splits a single logical unit.
-    return selection
-      .project()
-      .filter((a) => !(a.origin === "suggestion" && a.status !== "accepted"))
-      .map((a) => ({ sha: a.sha, path: a.path, lines: [...a.lines] }));
+    if (!selection) return null;
+    const annotation: SelectionRecord["annotation"] = [];
+    for (const a of selection.project()) {
+      if (a.origin === "suggestion" && a.status !== "accepted" && a.status !== "rejected")
+        continue;
+      if (a.lines.length === 0) continue;
+      annotation.push({
+        sha: a.sha,
+        path: a.path,
+        lines: a.lines,
+        origin: a.origin,
+        status: a.status,
+      });
+    }
+    return { state: selection.state, annotation };
   }
 
-  set value(entries: Entry[]) {
+  set value(value: SelectionRecord) {
     if (!this.#selection.current) {
-      this.#pending = entries;
+      this.#pending = value;
       return;
     }
-    this.#selection.current.hydrate(entries);
+    this.#selection.current.state = value.state;
   }
 
   /**

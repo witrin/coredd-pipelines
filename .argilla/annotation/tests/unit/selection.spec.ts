@@ -817,78 +817,95 @@ describe("adjacent pending + add (above) then remove", () => {
   });
 });
 
-describe("hydrate", () => {
-  it("exact match accepts the suggestion", () => {
-    const s = new Selection([
+describe("state roundtrip", () => {
+  it("a rejected suggestion survives dumping and restoring the state", () => {
+    const source = new Selection([
       { sha: "x", path: "f", lines: [[3, 6]], description: "" },
     ]);
-    s.hydrate([{ sha: "x", path: "f", lines: [[3, 6]] }]);
+    source.reject(
+      source.project().filter((a) => a.origin === "suggestion")[0].identifier,
+    );
+    const target = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    target.state = source.state;
     expect(
-      s.project("x", "f").filter((a) => a.origin === "suggestion")[0].status,
+      target.project().filter((a) => a.origin === "suggestion")[0].status,
+    ).toBe("rejected");
+  });
+
+  it("an accepted suggestion survives the state roundtrip", () => {
+    const source = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    source.accept(
+      source.project().filter((a) => a.origin === "suggestion")[0].identifier,
+    );
+    const target = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+    ]);
+    target.state = source.state;
+    expect(
+      target.project().filter((a) => a.origin === "suggestion")[0].status,
     ).toBe("accepted");
-    expect(
-      s.project("x", "f").filter((a) => a.origin === "manual"),
-    ).toHaveLength(0);
   });
 
-  it("non-matching entry creates a manual annotation", () => {
-    const s = new Selection([
-      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
-    ]);
-    s.hydrate([{ sha: "x", path: "f", lines: [[10, 15]] }]);
-    expect(
-      s.project("x", "f").filter((a) => a.origin === "suggestion")[0].status,
-    ).toBe("pending");
-    expect(
-      s.project("x", "f").filter((a) => a.origin === "manual"),
-    ).toHaveLength(1);
-    expect(
-      s.project("x", "f").filter((a) => a.origin === "manual")[0].lines,
-    ).toEqual([[10, 15]]);
-  });
-
-  it("mix of matching and non-matching entries", () => {
-    const s = new Selection([
-      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
-      { sha: "x", path: "g", lines: [[1, 4]], description: "" },
-    ]);
-    s.hydrate([
-      { sha: "x", path: "f", lines: [[3, 6]] },
-      { sha: "x", path: "g", lines: [[8, 12]] },
-    ]);
-    expect(
-      s.project("x", "f").filter((a) => a.origin === "suggestion")[0].status,
-    ).toBe("accepted");
-    expect(
-      s.project("x", "g").filter((a) => a.origin === "suggestion")[0].status,
-    ).toBe("pending");
-    expect(
-      s.project("x", "g").filter((a) => a.origin === "manual"),
-    ).toHaveLength(1);
-  });
-
-  it("empty entries array is a no-op", () => {
-    const s = new Selection([
-      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
-    ]);
-    s.hydrate([]);
-    expect(
-      s.project("x", "f").filter((a) => a.origin === "suggestion")[0].status,
-    ).toBe("pending");
-  });
-
-  it("two non-adjacent entries on the same file produce two manual annotations", () => {
-    const s = new Selection([]);
-    s.hydrate([
-      { sha: "x", path: "f", lines: [[5, 10]] },
-      { sha: "x", path: "f", lines: [[20, 25]] },
-    ]);
-    const manuals = s.project("x", "f").filter((a) => a.origin === "manual");
+  it("two non-adjacent manual annotations survive the state roundtrip", () => {
+    const source = new Selection([]);
+    source.add("x", "f", [[5, 10]]);
+    source.add("x", "f", [[20, 25]]);
+    const target = new Selection([]);
+    target.state = source.state;
+    const manuals = target.project("x", "f").filter((a) => a.origin === "manual");
     expect(manuals).toHaveLength(2);
     const sorted = [...manuals]
       .map((a) => a.lines)
       .sort((a, b) => a[0][0] - b[0][0]);
     expect(sorted).toEqual([[[5, 10]], [[20, 25]]]);
+  });
+
+  it("a manual annotation stays removable after the state roundtrip", () => {
+    const source = new Selection([]);
+    source.add("x", "f", [[5, 10]]);
+    source.add("x", "f", [[20, 25]]);
+    const target = new Selection([]);
+    target.state = source.state;
+    const first = target
+      .project("x", "f")
+      .filter((a) => a.origin === "manual")[0].identifier;
+    target.remove(first);
+    expect(
+      target.project("x", "f").filter((a) => a.origin === "manual"),
+    ).toHaveLength(1);
+  });
+
+  it("a mix of accept, reject and manual survives the state roundtrip", () => {
+    const source = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+      { sha: "x", path: "g", lines: [[1, 4]], description: "" },
+    ]);
+    const suggestions = source
+      .project()
+      .filter((a) => a.origin === "suggestion");
+    source.accept(suggestions.find((a) => a.path === "f")!.identifier);
+    source.reject(suggestions.find((a) => a.path === "g")!.identifier);
+    source.add("x", "h", [[2, 5]]);
+
+    const target = new Selection([
+      { sha: "x", path: "f", lines: [[3, 6]], description: "" },
+      { sha: "x", path: "g", lines: [[1, 4]], description: "" },
+    ]);
+    target.state = source.state;
+
+    expect(
+      target.project("x", "f").filter((a) => a.origin === "suggestion")[0].status,
+    ).toBe("accepted");
+    expect(
+      target.project("x", "g").filter((a) => a.origin === "suggestion")[0].status,
+    ).toBe("rejected");
+    expect(
+      target.project("x", "h").filter((a) => a.origin === "manual"),
+    ).toHaveLength(1);
   });
 });
 

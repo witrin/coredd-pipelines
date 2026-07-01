@@ -12,7 +12,26 @@ type AddEvent = {
     path: string;
     lines: Interval[];
 };
-type SelectionEvent = DecisionEvent | AddEvent;
+export type SelectionEvent = DecisionEvent | AddEvent;
+
+/**
+ * The serializable checkpoint of a Selection: its event log and identifier
+ * counter. Restoring it reproduces the exact state, so every decision survives.
+ */
+export interface SelectionState {
+    events: SelectionEvent[];
+    counter: number;
+}
+
+/**
+ * The record of a Selection: `state` is the raw checkpoint fed back verbatim on
+ * reload; `annotation` is the annotator-facing projection consumed by the
+ * backend. Only `state` is ever restored.
+ */
+export interface SelectionRecord {
+    state: SelectionState;
+    annotation: Omit<Annotation, "identifier" | "description">[];
+}
 
 type Group = {
     sha: string;
@@ -26,10 +45,10 @@ type Group = {
  * Write methods mutate internal state and notify subscribers.
  */
 export class Selection {
-    static #counter = 0;
+    #counter = 0;
 
-    static #next(): string {
-        return String(++Selection.#counter);
+    #next(): string {
+        return String(++this.#counter);
     }
 
     #suggestions: Annotation[];
@@ -47,12 +66,34 @@ export class Selection {
     ) {
         this.#suggestions = items.map((item) => ({
             ...item,
-            identifier: Selection.#next(),
+            identifier: this.#next(),
             origin: "suggestion" as Origin,
             status: "pending" as Status,
         }));
         this.#events = [];
         this.#listeners = new Set();
+    }
+
+    /**
+     * The raw internal state — the event log and the identifier counter.
+     * Saved as a checkpoint and fed back verbatim through the setter to resume
+     * exactly where the annotator left off. No transformation, no matching.
+     */
+    get state(): SelectionState {
+        return {
+            events: this.#events.map((e) =>
+                e.type === "add" ? { ...e, lines: e.lines.map((l) => [...l]) } : { ...e },
+            ),
+            counter: this.#counter,
+        };
+    }
+
+    set state(state: SelectionState) {
+        this.#events = state.events.map((e) =>
+            e.type === "add" ? { ...e, lines: e.lines.map((l) => [...l]) } : { ...e },
+        );
+        this.#counter = state.counter;
+        this.#notify();
     }
 
     /**
@@ -265,7 +306,7 @@ export class Selection {
 
         this.#events.push({
             type: "add",
-            identifier: Selection.#next(),
+            identifier: this.#next(),
             sha,
             path,
             lines: incoming,
@@ -289,42 +330,6 @@ export class Selection {
             (e) => !(e.type === "add" && drop.has(e.identifier)),
         );
         this.#notify();
-    }
-
-    /**
-     * Replays a list of entries (same format as change-event output) into the current state.
-     * Entries that exactly match a pending suggestion auto-accept it; all others become manual adds.
-     * Fires a single notification at the end.
-     */
-    hydrate(entries: { sha: string; path: string; lines: Interval[] }[]): void {
-        const suggestions = this.#suggestions;
-        const matched = new Set<string>();
-        for (const entry of entries) {
-            const incoming = Intervals.merge(entry.lines);
-            const sg = suggestions.find(
-                (s) =>
-                    !matched.has(s.identifier) &&
-                    s.sha === entry.sha &&
-                    s.path === entry.path &&
-                    Selection.#equal(Intervals.merge(s.lines), incoming),
-            );
-            if (sg) {
-                this.#events.push({
-                    type: "accept",
-                    identifier: sg.identifier,
-                });
-                matched.add(sg.identifier);
-            } else {
-                this.#events.push({
-                    type: "add",
-                    identifier: Selection.#next(),
-                    sha: entry.sha,
-                    path: entry.path,
-                    lines: incoming,
-                });
-            }
-        }
-        if (entries.length > 0) this.#notify();
     }
 
     /**

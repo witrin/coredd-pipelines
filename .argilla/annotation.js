@@ -13,10 +13,10 @@ class Adapter {
     return this.#storage.getItem("auth._token.local");
   }
 
-  async save(selections) {
+  async save(selection) {
     this.#inflight = true;
     this.#storage.setItem(this.#key, JSON.stringify({
-      selections,
+      selection,
       timestamp: Date.now(),
     }));
 
@@ -31,11 +31,14 @@ class Adapter {
           // PATCH /records replaces the whole fields dict, it does not merge.
           // Resend every field, mutating only annotation, or the server rejects
           // the request with 422 "missing required value for field: ...".
+          // `state` is the raw checkpoint restored verbatim on reload; the
+          // `annotation` projection is what the backend consumes.
           fields: {
             ...this.#record.fields,
             annotation: {
               url: this.#record.fields.annotation.url,
-              selections,
+              state: selection.state,
+              annotation: selection.annotation,
             },
           },
         }),
@@ -59,27 +62,30 @@ class Adapter {
     }
   }
 
-  push(selections) {
+  push(selection) {
     if (this.#inflight) {
-      this.#dirty = selections;
+      this.#dirty = selection;
     } else {
-      this.save(selections);
+      this.save(selection);
     }
   }
 
   restore() {
-    const server = this.#record.fields.annotation.selections ?? null;
+    const field = this.#record.fields.annotation;
+    const server = field.state
+      ? { state: field.state, annotation: field.annotation ?? [] }
+      : null;
     const raw = this.#storage.getItem(this.#key);
 
     if (!raw) {
       return server;
     }
 
-    const { selections, timestamp } = JSON.parse(raw);
+    const { selection, timestamp } = JSON.parse(raw);
     const updated = new Date(this.#record.updated_at).getTime();
 
     if (timestamp > updated) {
-      return selections;
+      return selection;
     }
 
     this.#storage.removeItem(this.#key);
@@ -92,9 +98,9 @@ const element = document.querySelector("code-annotation");
 
 element.setAttribute("src", record.fields.annotation.url);
 
-const selections = adapter.restore();
-if (selections) {
-  element.value = selections;
+const restored = adapter.restore();
+if (restored) {
+  element.value = restored;
 }
 
 element.addEventListener("change", (e) => adapter.push(e.detail));
