@@ -5,71 +5,31 @@ import type { Interval } from "../types/index.js";
  */
 export class Intervals {
   /**
-   * Returns a sorted, merged list with no adjacent or overlapping intervals.
+   * Returns true if two intervals share at least one interior point.
    */
-  static merge(list: Interval[]): Interval[] {
-    if (list.length === 0) return [];
-    const sorted = [...list].sort(
-      (first, second) => first[0] - second[0] || first[1] - second[1],
-    );
-    const result: Interval[] = [[sorted[0][0], sorted[0][1]]];
-    for (let index = 1; index < sorted.length; index++) {
-      const last = result[result.length - 1];
-      const current = sorted[index];
-      if (current[0] <= last[1]) {
-        last[1] = Math.max(last[1], current[1]);
-      } else {
-        result.push([current[0], current[1]]);
-      }
-    }
-    return result;
-  }
-
-  /**
-   * Returns the merged union of two interval lists.
-   */
-  static union(first: Interval[], second: Interval[]): Interval[] {
-    return Intervals.merge([...first, ...second]);
-  }
-
-  /**
-   * Returns true if interval a and interval b share at least one point.
-   */
-  static overlaps(a: Interval, b: Interval): boolean;
-  /**
-   * Returns true if any interval in the list overlaps the target.
-   */
-  static overlaps(list: Interval[], target: Interval): boolean;
-  static overlaps(a: Interval | Interval[], b: Interval): boolean {
-    if (Array.isArray(a[0]))
-      return (a as Interval[]).some((interval) =>
-        Intervals.overlaps(interval, b),
-      );
-    const interval = a as Interval;
-    return interval[0] < b[1] && b[0] < interval[1];
+  static overlaps(a: Interval, b: Interval): boolean {
+    return a[0] < b[1] && b[0] < a[1];
   }
 
   /**
    * Returns true if outer fully contains inner.
    */
-  static contains(outer: Interval, inner: Interval): boolean;
-  /**
-   * Returns true if any interval in the list fully contains the target.
-   */
-  static contains(list: Interval[], target: Interval): boolean;
-  static contains(outer: Interval | Interval[], inner: Interval): boolean {
-    if (Array.isArray(outer[0]))
-      return (outer as Interval[]).some((interval) =>
-        Intervals.contains(interval, inner),
-      );
-    const interval = outer as Interval;
-    return interval[0] <= inner[0] && interval[1] >= inner[1];
+  static contains(outer: Interval, inner: Interval): boolean {
+    return outer[0] <= inner[0] && outer[1] >= inner[1];
   }
 
   /**
-   * Returns true if every interval in targets is fully contained by at least one interval in covering.
+   * Returns true if two intervals overlap or meet at a shared boundary.
    */
-  static covered(covering: Interval[], targets: Interval[]): boolean {
-    return targets.every((target) => Intervals.contains(covering, target));
+  static adjacent(a: Interval, b: Interval): boolean {
+    return Intervals.overlaps(a, b) || a[1] === b[0] || b[1] === a[0];
+  }
+
+  /**
+   * Returns the contiguous union of two intervals that overlap or touch.
+   * The caller guarantees adjacency; the lower start and higher end define the range.
+   */
+  static join(a: Interval, b: Interval): Interval {
+    return [Math.min(a[0], b[0]), Math.max(a[1], b[1])];
   }
 }

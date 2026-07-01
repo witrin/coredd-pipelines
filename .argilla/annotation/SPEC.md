@@ -51,7 +51,7 @@ The component receives a URL pointing to a JSON file as its sole input. Structur
       "annotations": [
         {
           "path": "<path>",
-          "lines": [[10, 15]],
+          "lines": [10, 15],
           "description": "<description>"
         }
       ]
@@ -95,7 +95,7 @@ File content is loaded via HTTP GET as plaintext.
 Each entry in `targets[].annotations` describes a model suggestion. The `annotations` field is **optional** — when absent or empty the target has no suggestions but remains annotatable (manual annotations are still possible).
 
 - **`path`** — File path within the commit.
-- **`lines`** — List of line ranges as half-open intervals `[start, end)` (1-based, start inclusive, end exclusive). Example: `[10, 15)` covers lines 10, 11, 12, 13, 14.
+- **`lines`** — A single line range as a half-open interval `[start, end)` (1-based, start inclusive, end exclusive). Example: `[10, 15)` covers lines 10, 11, 12, 13, 14. A suggestion that spans disjoint passages of the same file is expressed as multiple annotation objects sharing the same `path`.
 - **`description`** — Description of the suggested location (displayed as label).
 
 ### 1.5 Optional Targets (Read-Only Mode)
@@ -314,7 +314,7 @@ Each model suggestion is displayed inline in the code (colored bar on the left m
 - Display: Annotator-colored bar, label with line range.
 - **✗ button** in the label to delete (matching annotator color).
 - Appears in the annotations panel under "Manual".
-- Adding an annotation that touches or overlaps an existing annotation on the same file unions them into one entry (see Section 5.4).
+- A mark that touches or overlaps an existing annotation extends that annotation's single range; a disjoint mark creates a new, separate annotation (see Section 5.4).
 
 ### 5.3 Overlap Rules
 
@@ -347,9 +347,11 @@ For the exact-match case: if the incoming annotation exactly matches a single `p
 
 ### 5.4 Interval Merging
 
-All annotations use **half-open intervals** `[start, end)` (1-based, start inclusive, end exclusive).
+Every annotation object covers **exactly one** contiguous half-open interval `[start, end)` (1-based, start inclusive, end exclusive).
 
-Adjacent or overlapping intervals are always merged. There must never be output like `[1, 5), [5, 10)` — it must be `[1, 10)`. Overlapping intervals like `[1, 5), [3, 8)` become `[1, 8)`.
+Adjacent or overlapping marks on the same file are always fused into that single interval. There must never be an object whose range reads `[1, 5), [5, 10)` — it is `[1, 10)`. Overlapping marks `[1, 5)` and `[3, 8)` fuse to `[1, 8)`.
+
+Spatially **disjoint** marks are never bundled into one object. Marks `[178, 179)` and `[204, 205)` on the same file produce **two separate annotation objects**, each with its own contiguous range, sharing the same `sha` and `path`.
 
 This applies both internally and in the exposed state (Section 10.1).
 
@@ -601,7 +603,7 @@ The fixture used throughout is `tests/fixtures/meta.json`. It contains one targe
 
 | # | Scenario | Setup | Action | Navigation | Event | Editor display |
 |---|----------|-------|--------|------------|-------|----------------|
-| 1 | accepting a suggestion | shared setup | click ✓ | suggestion entry shows accepted dot and "accepted" badge | `[{ sha:"baz", path:"src/bar.ts", lines:[[3,6]] }]` | accepted decoration on lines 3–5; widget shows reset ✗ only |
+| 1 | accepting a suggestion | shared setup | click ✓ | suggestion entry shows accepted dot and "accepted" badge | `[{ sha:"baz", path:"src/bar.ts", lines:[3,6] }]` | accepted decoration on lines 3–5; widget shows reset ✗ only |
 | 2 | rejecting a suggestion | shared setup | click ✗ | suggestion entry shows empty dot, text greyed out | `[]` | suggestion lines at reduced opacity; widget shows reset ✗ only |
 | 3 | resetting an accepted suggestion | shared setup → accept → wait → clear events | click ✗ (muted reset) | entry back to pending dot, no badge | `[]` | decoration back to pending color; ✓ and ✗ buttons visible |
 | 4 | resetting a rejected suggestion | shared setup → reject | click ✗ (reset) | entry back to pending dot, full opacity | no new event (export unchanged) | lines back to full opacity; ✓ and ✗ buttons visible |
@@ -610,8 +612,8 @@ The fixture used throughout is `tests/fixtures/meta.json`. It contains one targe
 
 | # | Scenario | Setup | Action | Navigation | Event | Editor display |
 |---|----------|-------|--------|------------|-------|----------------|
-| 5 | annotation on file without suggestion | shared setup → open `src/qux.ts` | select lines 2–4; trigger lightbulb → "Mark selection" | "Manual" group appears with one entry for `src/qux.ts` lines 2–4 | `[{ sha:"baz", path:"src/qux.ts", lines:[[2,5]] }]` | annotation decoration on lines 2–4; annotation widget visible with ✗ |
-| 6 | repeated marking extends existing annotation | shared setup → open `src/qux.ts` → mark lines 2–4 → wait | select lines 3–6; trigger lightbulb → "Mark selection" | "Manual" group still shows one entry; line range updated to 2–6 | `[{ sha:"baz", path:"src/qux.ts", lines:[[2,7]] }]` | decoration covers lines 2–6; no duplicate widget |
+| 5 | annotation on file without suggestion | shared setup → open `src/qux.ts` | select lines 2–4; trigger lightbulb → "Mark selection" | "Manual" group appears with one entry for `src/qux.ts` lines 2–4 | `[{ sha:"baz", path:"src/qux.ts", lines:[2,5] }]` | annotation decoration on lines 2–4; annotation widget visible with ✗ |
+| 6 | repeated marking extends existing annotation | shared setup → open `src/qux.ts` → mark lines 2–4 → wait | select lines 3–6; trigger lightbulb → "Mark selection" | "Manual" group still shows one entry; line range updated to 2–6 | `[{ sha:"baz", path:"src/qux.ts", lines:[2,7] }]` | decoration covers lines 2–6; no duplicate widget |
 | 7 | identical re-marking produces no duplicate | shared setup → open `src/qux.ts` → mark lines 2–4 → wait | select same lines 2–4; trigger lightbulb → "Mark selection" | "Manual" group still shows exactly one entry | no new event fires | no duplicate decoration or widget |
 | 8 | deleting an annotation | shared setup → open `src/qux.ts` → mark lines 2–4 → wait | click ✗ on annotation widget | "Manual" group disappears | `[]` | decoration gone; no widget visible |
 
@@ -619,9 +621,9 @@ The fixture used throughout is `tests/fixtures/meta.json`. It contains one targe
 
 | # | Scenario | Setup | Action | Navigation | Event | Editor display |
 |---|----------|-------|--------|------------|-------|----------------|
-| 9 | partial overlap rejects suggestion | shared setup | select lines 4–7 (partially overlaps suggestion [3,6)); trigger lightbulb → "Mark selection" | suggestion entry shows rejected (greyed); annotation entry appears for lines 4–7 | `[{ sha:"baz", path:"src/bar.ts", lines:[[4,8]] }]` | suggestion at reduced opacity; annotation decoration on lines 4–7; both widgets visible |
-| 10 | exact match auto-accepts suggestion | shared setup | select lines 3–5 (exactly matches suggestion [3,6)); trigger lightbulb → "Mark selection" | suggestion entry shows accepted dot; no separate annotation entry | `[{ sha:"baz", path:"src/bar.ts", lines:[[3,6]] }]` | accepted decoration on lines 3–5; suggestion widget shows reset ✗; no separate annotation widget |
-| 11 | full coverage with extension auto-accepts and records annotation | shared setup | select lines 2–7 (covers and extends suggestion [3,6)); trigger lightbulb → "Mark selection" | suggestion shows accepted dot; annotation entry appears for lines 2–7 | `[{ sha:"baz", path:"src/bar.ts", lines:[[2,8]] }]` | single unified visual block covering lines 2–7 |
+| 9 | partial overlap rejects suggestion | shared setup | select lines 4–7 (partially overlaps suggestion [3,6)); trigger lightbulb → "Mark selection" | suggestion entry shows rejected (greyed); annotation entry appears for lines 4–7 | `[{ sha:"baz", path:"src/bar.ts", lines:[4,8] }]` | suggestion at reduced opacity; annotation decoration on lines 4–7; both widgets visible |
+| 10 | exact match auto-accepts suggestion | shared setup | select lines 3–5 (exactly matches suggestion [3,6)); trigger lightbulb → "Mark selection" | suggestion entry shows accepted dot; no separate annotation entry | `[{ sha:"baz", path:"src/bar.ts", lines:[3,6] }]` | accepted decoration on lines 3–5; suggestion widget shows reset ✗; no separate annotation widget |
+| 11 | full coverage with extension auto-accepts and records annotation | shared setup | select lines 2–7 (covers and extends suggestion [3,6)); trigger lightbulb → "Mark selection" | suggestion shows accepted dot; annotation entry appears for lines 2–7 | `[{ sha:"baz", path:"src/bar.ts", lines:[2,8] }]` | single unified visual block covering lines 2–7 |
 | 12 | deleting annotation that partially overlapped restores suggestion | shared setup → partial overlap (lines 4–7) → wait | click ✗ on annotation widget | annotation entry gone; suggestion back to pending dot | `[]` | annotation decoration gone; suggestion back to pending decoration; ✓ and ✗ buttons visible |
 | 13 | deleting annotation that fully covered restores suggestion | shared setup → full coverage (lines 2–7) → wait | click ✗ on annotation widget | annotation entry gone; suggestion back to pending dot | `[]` | annotation decoration gone; suggestion back to pending decoration; ✓ and ✗ buttons visible |
 
@@ -631,8 +633,8 @@ The fixture used throughout is `tests/fixtures/meta.json`. It contains one targe
 |---|----------|-------|--------|------------|-------|----------------|
 | 14 | switching files — state persists | shared setup → accept → wait → clear events | open `src/qux.ts`; open `src/bar.ts` | suggestion still shows accepted dot after returning | no spurious event during navigation | accepted decoration and reset ✗ widget still present on return |
 | 15 | switching files — no decoration bleed | shared setup → accept | open `src/qux.ts` | no suggestion entry for `src/qux.ts` | no event fires | no accepted decoration; no suggestion widget in editor |
-| 16 | mark action targets correct file after switch | shared setup | open `src/qux.ts`; select lines 2–4; trigger lightbulb → "Mark selection" | annotation entry appears under `src/qux.ts`, not `src/bar.ts` | `[{ sha:"baz", path:"src/qux.ts", lines:[[2,5]] }]` | annotation decoration visible in `src/qux.ts` editor; no decoration in `src/bar.ts` |
-| 17 | no provider accumulation | shared setup | open `src/qux.ts`; open `src/bar.ts`; mark lines 7–9 via lightbulb | "Manual" group shows exactly one entry | detail fires exactly once with `lines:[[7,10]]`; not duplicated | annotation widget appears exactly once |
+| 16 | mark action targets correct file after switch | shared setup | open `src/qux.ts`; select lines 2–4; trigger lightbulb → "Mark selection" | annotation entry appears under `src/qux.ts`, not `src/bar.ts` | `[{ sha:"baz", path:"src/qux.ts", lines:[2,5] }]` | annotation decoration visible in `src/qux.ts` editor; no decoration in `src/bar.ts` |
+| 17 | no provider accumulation | shared setup | open `src/qux.ts`; open `src/bar.ts`; mark lines 7–9 via lightbulb | "Manual" group shows exactly one entry | detail fires exactly once with `lines:[7,10]`; not duplicated | annotation widget appears exactly once |
 
 **Performance signals** (Playwright):
 - Performance data is collected via `page.evaluate(() => performance.now())` and `performance.getEntries()`.
@@ -691,7 +693,7 @@ A Playwright test verifies that opening multiple files in sequence does not accu
 
 The current annotation output can be read from the component at any time. It contains only the annotator's output — regardless of whether lines came from accepting a suggestion or from a manual annotation. The internal suggestion status (pending, accepted, rejected) is not part of the exposed output.
 
-All intervals are half-open `[start, end)` and guaranteed to be merged (no adjacent or overlapping intervals in the output).
+Each object covers exactly one contiguous half-open interval `[start, end)`. Disjoint ranges on the same file appear as multiple objects sharing `sha` and `path`.
 
 Format:
 
@@ -700,21 +702,26 @@ Format:
   {
     "sha": "<sha>",
     "path": "<path>",
-    "lines": [[10, 15], [22, 26]]
+    "lines": [10, 15]
   },
   {
     "sha": "<sha>",
     "path": "<path>",
-    "lines": [[3, 8]]
+    "lines": [22, 26]
+  },
+  {
+    "sha": "<sha>",
+    "path": "<path>",
+    "lines": [3, 8]
   }
 ]
 ```
 
 - **`sha`** — The commit the annotation refers to (from `targets[].sha`).
 - **`path`** — File path within the commit.
-- **`lines`** — List of half-open line ranges `[start, end)`. Multiple ranges per file are possible. Adjacent and overlapping ranges are always merged.
+- **`lines`** — A single half-open line range `[start, end)`. Touching and overlapping ranges are always fused; disjoint ranges yield separate objects.
 
-Entries are grouped per commit and path. When a suggestion is accepted, its lines appear in the output. When reset, they disappear. Manual annotations appear as well. There is no distinction by origin.
+Entries are one per contiguous range. When a suggestion is accepted, its range appears as an object. When reset, it disappears. Manual annotations appear likewise. There is no distinction by origin.
 
 ### 10.2 Change Event
 

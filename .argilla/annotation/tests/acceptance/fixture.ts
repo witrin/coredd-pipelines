@@ -49,7 +49,7 @@ export class PerformanceFixture {
         labels: ["baz"],
         changes,
         annotations: [
-          { path: "src/foo0.ts", lines: [[1, 5]], description: "foo" },
+          { path: "src/foo0.ts", lines: [1, 5], description: "foo" },
         ],
       });
     }

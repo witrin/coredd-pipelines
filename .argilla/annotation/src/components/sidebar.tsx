@@ -510,8 +510,10 @@ function Annotations({
   return (
     <div>
       <div style={{ paddingBottom: 8 }}>
-        {state.project().filter((a) => a.origin === "suggestion").length >
-          0 && (
+        {state
+          .project()
+          .filter((a) => a.origin === "suggestion" && a.status !== "absorbed")
+          .length > 0 && (
           <>
             <div
               data-section="suggestions"
@@ -527,7 +529,7 @@ function Annotations({
             </div>
             {state
               .project()
-              .filter((a) => a.origin === "suggestion")
+              .filter((a) => a.origin === "suggestion" && a.status !== "absorbed")
               .map((a) => (
                 <SelectionItem
                   key={a.identifier}
@@ -538,11 +540,9 @@ function Annotations({
                         ? "var(--av-accepted)"
                         : "var(--av-muted)"
                   }
-                  text={`${a.path} L${a.lines[0]?.[0]}–${a.lines[a.lines.length - 1]?.[1]}`}
+                  text={`${a.path} L${a.lines[0]}–${a.lines[1]}`}
                   faded={a.status === "rejected" || a.status === "absorbed"}
-                  onClick={() =>
-                    onSuggestion(a.sha, a.path, a.lines[0]?.[0] ?? 1)
-                  }
+                  onClick={() => onSuggestion(a.sha, a.path, a.lines[0] ?? 1)}
                 />
               ))}
           </>
@@ -567,10 +567,8 @@ function Annotations({
                 <SelectionItem
                   key={a.identifier}
                   labelColor="var(--av-annotator)"
-                  text={`${a.path} L${a.lines[0]?.[0]}–${a.lines[a.lines.length - 1]?.[1]}`}
-                  onClick={() =>
-                    onAnnotation(a.sha, a.path, a.lines[0]?.[0] ?? 1)
-                  }
+                  text={`${a.path} L${a.lines[0]}–${a.lines[1]}`}
+                  onClick={() => onAnnotation(a.sha, a.path, a.lines[0] ?? 1)}
                 />
               ))}
           </>

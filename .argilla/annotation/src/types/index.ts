@@ -34,7 +34,7 @@ export interface Commit {
  * `annotations` is optional — when absent or empty the target has no suggestions.
  */
 export interface Target extends Commit {
-  annotations?: { path: string; lines: Interval[]; description: string }[];
+  annotations?: { path: string; lines: Interval; description: string }[];
 }
 
 /**
@@ -71,7 +71,7 @@ export interface Annotation {
   identifier: string;
   sha: string;
   path: string;
-  lines: Interval[];
+  lines: Interval;
   origin: Origin;
   status: Status;
   description: string;

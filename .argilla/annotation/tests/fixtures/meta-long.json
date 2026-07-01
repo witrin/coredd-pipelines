@@ -24,7 +24,7 @@
       "annotations": [
         {
           "path": "src/foo.ts",
-          "lines": [[120, 122]],
+          "lines": [120, 122],
           "description": "foo bar baz"
         }
       ]

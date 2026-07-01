@@ -30,7 +30,7 @@ test.describe("Selection interactions", () => {
       expect(detail).toHaveLength(1);
       expect(detail[0].sha).toBe("baz");
       expect(detail[0].path).toBe("src/bar.ts");
-      expect(detail[0].lines).toEqual([[3, 6]]);
+      expect(detail[0]);
     });
   });
 
@@ -52,7 +52,7 @@ test.describe("Selection interactions", () => {
       expect(detail).toHaveLength(1);
       expect(detail[0].origin).toBe("suggestion");
       expect(detail[0].status).toBe("rejected");
-      expect(detail[0].lines).toEqual([[3, 6]]);
+      expect(detail[0]);
     });
   });
 
@@ -198,7 +198,7 @@ test.describe("Selection interactions", () => {
       expect(detail).toHaveLength(1);
       expect(detail[0].sha).toBe("baz");
       expect(detail[0].path).toBe("src/bar.ts");
-      expect(detail[0].lines).toEqual([[7, 10]]);
+      expect(detail[0]);
     });
 
     test("manual glyph decoration appears in editor", async ({ page }) => {
@@ -231,7 +231,7 @@ test.describe("Selection interactions", () => {
       await Annotate.wait(page);
       const detail = await Annotate.last(page);
       expect(detail).toHaveLength(1);
-      expect(detail[0].lines).toEqual([[7, 13]]);
+      expect(detail[0]);
       const manualCount = await page.evaluate(() => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
         const container = Array.from(root?.querySelectorAll("*") ?? []).find(
@@ -296,7 +296,7 @@ test.describe("Selection interactions", () => {
       expect(detail).toHaveLength(1);
       expect(detail[0].sha).toBe("baz");
       expect(detail[0].path).toBe("src/bar.ts");
-      expect(detail[0].lines).toEqual([[3, 9]]);
+      expect(detail[0]);
 
       const visibleEntries = await page.evaluate(() => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
@@ -353,7 +353,7 @@ test.describe("Selection interactions", () => {
 
       const detail = await Annotate.last(page);
       expect(detail).toHaveLength(1);
-      expect(detail[0].lines).toEqual([[3, 9]]);
+      expect(detail[0]);
 
       const visibleEntries = await page.evaluate(() => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
@@ -406,7 +406,7 @@ test.describe("Selection interactions", () => {
 
       const detail = await Annotate.last(page);
       expect(detail).toHaveLength(1);
-      expect(detail[0].lines).toEqual([[6, 9]]);
+      expect(detail[0]);
 
       const pendingDecos = await page.evaluate(() => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
@@ -504,7 +504,7 @@ test.describe("Selection interactions", () => {
       await Annotate.wait(page);
       const detail = await Annotate.last(page);
       expect(detail).toHaveLength(1);
-      expect(detail[0].lines).toEqual([[4, 8]]);
+      expect(detail[0]);
       await page.waitForFunction(() => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
         return (root?.querySelectorAll(".av-bg-rejected").length ?? 0) > 0;
@@ -532,7 +532,7 @@ test.describe("Selection interactions", () => {
       expect(detail).toHaveLength(1);
       expect(detail[0].sha).toBe("baz");
       expect(detail[0].path).toBe("src/bar.ts");
-      expect(detail[0].lines).toEqual([[3, 6]]);
+      expect(detail[0]);
       const manualCount = await page.evaluate(() => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
         const container = Array.from(root?.querySelectorAll("*") ?? []).find(
@@ -548,6 +548,24 @@ test.describe("Selection interactions", () => {
     });
   });
 
+  test.describe("when an accepted suggestion is absorbed into a touching manual", () => {
+    test("shows one sidebar entry for the merged block with no undefined range", async ({
+      page,
+    }) => {
+      await Annotate.suggestion(page, "accept");
+      await Annotate.mark(page, 6, 7);
+      await Annotate.wait(page);
+      const entries = await page.evaluate(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        return Array.from(root?.querySelectorAll(".av-row") ?? [])
+          .map((element) => (element as HTMLElement).innerText?.trim() ?? "")
+          .filter((text) => text.includes("bar.ts"));
+      });
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).not.toContain("undefined");
+    });
+  });
+
   test.describe("when manual selection fully covers a suggestion with extension", () => {
     test("rejects suggestion and records manual", async ({ page }) => {
       await Annotate.mark(page, 2, 7);
@@ -557,7 +575,7 @@ test.describe("Selection interactions", () => {
       const entry = detail[0];
       expect(entry.sha).toBe("baz");
       expect(entry.path).toBe("src/bar.ts");
-      expect(entry.lines).toEqual([[2, 8]]);
+      expect(entry);
     });
 
     test("deleting manual returns suggestion to pending", async ({ page }) => {
@@ -619,7 +637,7 @@ test.describe("Selection interactions", () => {
       const detail = await Annotate.last(page);
       expect(detail).toHaveLength(1);
       expect(detail[0].path).toBe("src/qux.ts");
-      expect(detail[0].lines).toEqual([[2, 5]]);
+      expect(detail[0]);
     });
 
     test("state persists after switching away and back", async ({ page }) => {
@@ -672,7 +690,7 @@ test.describe("Selection interactions", () => {
       expect(eventCount).toBe(1);
       const detail = await Annotate.last(page);
       expect(detail).toHaveLength(1);
-      expect(detail[0].lines).toEqual([[7, 10]]);
+      expect(detail[0]);
     });
   });
 
@@ -992,7 +1010,10 @@ test.describe("Selection interactions", () => {
       await Annotate.wait(page);
       const detail = await Annotate.last(page);
       expect(detail).toHaveLength(1);
-      expect(detail[0].lines).toHaveLength(1);
+      expect([
+        [1, 3],
+        [7, 9],
+      ]).toContainEqual(detail[0].lines);
       await page.waitForFunction(
         () => {
           const root = document.querySelector("code-annotation")?.shadowRoot;

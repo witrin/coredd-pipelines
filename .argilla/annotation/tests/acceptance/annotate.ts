@@ -4,7 +4,7 @@ import { expect } from "@playwright/test";
 type ChangeEntry = {
   sha: string;
   path: string;
-  lines: [number, number][];
+  lines: [number, number];
   origin: "suggestion" | "manual";
   status: "pending" | "accepted" | "rejected" | "blocked" | "absorbed";
 };

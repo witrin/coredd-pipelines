@@ -210,7 +210,7 @@ test.describe("editor rendering", () => {
       expect(detail).toHaveLength(1);
       expect(detail[0].sha).toBe("baz");
       expect(detail[0].path).toBe("src/bar.ts");
-      expect(detail[0].lines).toEqual([[7, 11]]);
+      expect(detail[0].lines).toEqual([7, 11]);
     });
   });
 

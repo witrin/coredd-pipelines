@@ -38,12 +38,12 @@
       "annotations": [
         {
           "path": "src/cli.ts",
-          "lines": [[5, 6]],
+          "lines": [5, 6],
           "description": "Loop boundary is inclusive; the loop runs 11 times instead of 10."
         },
         {
           "path": "src/cli.ts",
-          "lines": [[7, 8]],
+          "lines": [7, 8],
           "description": "Logging inside a tight loop may slow large runs. Consider buffering output."
         }
       ]

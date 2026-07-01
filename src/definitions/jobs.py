@@ -1143,13 +1143,14 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
                         intervals[-1][1] = line + 1
                     else:
                         intervals.append([line, line + 1])
-                target_annotations.append(
-                    {
-                        "path": path,
-                        "lines": intervals,
-                        "description": "Localized by the benchmark.",
-                    }
-                )
+                for interval in intervals:
+                    target_annotations.append(
+                        {
+                            "path": path,
+                            "lines": interval,
+                            "description": "Localized by the benchmark.",
+                        }
+                    )
             if target_annotations:
                 target["annotations"] = target_annotations
 

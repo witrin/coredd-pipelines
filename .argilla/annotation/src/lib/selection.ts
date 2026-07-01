@@ -10,7 +10,7 @@ type AddEvent = {
     identifier: string;
     sha: string;
     path: string;
-    lines: Interval[];
+    lines: Interval;
 };
 export type SelectionEvent = DecisionEvent | AddEvent;
 
@@ -36,7 +36,7 @@ export interface SelectionRecord {
 type Group = {
     sha: string;
     path: string;
-    lines: Interval[];
+    lines: Interval;
     identifiers: string[];
 };
 
@@ -60,7 +60,7 @@ export class Selection {
         items: {
             sha: string;
             path: string;
-            lines: Interval[];
+            lines: Interval;
             description: string;
         }[],
     ) {
@@ -82,7 +82,7 @@ export class Selection {
     get state(): SelectionState {
         return {
             events: this.#events.map((e) =>
-                e.type === "add" ? { ...e, lines: e.lines.map((l) => [...l]) } : { ...e },
+                e.type === "add" ? { ...e, lines: [...e.lines] as Interval } : { ...e },
             ),
             counter: this.#counter,
         };
@@ -90,7 +90,7 @@ export class Selection {
 
     set state(state: SelectionState) {
         this.#events = state.events.map((e) =>
-            e.type === "add" ? { ...e, lines: e.lines.map((l) => [...l]) } : { ...e },
+            e.type === "add" ? { ...e, lines: [...e.lines] as Interval } : { ...e },
         );
         this.#counter = state.counter;
         this.#notify();
@@ -116,37 +116,21 @@ export class Selection {
         return this.#version;
     }
 
-    static #touches(a: Interval[], b: Interval[]): boolean {
-        return a.some((al) =>
-            b.some(
-                (bl) =>
-                    Intervals.overlaps(al, bl) ||
-                    al[1] === bl[0] ||
-                    bl[1] === al[0],
-            ),
-        );
-    }
-
-    static #overlaps(a: Interval[], b: Interval[]): boolean {
-        return a.some((al) => b.some((bl) => Intervals.overlaps(al, bl)));
-    }
-
-    static #equal(a: Interval[], b: Interval[]): boolean {
-        if (a.length !== b.length) return false;
-        return a.every((iv, i) => iv[0] === b[i][0] && iv[1] === b[i][1]);
+    static #equal(a: Interval, b: Interval): boolean {
+        return a[0] === b[0] && a[1] === b[1];
     }
 
     static #group(events: AddEvent[]): Group[] {
         const groups: Group[] = [];
         for (const event of events) {
-            const incoming = Intervals.merge(event.lines);
+            const incoming: Interval = [...event.lines];
             const matches: number[] = [];
             for (let index = 0; index < groups.length; index++) {
                 const existing = groups[index];
                 if (
                     existing.sha === event.sha &&
                     existing.path === event.path &&
-                    Selection.#touches(existing.lines, incoming)
+                    Intervals.adjacent(existing.lines, incoming)
                 )
                     matches.push(index);
             }
@@ -166,10 +150,7 @@ export class Selection {
                 identifiers: [],
             };
             for (const index of matches) {
-                merged.lines = Intervals.union(
-                    merged.lines,
-                    groups[index].lines,
-                );
+                merged.lines = Intervals.join(merged.lines, groups[index].lines);
                 merged.identifiers.push(...groups[index].identifiers);
             }
             merged.identifiers.push(event.identifier);
@@ -213,7 +194,7 @@ export class Selection {
                     (m) =>
                         m.sha === sg.sha &&
                         m.path === sg.path &&
-                        Selection.#touches(sg.lines, m.lines),
+                        Intervals.adjacent(sg.lines, m.lines),
                 );
                 return {
                     ...sg,
@@ -224,7 +205,7 @@ export class Selection {
                 (m) =>
                     m.sha === sg.sha &&
                     m.path === sg.path &&
-                    Selection.#overlaps(sg.lines, m.lines),
+                    Intervals.overlaps(sg.lines, m.lines),
             );
             if (overlapped) return { ...sg, status: "blocked" as Status };
             return { ...sg, status: explicit as Status };
@@ -260,8 +241,8 @@ export class Selection {
     /**
      * Adds a manual annotation for the given sha, path, and line intervals.
      */
-    add(sha: string, path: string, lines: Interval[]): void {
-        const incoming = Intervals.merge(lines);
+    add(sha: string, path: string, lines: Interval): void {
+        const incoming: Interval = [...lines];
         const all = this.#fold();
         const localManuals = all.filter(
             (a) => a.origin === "manual" && a.sha === sha && a.path === path,
@@ -275,10 +256,7 @@ export class Selection {
             localSuggestions.length === 1 &&
             localSuggestions[0].status === "pending" &&
             localManuals.length === 0 &&
-            Selection.#equal(
-                Intervals.merge(localSuggestions[0].lines),
-                incoming,
-            )
+            Selection.#equal(localSuggestions[0].lines, incoming)
         ) {
             this.#events.push({
                 type: "accept",
@@ -292,15 +270,12 @@ export class Selection {
             localSuggestions.length === 1 &&
             localSuggestions[0].status === "accepted" &&
             localManuals.length === 0 &&
-            Selection.#equal(
-                Intervals.merge(localSuggestions[0].lines),
-                incoming,
-            )
+            Selection.#equal(localSuggestions[0].lines, incoming)
         )
             return;
 
         const covered = localManuals.some((m) =>
-            Intervals.covered(m.lines, incoming),
+            Intervals.contains(m.lines, incoming),
         );
         if (covered) return;
 
@@ -334,9 +309,10 @@ export class Selection {
 
     /**
      * Returns annotations for the given sha/path (editor), or all annotations if called without arguments (navigation).
-     * For the editor: accepted suggestions that touch or overlap a manual are absorbed — their lines are merged
+     * For the editor: an accepted suggestion that touches or overlaps a manual is absorbed into it — the manual's
+     * single range is widened to cover the suggestion. A suggestion touching more than one manual attaches to the
+     * earliest one only, so absorbed output never overlaps.
      * Suggestions carry their folded status (including `absorbed` and `blocked`).
-     * Manuals carry expanded lines (absorbed suggestion lines merged in).
      * Consumers filter as needed.
      */
     project(sha?: string, path?: string): Annotation[] {
@@ -352,23 +328,29 @@ export class Selection {
                 (sha === undefined || (a.sha === sha && a.path === path)),
         );
 
-        const result: Annotation[] = [...suggestions];
-
-        for (const m of manuals) {
-            const absorbed = suggestions.filter(
-                (s) =>
-                    s.status === "absorbed" &&
-                    Selection.#touches(s.lines, m.lines),
-            );
-            const expandedLines =
-                absorbed.length > 0
-                    ? Intervals.merge([
-                          ...m.lines,
-                          ...absorbed.flatMap((s) => s.lines),
-                      ])
-                    : m.lines;
-            result.push({ ...m, lines: expandedLines });
+        const widened = new Map<string, Interval>(
+            manuals.map((m) => [m.identifier, m.lines]),
+        );
+        for (const s of suggestions) {
+            if (s.status !== "absorbed") continue;
+            const owner = manuals
+                .filter(
+                    (m) =>
+                        m.sha === s.sha &&
+                        m.path === s.path &&
+                        Intervals.adjacent(s.lines, m.lines),
+                )
+                .sort((a, b) => a.lines[0] - b.lines[0])[0];
+            if (owner)
+                widened.set(
+                    owner.identifier,
+                    Intervals.join(widened.get(owner.identifier)!, s.lines),
+                );
         }
+
+        const result: Annotation[] = [...suggestions];
+        for (const m of manuals)
+            result.push({ ...m, lines: widened.get(m.identifier)! });
 
         return result;
     }

@@ -14,7 +14,7 @@ self.MonacoEnvironment = {
  */
 export class Callbacks {
   static add = {
-    current: (_sha: string, _path: string, _lines: Interval[]) => {},
+    current: (_sha: string, _path: string, _lines: Interval) => {},
   };
   static active = { current: { sha: "", path: "", readonly: false } };
   static accept = { current: (_identifier: string) => {} };
@@ -146,23 +146,20 @@ export class CodeEditor {
               ? "accepted"
               : "rejected"
           : "annotation";
-      let first = true;
-      for (const [start, end] of a.lines) {
-        for (let line = start; line < end; line++) {
-          const options: monaco.editor.IModelDecorationOptions = {
-            isWholeLine: true,
-            className: `av-bg-${cls}`,
-            glyphMarginClassName: `av-glyph-${cls}`,
+      const [start, end] = a.lines;
+      for (let line = start; line < end; line++) {
+        const options: monaco.editor.IModelDecorationOptions = {
+          isWholeLine: true,
+          className: `av-bg-${cls}`,
+          glyphMarginClassName: `av-glyph-${cls}`,
+        };
+        if (line === start) {
+          options.after = {
+            content: "  ●",
+            inlineClassName: `av-after-${cls}`,
           };
-          if (first) {
-            options.after = {
-              content: "  ●",
-              inlineClassName: `av-after-${cls}`,
-            };
-            first = false;
-          }
-          result.push({ range: new monaco.Range(line, 1, line, 1), options });
         }
+        result.push({ range: new monaco.Range(line, 1, line, 1), options });
       }
     }
     this.#decorations.set(result);
@@ -292,7 +289,7 @@ export class CodeEditor {
       (_, payload: { start: number; end: number }) => {
         const { sha, path, readonly } = Callbacks.active.current;
         if (readonly) return;
-        Callbacks.add.current(sha, path, [[payload.start, payload.end + 1]]);
+        Callbacks.add.current(sha, path, [payload.start, payload.end + 1]);
         editor.setSelection({
           startLineNumber: 1,
           startColumn: 1,
@@ -337,7 +334,7 @@ export class CodeEditor {
         provideCodeLenses() {
           const lenses: monaco.languages.CodeLens[] = [];
           for (const a of Callbacks.projection.current) {
-            const line = a.lines[0]?.[0];
+            const line = a.lines[0];
             if (line === undefined) continue;
             const range = new monaco.Range(line, 1, line, 1);
             if (a.origin === "suggestion") {

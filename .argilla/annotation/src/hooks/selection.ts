@@ -22,7 +22,6 @@ function toRecord(selection: Selection): SelectionRecord {
   for (const a of selection.project()) {
     if (a.origin === "suggestion" && a.status !== "accepted" && a.status !== "rejected")
       continue;
-    if (a.lines.length === 0) continue;
     annotation.push({
       sha: a.sha,
       path: a.path,

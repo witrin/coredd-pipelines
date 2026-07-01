@@ -108,7 +108,7 @@ export interface Properties {
   accept(identifier: string): void;
   reject(identifier: string): void;
   reset(identifier: string): void;
-  add(sha: string, path: string, lines: Interval[]): void;
+  add(sha: string, path: string, lines: Interval): void;
   remove(identifier: string): void;
   repository: string;
   reveal?: number;
