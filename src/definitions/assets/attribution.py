@@ -62,7 +62,7 @@ class BenchmarkConfig(dg.Config):
     context: int = 3
     samples: int = 3
     compute: str = "default"
-    strategy: str = "diff"
+    strategy: str = "stat"
     logprobs: bool = False
 
 
