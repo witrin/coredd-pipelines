@@ -1,0 +1,33 @@
+{
+  "repository": "foo/bar",
+  "model": "foo",
+  "context": {
+    "sha": "bar",
+    "author": "foo",
+    "message": "foo: base implementation",
+    "time": "2024-01-01T10:00:00+00:00",
+    "labels": ["baz"],
+    "changes": {
+      "src/foo.ts": "long.txt"
+    }
+  },
+  "targets": [
+    {
+      "sha": "baz",
+      "author": "bar",
+      "message": "baz: introduce defect",
+      "time": "2024-01-02T12:00:00+00:00",
+      "labels": ["qux"],
+      "changes": {
+        "src/foo.ts": "long.txt"
+      },
+      "annotations": [
+        {
+          "path": "src/foo.ts",
+          "lines": [[120, 122]],
+          "description": "foo bar baz"
+        }
+      ]
+    }
+  ]
+}

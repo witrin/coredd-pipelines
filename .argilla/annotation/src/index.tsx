@@ -221,6 +221,7 @@ function App({
             change={change}
             context={active.context}
             reveal={active.line}
+            navigation={navigation}
             repository={data.repository}
             blobs={blobs}
             failedBlobs={failedBlobs}

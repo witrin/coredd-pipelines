@@ -112,6 +112,7 @@ export interface Properties {
   remove(identifier: string): void;
   repository: string;
   reveal?: number;
+  navigation: number;
   collapsed: boolean;
   onToggle(): void;
   fullscreen: boolean;
@@ -134,6 +135,7 @@ export function Editor({
   remove,
   repository,
   reveal,
+  navigation,
   collapsed,
   onToggle,
   fullscreen,
@@ -219,11 +221,33 @@ export function Editor({
     editor.current?.decorate(projection);
   }, [projection, mode]);
 
+  // Navigating from the sidebar always lands in File mode so the target line is
+  // revealable (revealLine is a no-op while a diff editor is shown). Keyed on the
+  // navigation counter, not `reveal`, so repeat clicks on the same line re-apply.
   useEffect(() => {
-    if (reveal != null) {
-      editor.current?.revealLine(reveal);
-    }
-  }, [reveal]);
+    setMode("file");
+  }, [navigation]);
+
+  // Scroll to the requested line. This effect is declared *after* the content
+  // switch above, so on any render where the model was just (re)opened — including
+  // when the blob finishes loading asynchronously and `open()` resets scroll to the
+  // top — this runs afterwards and re-reveals. `navigation` is in the deps so a
+  // repeat click on an already-loaded, already-scrolled line re-triggers the jump.
+  useEffect(() => {
+    if (reveal == null) return;
+    if (blobFailed || !isViewable) return;
+    editor.current?.revealLine(reveal);
+  }, [
+    reveal,
+    navigation,
+    mode,
+    content,
+    original,
+    path,
+    sha,
+    blobFailed,
+    isViewable,
+  ]);
 
   return (
     <div

@@ -169,8 +169,24 @@ export class CodeEditor {
     Callbacks.refreshLens.current();
   }
 
+  /**
+   * Scrolls the code editor so `line` is centered and places the cursor there.
+   *
+   * Deferred to the next frame: sidebar navigation to a not-yet-loaded file opens
+   * a fresh model in the same tick, and revealing before that model has been laid
+   * out computes scroll against a zero-height viewport (the jump is silently lost,
+   * leaving the editor pinned at the top). Waiting one frame lets `open()`'s layout
+   * settle first. Clamps to the model's line count so a stale line never throws.
+   */
   revealLine(line: number): void {
-    this.#code.revealLineInCenter(line);
+    if (this.#codeContainer.style.display === "none") return;
+    requestAnimationFrame(() => {
+      const model = this.#code.getModel();
+      if (!model) return;
+      const target = Math.max(1, Math.min(line, model.getLineCount()));
+      this.#code.revealLineInCenter(target);
+      this.#code.setPosition({ lineNumber: target, column: 1 });
+    });
   }
 
   /**
