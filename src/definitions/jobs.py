@@ -390,7 +390,7 @@ def evaluation_demo_op(
                     '<link rel="stylesheet" href="/annotation/annotation.css">'
                     "<style>html, body { height: 600px; overflow: hidden; }</style>"
                     '<script src="/annotation/bundle.js"></script>'
-                    "<code-annotation></code-annotation>"
+                    "<code-annotation field='annotation'></code-annotation>"
                     '<script src="/annotation/adapter.js"></script>'
                 ),
                 advanced_mode=True,
@@ -985,7 +985,7 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
             rg.TextField(name="corrective", title="Corrective change", use_markdown=True),
             rg.TextField(name="defective", title="Defective change", use_markdown=True),
             rg.CustomField(
-                name="annotation",
+                name="localization",
                 title="Localization",
                 description=(
                     "Look at the lines marked as the defect in the defective "
@@ -1000,7 +1000,7 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
                     '<link rel="stylesheet" href="/annotation/annotation.css">'
                     "<style>html, body { height: 600px; overflow: hidden; }</style>"
                     '<script src="/annotation/bundle.js"></script>'
-                    "<code-annotation></code-annotation>"
+                    "<code-annotation field='localization'></code-annotation>"
                     '<script src="/annotation/adapter.js"></script>'
                 ),
                 advanced_mode=True,
@@ -1204,7 +1204,7 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
                     fields={
                         "corrective": corrective,
                         "defective": defective,
-                        "annotation": {"url": url},
+                        "localization": {"url": url},
                     },
                     metadata={
                         "repository": row["name"],
@@ -1269,7 +1269,7 @@ def audit_change_collect_op(
         categories = next(iter(answers.get("categories", [])), None) or []
         origin = next(iter(answers.get("attribution", [])), None)
         confidence = next(iter(answers.get("confidence", [])), None)
-        selections = (record.fields.get("annotation") or {}).get("selections") or []
+        selections = (record.fields.get("localization") or {}).get("annotation") or []
 
         if "intrinsic" not in categories:
             verdict = "filter"

@@ -1,12 +1,16 @@
 class Adapter {
   #storage;
-  #record = record;
-  #key = `annotation:${record.id}`;
+  #record;
+  #field;
+  #key;
   #inflight = false;
   #dirty = null;
 
-  constructor(storage) {
+  constructor(storage, record, field) {
     this.#storage = storage;
+    this.#record = record;
+    this.#field = field;
+    this.#key = `${field}:${record.id}`;
   }
 
   get #token() {
@@ -35,8 +39,8 @@ class Adapter {
           // `annotation` projection is what the backend consumes.
           fields: {
             ...this.#record.fields,
-            annotation: {
-              url: this.#record.fields.annotation.url,
+            [this.#field]: {
+              url: this.#record.fields[this.#field].url,
               state: selection.state,
               annotation: selection.annotation,
             },
@@ -71,9 +75,9 @@ class Adapter {
   }
 
   restore() {
-    const field = this.#record.fields.annotation;
-    const server = field.state
-      ? { state: field.state, annotation: field.annotation ?? [] }
+    const stored = this.#record.fields[this.#field];
+    const server = stored.state
+      ? { state: stored.state, annotation: stored.annotation ?? [] }
       : null;
     const raw = this.#storage.getItem(this.#key);
 
@@ -93,10 +97,13 @@ class Adapter {
   }
 }
 
-const adapter = new Adapter(parent.localStorage);
+// `record` is the global Argilla injects into the custom field iframe; it is
+// referenced only here and handed to the adapter, which stays free of globals.
 const element = document.querySelector("code-annotation");
+const field = element.getAttribute("field");
+const adapter = new Adapter(parent.localStorage, record, field);
 
-element.setAttribute("src", record.fields.annotation.url);
+element.setAttribute("src", record.fields[field].url);
 
 const restored = adapter.restore();
 if (restored) {
