@@ -1183,19 +1183,35 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
             )
 
             entry = outline.get((row["name"], int(row["number"])), {})
+            after = str(change["after"])
             corrective = (
                 f"### {(entry.get('title') or '').strip()}\n\n"
                 f"[#{row['number']}](https://github.com/{row['name']}/"
-                f"pull/{row['number']})\n\n"
+                f"pull/{row['number']}) · "
+                f"[{after[:8]}](https://github.com/{row['name']}/"
+                f"commit/{after})\n\n"
                 f"{(entry.get('markdown') or '').strip()}"
             )
 
             message = (target["message"] or "").strip()
             headline, _, body = message.partition("\n")
+            try:
+                origin = platform.resolve(introducer)["number"]
+            except KeyError:
+                origin = None
+            commit_link = (
+                f"[{introducer[:8]}](https://github.com/{row['name']}/"
+                f"commit/{introducer})"
+            )
+            links = (
+                f"[#{origin}](https://github.com/{row['name']}/pull/{origin}) · "
+                f"{commit_link}"
+                if origin is not None
+                else commit_link
+            )
             defective = (
                 f"### {headline.strip()}\n\n"
-                f"[{introducer[:8]}](https://github.com/{row['name']}/"
-                f"commit/{introducer})\n\n"
+                f"{links}\n\n"
                 f"{body.strip()}"
             )
 
