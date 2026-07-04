@@ -98,10 +98,13 @@ test.describe("performance large fixture", () => {
     await page.click("code-annotation >> [role=treeitem]:has-text('src')");
 
     await page.click("code-annotation >> span:text('foo0.ts')");
+    // Changed files open in the inline diff, whose gutter editor has zero width;
+    // wait until any laid-out editor pane is visible.
     await page.waitForFunction(() => {
       const root = document.querySelector("code-annotation")?.shadowRoot;
-      const ed = root?.querySelector(".monaco-editor") as HTMLElement | null;
-      return ed ? ed.getBoundingClientRect().width > 100 : false;
+      return Array.from(root?.querySelectorAll(".monaco-editor") ?? []).some(
+        (ed) => (ed as HTMLElement).getBoundingClientRect().width > 100,
+      );
     });
 
     try {
@@ -116,10 +119,11 @@ test.describe("performance large fixture", () => {
           await page.click(`code-annotation >> span:text('foo${i}.ts')`);
           await page.waitForFunction(() => {
             const root = document.querySelector("code-annotation")?.shadowRoot;
-            const ed = root?.querySelector(
-              ".monaco-editor",
-            ) as HTMLElement | null;
-            return ed ? ed.getBoundingClientRect().width > 100 : false;
+            return Array.from(
+              root?.querySelectorAll(".monaco-editor") ?? [],
+            ).some(
+              (ed) => (ed as HTMLElement).getBoundingClientRect().width > 100,
+            );
           });
         }
       }

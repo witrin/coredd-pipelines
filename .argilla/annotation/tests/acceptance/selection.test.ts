@@ -602,6 +602,7 @@ test.describe("Selection interactions", () => {
       await page.click("code-annotation >> span:text('qux.ts')");
       await shadowText(page, "src/qux.ts");
       await page.click("code-annotation >> span:text('bar.ts')");
+      await Navigate.showFileView(page);
       await page.waitForFunction(() => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
         return (root?.querySelectorAll(".av-bg-pending").length ?? 0) > 0;
@@ -647,6 +648,7 @@ test.describe("Selection interactions", () => {
       await shadowText(page, "src/qux.ts");
       await Annotate.clear(page);
       await page.click("code-annotation >> span:text('bar.ts')");
+      await Navigate.showFileView(page);
       await page.waitForFunction(() => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
         return (root?.querySelectorAll(".av-bg-accepted").length ?? 0) > 0;
@@ -677,6 +679,7 @@ test.describe("Selection interactions", () => {
         );
       });
       await page.click("code-annotation >> span:text('bar.ts')");
+      await Navigate.showFileView(page);
       await page.waitForFunction(() => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
         return (root?.querySelectorAll(".av-bg-pending").length ?? 0) > 0;
@@ -712,9 +715,14 @@ test.describe("Selection interactions", () => {
           }
         }
       });
+      // The diff editor is created once and toggled via display, so its presence
+      // in the DOM is not a mode signal; wait until it is actually visible.
       await page.waitForFunction(() => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
-        return !!root?.querySelector(".monaco-diff-editor");
+        const diff = root?.querySelector(
+          ".monaco-diff-editor",
+        ) as HTMLElement | null;
+        return !!diff && diff.getBoundingClientRect().width > 100;
       });
 
       await page.evaluate(() => {
@@ -729,16 +737,19 @@ test.describe("Selection interactions", () => {
         }
       });
 
+      // The glyph bar renders in both diff and file modes, so it is not a signal
+      // that the file view has re-decorated; wait for the file-only background,
+      // which confirms the round-trip back to the file editor completed.
       await page.waitForFunction(() => {
-        const root = document.querySelector("code-annotation")?.shadowRoot;
-        return (root?.querySelectorAll(".av-glyph-annotation").length ?? 0) > 0;
-      });
-
-      const hasBg = await page.evaluate(() => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
         return (root?.querySelectorAll(".av-bg-annotation").length ?? 0) > 0;
       });
-      expect(hasBg).toBe(true);
+
+      const hasGlyph = await page.evaluate(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        return (root?.querySelectorAll(".av-glyph-annotation").length ?? 0) > 0;
+      });
+      expect(hasGlyph).toBe(true);
     });
   });
 

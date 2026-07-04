@@ -40,6 +40,7 @@ export class CodeEditor {
   #codeContainer: HTMLDivElement;
   #diffContainer: HTMLDivElement;
   #decorations: monaco.editor.IEditorDecorationsCollection | null = null;
+  #diffDecorations: monaco.editor.IEditorDecorationsCollection | null = null;
   #languages = new Set<string>();
   #lensLanguages = new Set<string>();
 
@@ -97,6 +98,7 @@ export class CodeEditor {
     });
 
     this.#decorations = null;
+    this.#diffDecorations?.clear();
     requestAnimationFrame(() => this.#code.layout());
   }
 
@@ -120,32 +122,54 @@ export class CodeEditor {
     previousModel?.original.dispose();
     previousModel?.modified.dispose();
 
-    this.#decorations = null;
+    // The modified model was just replaced, so any collection bound to the old
+    // model is stale — drop it and rebuild lazily in decorate().
+    this.#decorations?.clear();
+    this.#diffDecorations = null;
     requestAnimationFrame(() => this.#diff.layout());
   }
 
   /**
-   * Applies annotation decorations to the code editor.
-   * Only effective when the code editor is visible (not in diff mode).
+   * Applies annotation decorations to whichever editor is currently visible.
+   *
+   * In the file editor the full marking is drawn (line background, glyph-margin
+   * bar, and a `●` at the range start). In the diff editor only a discreet
+   * glyph-margin bar is drawn on the modified (after) side — no background and no
+   * bullet — so the annotator can still spot where the markings sit without
+   * cluttering the diff's own change highlighting. The diff overview ruler is
+   * left to Monaco, where it reflects the diff hunks rather than the markings.
    */
   decorate(annotations: Annotation[]): void {
     if (this.#codeContainer.style.display === "none") {
       this.#decorations?.clear();
+      const modified = this.#diff.getModifiedEditor();
+      if (!this.#diffDecorations)
+        this.#diffDecorations = modified.createDecorationsCollection();
+      const marks: monaco.editor.IModelDeltaDecoration[] = [];
+      for (const a of annotations) {
+        if (a.status === "absorbed") continue;
+        const cls = CodeEditor.#class(a);
+        const [start, end] = a.lines;
+        for (let line = start; line < end; line++) {
+          marks.push({
+            range: new monaco.Range(line, 1, line, 1),
+            options: {
+              isWholeLine: true,
+              glyphMarginClassName: `av-glyph-${cls}`,
+            },
+          });
+        }
+      }
+      this.#diffDecorations.set(marks);
       return;
     }
+    this.#diffDecorations?.clear();
     if (!this.#decorations)
       this.#decorations = this.#code.createDecorationsCollection();
     const result: monaco.editor.IModelDeltaDecoration[] = [];
     for (const a of annotations) {
       if (a.status === "absorbed") continue;
-      const cls =
-        a.origin === "suggestion"
-          ? a.status === "pending"
-            ? "pending"
-            : a.status === "accepted"
-              ? "accepted"
-              : "rejected"
-          : "annotation";
+      const cls = CodeEditor.#class(a);
       const [start, end] = a.lines;
       for (let line = start; line < end; line++) {
         const options: monaco.editor.IModelDecorationOptions = {
@@ -166,8 +190,20 @@ export class CodeEditor {
     Callbacks.refreshLens.current();
   }
 
+  static #class(a: Annotation): string {
+    return a.origin === "suggestion"
+      ? a.status === "pending"
+        ? "pending"
+        : a.status === "accepted"
+          ? "accepted"
+          : "rejected"
+      : "annotation";
+  }
+
   /**
-   * Scrolls the code editor so `line` is centered and places the cursor there.
+   * Scrolls the visible editor so `line` is centered and places the cursor there.
+   * When a diff is shown, scrolls the modified (after) editor — `line` is an
+   * after-side line number, since markings live on the after side.
    *
    * Deferred to the next frame: sidebar navigation to a not-yet-loaded file opens
    * a fresh model in the same tick, and revealing before that model has been laid
@@ -176,13 +212,14 @@ export class CodeEditor {
    * settle first. Clamps to the model's line count so a stale line never throws.
    */
   revealLine(line: number): void {
-    if (this.#codeContainer.style.display === "none") return;
+    const inDiff = this.#codeContainer.style.display === "none";
+    const editor = inDiff ? this.#diff.getModifiedEditor() : this.#code;
     requestAnimationFrame(() => {
-      const model = this.#code.getModel();
+      const model = editor.getModel();
       if (!model) return;
       const target = Math.max(1, Math.min(line, model.getLineCount()));
-      this.#code.revealLineInCenter(target);
-      this.#code.setPosition({ lineNumber: target, column: 1 });
+      editor.revealLineInCenter(target);
+      editor.setPosition({ lineNumber: target, column: 1 });
     });
   }
 
@@ -216,6 +253,9 @@ export class CodeEditor {
       .av-bg-annotation { background: rgba(126,142,231,0.15) !important; }
       .av-glyph-annotation { background: var(--av-annotator) !important; width: 3px !important; }
       .av-bg-sel { background: rgba(126,142,231,0.25) !important; }
+      .monaco-diff-editor:not(.side-by-side) .editor.modified .glyph-margin { background: var(--vscode-editor-background) !important; }
+      .monaco-diff-editor:not(.side-by-side) .editor.modified [class*="av-glyph-"] { transform: translateX(6px) !important; }
+      .monaco-diff-editor:not(.side-by-side) .editor.modified .margin-view-overlays .line-numbers { margin-left: -7px !important; }
       .monaco-editor .codicon-sparkle-filled::before { content: "\\ea66" !important; font-family: "codicon" !important; }
       .monaco-editor .cursors-layer { display: none !important; }
       .monaco-editor .current-line-margin { background: transparent !important; }
@@ -466,6 +506,6 @@ export class CodeEditor {
     enableSplitViewResizing: false,
     renderIndicators: false,
     diffCodeLens: false,
-    renderOverviewRuler: false,
+    renderOverviewRuler: true,
   };
 }

@@ -64,9 +64,15 @@ test.describe("element.value hydration", () => {
       );
     });
     await page.click("code-annotation >> span:text('bar.ts')");
+    await Navigate.showFileView(page);
     await page.waitForFunction(() => {
       const root = document.querySelector("code-annotation")?.shadowRoot;
-      const editor = root?.querySelector(".monaco-editor") as HTMLElement | null;
+      const container = Array.from(root?.querySelectorAll("*") ?? []).find(
+        (element) => (element as any).annotation,
+      ) as HTMLElement | null;
+      const editor = container?.querySelector(
+        ".monaco-editor",
+      ) as HTMLElement | null;
       return editor ? editor.getBoundingClientRect().width > 100 : false;
     });
 

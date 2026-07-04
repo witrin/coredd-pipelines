@@ -141,10 +141,6 @@ export function Editor({
   fullscreen,
   onFullscreen,
 }: Properties) {
-  const [mode, setMode] = useState<Mode>("file");
-  const containerRef = useRef<HTMLDivElement>(null);
-  const editor = useRef<CodeEditor | null>(null);
-
   const source =
     typeof change === "object" && "source" in change ? change.source : null;
   const target =
@@ -156,6 +152,21 @@ export function Editor({
   const action = typeof change === "string" ? "unchanged" : change.action;
   const deleted = action === "delete";
   const changed = action === "change";
+
+  // Changed files open in the inline diff by default; everything else opens in the
+  // plain file view. The active file is tracked alongside the mode so switching to
+  // another file (without this component unmounting) re-derives the default, while
+  // toggling the mode within a file is preserved. Navigation does not reset the
+  // mode, so a sidebar jump stays in the current diff and scrolls the after side.
+  const [[file, mode], setState] = useState<[string, Mode]>([
+    `${sha}\0${path}`,
+    changed ? "inline" : "file",
+  ]);
+  if (file !== `${sha}\0${path}`)
+    setState([`${sha}\0${path}`, changed ? "inline" : "file"]);
+  const setMode = (next: Mode) => setState([`${sha}\0${path}`, next]);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const editor = useRef<CodeEditor | null>(null);
 
   const isViewable = viewable(path);
 
@@ -220,13 +231,6 @@ export function Editor({
   useEffect(() => {
     editor.current?.decorate(projection);
   }, [projection, mode]);
-
-  // Navigating from the sidebar always lands in File mode so the target line is
-  // revealable (revealLine is a no-op while a diff editor is shown). Keyed on the
-  // navigation counter, not `reveal`, so repeat clicks on the same line re-apply.
-  useEffect(() => {
-    setMode("file");
-  }, [navigation]);
 
   // Scroll to the requested line. This effect is declared *after* the content
   // switch above, so on any render where the model was just (re)opened — including
