@@ -170,11 +170,7 @@ def filter_change_labels_sensor(
 def filter_change_correction_sensor(
     context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
 ):
-    """Synchronize the correction partitions over intrinsic changes.
-
-    The dynamic-partition key is the legacy "benchmark_correction" set (kept for
-    prod-state continuity); only this sensor's symbol follows the stage convention.
-    """
+    """Synchronize the correction partitions over intrinsic changes."""
     import polars as pl
 
     instance = context.instance
@@ -191,10 +187,6 @@ def filter_change_correction_sensor(
         return None
 
     loaded = pl.concat(frames, how="vertical")
-    loaded_keys = {
-        Shard.to_space([f"{name}#{number}"])
-        for name, number in zip(loaded["name"].to_list(), loaded["number"].to_list())
-    }
 
     frame = loaded.filter(pl.col("labels").list.contains("Intrinsic"))
 
@@ -204,19 +196,19 @@ def filter_change_correction_sensor(
     ]
     keys = {Shard.to_space([pair]) for pair in pairs}
 
-    existing = set(instance.get_dynamic_partitions("benchmark_correction"))
+    existing = set(instance.get_dynamic_partitions("filter_change_correction"))
     to_add = keys - existing
-    to_remove = (existing & loaded_keys) - keys
+    to_remove = existing - keys
 
     if to_add:
-        instance.add_dynamic_partitions("benchmark_correction", list(to_add))
+        instance.add_dynamic_partitions("filter_change_correction", list(to_add))
 
     if to_remove:
         for key in to_remove:
-            instance.delete_dynamic_partition("benchmark_correction", key)
+            instance.delete_dynamic_partition("filter_change_correction", key)
 
     context.log.info(
-        "Updated benchmark_correction partitions with +%d / -%d",
+        "Updated filter_change_correction partitions with +%d / -%d",
         len(to_add),
         len(to_remove),
     )
