@@ -50,7 +50,7 @@ class ClassifyNode:
             Assign the provided GitHub pull request to one or more applicable categories.
 
             ### Definitions
-            A **defect** is a flaw within the repository's Python source files (in any folder) that leads or could lead to faulty execution. Non-Python artifacts (Markdown, READMEs, shell scripts, YAML configs) are excluded and cannot contain defects.
+            A **defect** is a flaw within the repository's Python source files (in any folder) that leads or could lead to faulty execution. Non-Python artifacts (Markdown, READMEs, shell scripts, YAML configs) are excluded and cannot contain defects. A **correction** restores conformance to an existing requirement, whether formally specified or only implicitly expected.
 
             * **Intrinsic**: Fixes a flaw originating from within this codebase. Typical instances include resolving logical mistakes, faulty conditions, failure-inducing typos, or incorrect internal API usage.
             * **Extrinsic**: Fixes a flaw triggered by external factors. The original code was sound, but outside modifications (like environment shifts or dependency upgrades) resulted in an observable breakdown that this PR resolves.
@@ -59,7 +59,7 @@ class ClassifyNode:
             ### Decision Rules
             Review the description and file modifications. Determine the root cause for every fix applied. Include "Other" if the PR contains non-fix modifications. PRs containing exclusively non-fix work get "Other" exclusively. A PR resolving an external flaw while simultaneously performing unrelated refactoring gets both "Extrinsic" and "Other".
 
-            **Observable Failure**: Any breakage during software usage or development (e.g., CI failures, build/install errors, test failures, runtime crashes, or developer-reported bugs). A connected bug ticket serves as proof but is not mandatory.
+            **Observable Failure**: Any breakage during software usage or development (e.g., CI failures, build/install errors, test failures, runtime crashes, or developer-reported bugs). A connected bug ticket serves as proof but is not mandatory. Breakage evidences the flaw but is not required for it. A violated requirement is a flaw even without observed breakage.
 
             ### Edge Cases
             * **Mixed Work**: If a PR combines unrelated tasks, assign every relevant category.

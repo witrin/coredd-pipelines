@@ -183,6 +183,13 @@ class LocateNode:
             the corrective change only touches incidentally (refactoring, renaming,
             formatting) does not.
 
+            Report lines the defective change itself modified. The defect entered
+            through those lines, even when the correction adds code elsewhere. Where
+            the problem becomes visible later is not a defect location. When the
+            correction only adds code, mark the modified lines of the defective change
+            that made the addition necessary, never the place where the added code
+            would go.
+
             Your initial message gives the root cause and the suspect files of the
             corrective change, plus two commit SHAs: the defective change and the
             corrective change. The defective change is not shown to you; you locate the
