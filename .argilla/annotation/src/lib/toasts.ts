@@ -1,4 +1,16 @@
-import type { Level, Notice } from "../types/index.js";
+/**
+ * Severity of a status notification.
+ */
+export type Level = "info" | "warning" | "error";
+
+/**
+ * A single status notification shown to the user.
+ */
+export interface Notice {
+  identifier: string;
+  level: Level;
+  message: string;
+}
 
 /**
  * Manages a stack of status notifications with auto-dismiss for info level.

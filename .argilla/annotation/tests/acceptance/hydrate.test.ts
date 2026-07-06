@@ -11,9 +11,15 @@ test.describe("element.value hydration", () => {
     await page.evaluate(() => {
       const element = document.querySelector("code-annotation")!;
       element.setAttribute("src", "/tests/fixtures/meta.json");
-      // Restore a state that accepts the first suggestion (identifier "1").
+      // The state is the single Selection checkpoint (one event log across all
+      // files). Restore one that accepts baz/src/bar.ts's sole suggestion. The
+      // suggestion identifier is a deterministic FNV-1a hash of its diff-mapped
+      // {sha,path,lines}; for this fixed fixture it is "1fd2741c".
       (element as any).value = {
-        state: { events: [{ type: "accept", identifier: "1" }], counter: 1 },
+        state: {
+          events: [{ type: "accept", identifier: "1fd2741c" }],
+          counter: 0,
+        },
         annotation: [],
       };
     });
@@ -65,15 +71,14 @@ test.describe("element.value hydration", () => {
     });
     await page.click("code-annotation >> span:text('bar.ts')");
     await Navigate.showFileView(page);
+    // Changed files open in the side-by-side diff, whose first (gutter) editor
+    // pane has zero width. Wait until any laid-out editor pane is visible rather
+    // than the container's first .monaco-editor, which may be the gutter.
     await page.waitForFunction(() => {
       const root = document.querySelector("code-annotation")?.shadowRoot;
-      const container = Array.from(root?.querySelectorAll("*") ?? []).find(
-        (element) => (element as any).annotation,
-      ) as HTMLElement | null;
-      const editor = container?.querySelector(
-        ".monaco-editor",
-      ) as HTMLElement | null;
-      return editor ? editor.getBoundingClientRect().width > 100 : false;
+      return Array.from(root?.querySelectorAll(".monaco-editor") ?? []).some(
+        (editor) => (editor as HTMLElement).getBoundingClientRect().width > 100,
+      );
     });
 
     // The hydrated annotation should be visible as accepted decoration.
@@ -100,9 +105,20 @@ test.describe("element.value hydration", () => {
 
     await page.evaluate(() => {
       const element = document.querySelector("code-annotation")!;
-      // Restore a state that accepts the first suggestion (identifier "1").
+      // The state is the single Selection checkpoint. The file is already open,
+      // so read its sole suggestion's real identifier from the editor's exposed
+      // projection and accept it in that one event log.
+      const root = element.shadowRoot;
+      const container = Array.from(root?.querySelectorAll("*") ?? []).find(
+        (node) => (node as any).annotation,
+      ) as any;
+      const { locals } = container.annotation;
+      const suggestion = (locals?.current ?? []).find(
+        (a: any) => a.origin === "suggestion",
+      );
+      const identifier = suggestion?.identifier;
       (element as any).value = {
-        state: { events: [{ type: "accept", identifier: "1" }], counter: 1 },
+        state: { events: [{ type: "accept", identifier }], counter: 0 },
         annotation: [],
       };
     });

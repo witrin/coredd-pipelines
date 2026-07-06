@@ -1,5 +1,5 @@
 import { memo, useCallback, useRef, useSyncExternalStore } from "react";
-import type { Level, Notice } from "../types/index.js";
+import type { Level, Notice } from "../lib/toasts.js";
 import type { Toasts } from "../lib/toasts.js";
 
 function color(level: Level): string {

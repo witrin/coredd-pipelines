@@ -1,37 +1,59 @@
 import "@vitejs/plugin-react/preamble";
-import { useState, useCallback, useMemo, useEffect } from "react";
+import {
+  useState,
+  useCallback,
+  useMemo,
+  useEffect,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 import { createRoot } from "react-dom/client";
 import createCache from "@emotion/cache";
 import { CacheProvider } from "@emotion/react";
-import type { Level } from "./types/index.js";
-import type { Selection, SelectionRecord } from "./lib/selection.js";
+import type { Side } from "./lib/diff.js";
+import type { Level } from "./lib/toasts.js";
+import type { Selection, SelectionState } from "./lib/selection.js";
+import type { AnnotationRecord } from "./lib/codec.js";
+import type { ListItem } from "./lib/listing.js";
 import { Toasts } from "./lib/toasts.js";
 import { useData } from "./hooks/data.js";
-import { useAnnotations } from "./hooks/selection.js";
+import { Blobs } from "./lib/blob.js";
+import { DiffMaps } from "./lib/diff.js";
+import { Prime, Export } from "./lib/codec.js";
+import { Listing } from "./lib/listing.js";
 import { Sidebar } from "./components/sidebar.js";
 import { Editor } from "./components/editor.js";
 import { ToastStack } from "./components/toasts.js";
+
+/**
+ * The custom-element-facing manager: the single output getter and the state restore, both
+ * backed by the one Selection + shared DiffMaps. Replaces the old per-file hook result.
+ */
+interface Manager {
+  value(): AnnotationRecord;
+  restore(state: SelectionState): void;
+}
 
 interface ActiveFile {
   sha: string;
   path: string;
   context: boolean;
-  line?: number;
+  reveal?: { line: number; side: Side };
 }
 
 function App({
   src,
   notify,
   shadow,
-  selection,
+  manager,
   drain,
   toasts,
 }: {
   src: string;
-  notify: { current: ((detail: SelectionRecord) => void) | null };
+  notify: { current: ((detail: AnnotationRecord) => void) | null };
   shadow: ShadowRoot;
-  selection: { current: Selection | null };
-  drain: () => SelectionRecord | null;
+  manager: { current: Manager | null };
+  drain: () => AnnotationRecord | null;
   toasts: Toasts;
 }) {
   const cache = useMemo(
@@ -43,21 +65,82 @@ function App({
       }),
     [shadow],
   );
-  const { status, data, error, blobs, failedBlobs, load } = useData(src);
-  const annotations = useAnnotations(data, notify);
+  const { status, data, error, blobs, failures, load, seed } = useData(src);
 
-  useEffect(() => {
-    if (data) {
-      selection.current = annotations.selection;
-      const pending = drain();
-      if (pending) {
-        annotations.selection.state = pending.state;
+  // The one Selection and the shared DiffMaps, built once by Prime when the data loads.
+  // Held in refs (never reassigned mid-render); components read the current value.
+  const selectionRef = useRef<Selection | null>(null);
+  const mapsRef = useRef<DiffMaps | null>(null);
+  // A monotonic key bumped on every Selection change and once Prime finishes, so the
+  // component re-renders (projection, list) and `useSyncExternalStore` has a snapshot.
+  const [version, setVersion] = useState(0);
+
+  // A blob fetcher for Prime, mirroring useData.load: resolve the SHA to a URL and fetch
+  // its text (null on failure). Fetched texts are seeded into the blob cache afterwards.
+  const fetchBlob = useCallback(
+    async (sha: string): Promise<string | null> => {
+      const url = new Blobs().resolve(src, sha);
+      try {
+        const response = await globalThis.fetch(url);
+        if (!response.ok) return null;
+        return await response.text();
+      } catch {
+        return null;
       }
-    }
+    },
+    [src],
+  );
+
+  // On new data: run the one-time Prime pass, build the Selection + DiffMaps, wire the
+  // change notification, and drain any pending restore set before the data loaded.
+  useEffect(() => {
+    if (!data) return;
+    let live = true;
+    const texts: Record<string, string> = {};
+    Prime.run(data, async (sha) => {
+      const text = await fetchBlob(sha);
+      if (text !== null) texts[sha] = text;
+      return text;
+    }).then(({ selection, maps }) => {
+      if (!live) return;
+      selectionRef.current = selection;
+      mapsRef.current = maps;
+      seed(texts);
+      selection.subscribe(() => {
+        notify.current?.(Export.record(selection, maps));
+        setVersion((v) => v + 1);
+      });
+      manager.current = {
+        value: () => Export.record(selection, maps),
+        restore: (state) => {
+          selection.state = state;
+        },
+      };
+      const pending = drain();
+      if (pending) selection.state = pending.state;
+      setVersion((v) => v + 1);
+    });
     return () => {
-      selection.current = null;
+      live = false;
+      manager.current = null;
+      selectionRef.current = null;
+      mapsRef.current = null;
     };
-  }, [annotations.selection, data]);
+  }, [data, fetchBlob, seed, notify, manager, drain]);
+
+  // Re-render on every Selection write. The snapshot is the version counter, bumped by
+  // the subscribe callback above; `subscribe` returns a no-op here because the effect
+  // owns the real subscription (it also fires `notify`).
+  useSyncExternalStore(
+    useCallback(() => () => {}, []),
+    () => version,
+  );
+
+  const selection = selectionRef.current;
+  const maps = mapsRef.current;
+  const list: ListItem[] =
+    selection && maps ? Listing.build(selection, maps) : [];
+
   const [active, setActive] = useState<ActiveFile | null>(null);
   const [navigation, setNavigationKey] = useState(0);
   const [collapsed, setCollapsed] = useState(false);
@@ -82,8 +165,13 @@ function App({
   }, []);
 
   const onNavigate = useCallback(
-    (sha: string, path: string, line?: number) => {
-      setActive({ sha, path, context: data?.context.sha === sha, line });
+    (sha: string, path: string, line: number, side: Side) => {
+      setActive({
+        sha,
+        path,
+        context: data?.context.sha === sha,
+        reveal: { line, side },
+      });
       setNavigationKey((k) => k + 1);
     },
     [data],
@@ -204,7 +292,7 @@ function App({
             (filter, open, expanded folders) across a collapse and expand. */}
         <Sidebar
           data={data}
-          state={annotations.selection}
+          list={list}
           activeSha={active?.sha ?? null}
           activePath={active?.path ?? null}
           navigation={navigation}
@@ -220,18 +308,14 @@ function App({
             path={active.path}
             change={change}
             context={active.context}
-            reveal={active.line}
+            reveal={active.reveal}
             navigation={navigation}
             repository={data.repository}
             blobs={blobs}
-            failedBlobs={failedBlobs}
+            failures={failures}
             load={load}
-            state={annotations.selection}
-            accept={annotations.selection.accept.bind(annotations.selection)}
-            reject={annotations.selection.reject.bind(annotations.selection)}
-            reset={annotations.selection.reset.bind(annotations.selection)}
-            add={annotations.selection.add.bind(annotations.selection)}
-            remove={annotations.selection.remove.bind(annotations.selection)}
+            selection={selection}
+            maps={maps}
             collapsed={collapsed}
             onToggle={() => setCollapsed((v) => !v)}
             fullscreen={fullscreen}
@@ -328,11 +412,11 @@ function App({
 
 class AnnotationView extends HTMLElement {
   #root: ReturnType<typeof createRoot> | null = null;
-  #notify: { current: ((detail: SelectionRecord) => void) | null } = {
+  #notify: { current: ((detail: AnnotationRecord) => void) | null } = {
     current: null,
   };
-  #selection: { current: Selection | null } = { current: null };
-  #pending: SelectionRecord | null = null;
+  #manager: { current: Manager | null } = { current: null };
+  #pending: AnnotationRecord | null = null;
   #shadow: ShadowRoot | null = null;
   #observer: MutationObserver | null = null;
   #toasts = new Toasts();
@@ -431,7 +515,7 @@ button { font-family: inherit; font-size: inherit; }
   #paint(): void {
     if (!this.#root || !this.#shadow) return;
     const src = this.getAttribute("src") ?? "";
-    this.#notify.current = (detail: SelectionRecord) => {
+    this.#notify.current = (detail: AnnotationRecord) => {
       this.dispatchEvent(new CustomEvent("change", { detail, bubbles: false }));
     };
     this.#root.render(
@@ -439,7 +523,7 @@ button { font-family: inherit; font-size: inherit; }
         src={src}
         notify={this.#notify}
         shadow={this.#shadow}
-        selection={this.#selection}
+        manager={this.#manager}
         drain={() => {
           const pending = this.#pending;
           this.#pending = null;
@@ -451,33 +535,19 @@ button { font-family: inherit; font-size: inherit; }
   }
 
   /**
-   * The current output value: the raw state checkpoint (for reload) plus the
+   * The current output value: the per-file state checkpoints (for reload) plus the
    * annotator-facing projection. Only `state` is ever read back via the setter.
    */
-  get value(): SelectionRecord | null {
-    const selection = this.#selection.current;
-    if (!selection) return null;
-    const annotation: SelectionRecord["annotation"] = [];
-    for (const a of selection.project()) {
-      if (a.origin === "suggestion" && a.status !== "accepted" && a.status !== "rejected")
-        continue;
-      annotation.push({
-        sha: a.sha,
-        path: a.path,
-        lines: a.lines,
-        origin: a.origin,
-        status: a.status,
-      });
-    }
-    return { state: selection.state, annotation };
+  get value(): AnnotationRecord | null {
+    return this.#manager.current?.value() ?? null;
   }
 
-  set value(value: SelectionRecord) {
-    if (!this.#selection.current) {
+  set value(value: AnnotationRecord) {
+    if (!this.#manager.current) {
       this.#pending = value;
       return;
     }
-    this.#selection.current.state = value.state;
+    this.#manager.current.restore(value.state);
   }
 
   /**

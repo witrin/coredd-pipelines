@@ -1,0 +1,18 @@
+from collections import deque
+
+
+class Metrics:
+    def __init__(self, window):
+        self.window = window
+        self._recent = deque(maxlen=window)
+
+    def observe(self, value):
+        self._recent.append(value)
+
+    def rolling_average(self):
+        if not self._recent:
+            return 0.0
+        return sum(self._recent) / len(self._recent)
+
+    def reset(self):
+        self._recent.clear()

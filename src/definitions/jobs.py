@@ -911,8 +911,8 @@ def audit_change_request_op(
     # (name, number, defect-sha) -> (path, side) -> sorted unique 1-based line numbers.
     # A location's line is an L<n>/D<n> reference: L is an after-side line, D a
     # deleted base-side line. The side-by-side annotation component pre-marks each on
-    # the matching side, so deletions (D) are shown on the base editor. Single lines
-    # are collapsed into half-open [start, end) intervals per (path, side).
+    # the matching side, so deletions (D) are shown on the base editor. Each marked line
+    # becomes one coordinate ({line, side}) in the annotation's line list.
     markings: dict[tuple[str, int, str], dict[tuple[str, str], list[int]]] = {}
     localization = pools.get("localization-change-trace")
     if localization is not None:
@@ -1143,24 +1143,23 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
                 continue
 
             marks = markings.get((row["name"], int(row["number"]), introducer), {})
-            target_annotations = []
+            # One annotation per file, its lines a flat list of coordinates each carrying
+            # its own side (after = a present line, base = a deleted line). The side-by-side
+            # component pre-marks each coordinate on the matching editor.
+            coordinates: dict[str, list[dict[str, object]]] = {}
             for path, side in sorted(marks):
-                lines = sorted(set(marks[(path, side)]))
-                intervals: list[list[int]] = []
-                for line in lines:
-                    if intervals and line == intervals[-1][1]:
-                        intervals[-1][1] = line + 1
-                    else:
-                        intervals.append([line, line + 1])
-                for interval in intervals:
-                    target_annotations.append(
-                        {
-                            "path": path,
-                            "lines": interval,
-                            "description": "Localized by the benchmark.",
-                            "side": side,
-                        }
+                for line in sorted(set(marks[(path, side)])):
+                    coordinates.setdefault(path, []).append(
+                        {"line": line, "side": side}
                     )
+            target_annotations = [
+                {
+                    "path": path,
+                    "lines": coordinates[path],
+                    "description": "Localized by the benchmark.",
+                }
+                for path in sorted(coordinates)
+            ]
             if target_annotations:
                 target["annotations"] = target_annotations
 

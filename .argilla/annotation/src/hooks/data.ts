@@ -1,6 +1,68 @@
 import { useState, useEffect, useCallback } from "react";
-import type { Data } from "../types/index.js";
+import type { Side } from "../lib/diff.js";
+import type { Action } from "../lib/tree.js";
 import { Blobs } from "../lib/blob.js";
+
+/**
+ * A file change entry with an explicit action.
+ */
+export interface Change {
+  action: Action;
+  source?: string;
+  target?: string;
+}
+
+/**
+ * A commit as represented in the input JSON.
+ */
+export interface Commit {
+  sha: string;
+  author: string;
+  message: string;
+  time: string;
+  labels: string[];
+  changes: Record<string, string | Change>;
+}
+
+/**
+ * One annotated line in real file coordinates. `side` names which side of the diff the
+ * line lives on (base = a deleted line, after = a present line); absent means the after
+ * side, or the single axis of an unchanged file. Self-describing — the side is carried
+ * per line, so an annotation needs no separate side field.
+ */
+export interface Coordinate {
+  line: number;
+  side?: Side;
+}
+
+/**
+ * A model-proposed annotation as declared in the input JSON. `lines` is the list of
+ * annotated coordinates, each self-describing its side.
+ */
+export interface Suggestion {
+  path: string;
+  lines: Coordinate[];
+  description: string;
+}
+
+/**
+ * A target commit as represented in the input JSON.
+ * `annotations` is optional — when absent or empty the target has no suggestions.
+ */
+export interface Target extends Commit {
+  annotations?: Suggestion[];
+}
+
+/**
+ * The top-level data structure loaded from the JSON URL.
+ * `targets` is optional — when absent or empty the component becomes a read-only commit viewer.
+ */
+export interface Data {
+  repository: string;
+  model: string;
+  context: Commit;
+  targets?: Target[];
+}
 
 /**
  * The loading lifecycle status of the data fetch.
@@ -30,11 +92,16 @@ export interface DataResult {
   /**
    * Set of blob SHAs whose fetch failed.
    */
-  failedBlobs: Set<string>;
+  failures: Set<string>;
   /**
    * Fetches and caches the blob for the given SHA.
    */
   load(sha: string): void;
+  /**
+   * Merges already-fetched blob texts into the cache (used by the load-time Prime pass so
+   * the editor does not refetch the suggestion blobs it opens).
+   */
+  seed(texts: Record<string, string>): void;
 }
 
 /**
@@ -46,7 +113,7 @@ export function useData(src: string): DataResult {
   const [data, setData] = useState<Data | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [blobs, setBlobs] = useState<Record<string, string>>({});
-  const [failedBlobs, setFailedBlobs] = useState<Set<string>>(new Set());
+  const [failures, setFailures] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (!src) return;
@@ -54,7 +121,7 @@ export function useData(src: string): DataResult {
     setData(null);
     setError(null);
     setBlobs({});
-    setFailedBlobs(new Set());
+    setFailures(new Set());
 
     fetch(src)
       .then((r) => {
@@ -86,12 +153,16 @@ export function useData(src: string): DataResult {
             setBlobs((prev) => ({ ...prev, [sha]: text }));
           },
           () => {
-            setFailedBlobs((prev) => new Set(prev).add(sha));
+            setFailures((prev) => new Set(prev).add(sha));
           },
         );
     },
     [src],
   );
 
-  return { status, data, error, blobs, failedBlobs, load };
+  const seed = useCallback((texts: Record<string, string>) => {
+    setBlobs((prev) => ({ ...texts, ...prev }));
+  }, []);
+
+  return { status, data, error, blobs, failures, load, seed };
 }

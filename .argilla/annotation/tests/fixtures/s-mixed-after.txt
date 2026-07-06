@@ -1,0 +1,4 @@
+const keep1 = 1;
+const keep2 = 2;
+const keep3 = 3;
+export { keep1, keep2, keep3 };

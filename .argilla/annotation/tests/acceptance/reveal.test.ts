@@ -13,14 +13,14 @@ test.describe("Clicking a sidebar annotation entry", () => {
       document.body.style.cssText = "margin:0;height:100vh;";
       document.documentElement.style.cssText = "height:100%;";
     });
-    await shadowText(page, "src/foo.ts L120");
+    await shadowText(page, "src/foo.ts 120");
   });
 
   test("scrolls the editor down to the annotated line", async ({ page }) => {
     await page.evaluate(() => {
       const root = document.querySelector("code-annotation")?.shadowRoot;
       for (const element of Array.from(root?.querySelectorAll(".av-row") ?? [])) {
-        if ((element as HTMLElement).innerText?.includes("src/foo.ts L120")) {
+        if ((element as HTMLElement).innerText?.includes("src/foo.ts 120")) {
           (element as HTMLElement).click();
           return;
         }

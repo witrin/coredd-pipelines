@@ -71,7 +71,7 @@ Each entry in `changes` describes a file in the commit snapshot:
 
 - **Plain blob** (`"<path>": "<blob>"`): File present in the snapshot but not modified. The blob SHA points to the file content.
 - **Add** (`{ "action": "add", "after": "<blob>" }`): File was added. Only the `after` blob exists. No diff possible.
-- **Delete** (`{ "action": "delete", "base": "<blob>" }`): File was deleted. Only the `base` blob exists. Shown as read-only old content. No annotations allowed on deleted files.
+- **Delete** (`{ "action": "delete", "base": "<blob>" }`): File was deleted. Only the `base` blob exists, shown as a single-column editor. Deleted lines **are annotatable** on the base side (a `D` reference) — this is the whole point of the side-by-side design.
 - **Change** (`{ "action": "change", "base": "<blob>", "after": "<blob>" }`): File was modified. `base` is the state before, `after` the state after. Both are blob SHAs.
 
 ### 1.3 Blob Resolution
@@ -97,6 +97,7 @@ Each entry in `targets[].annotations` describes a model suggestion. The `annotat
 - **`path`** — File path within the commit.
 - **`lines`** — A single line range as a half-open interval `[start, end)` (1-based, start inclusive, end exclusive). Example: `[10, 15)` covers lines 10, 11, 12, 13, 14. A suggestion that spans disjoint passages of the same file is expressed as multiple annotation objects sharing the same `path`.
 - **`description`** — Description of the suggested location (displayed as label).
+- **`side`** *(optional, `"base"` | `"after"`)* — Which diff side the `lines` refer to. Absent means `"after"`. `"base"` places the suggestion on the left (deleted) side; its `lines` are base-line numbers. Only pure deletions use `"base"`; suggestions on shared (context/edit) lines use `"after"`.
 
 ### 1.5 Optional Targets (Read-Only Mode)
 
@@ -155,9 +156,8 @@ Monaco Editor is a text editor and cannot meaningfully display binary content. T
     - Headline: **"Binary file not shown"** — `--av-muted`, 14 px, weight 500.
     - Detail line: file path and extension (or `"unknown type"` if the extension is missing), monospace, 12 px, `--av-muted` at 0.7 opacity.
   - The navigation bar (file path) and status bar remain visible. The status bar shows `binary` in place of the language label. The GitHub SHA link in the status bar stays active so the file can be opened externally.
-  - The File / Inline / Side-by-Side mode segment is hidden (no diff is possible for binary content).
   - The placeholder has no interactive affordances: no cursor, no selection, no context menu.
-- Suggestions on binary paths from the input JSON still appear in the sidebar and remain clickable; clicking navigates to the file and the user lands on the placeholder. Manual annotations cannot be created (there is no editor to select lines in). This is consistent with the read-only behavior of deleted files.
+- Suggestions on binary paths from the input JSON still appear in the sidebar and remain clickable; clicking navigates to the file and the user lands on the placeholder. Manual annotations cannot be created (there is no editor to select lines in). This is consistent with the read-only behavior of context commits.
 
 ---
 
@@ -182,7 +182,7 @@ There is no outer "Navigation" heading or grouping label. Both sections use iden
 
 ### 2.3 Editor Area
 - Displays the content of the selected file.
-- Top navigation bar with file name, sidebar toggle (only when collapsed), and diff mode switcher.
+- Top navigation bar with file name and sidebar toggle (only when collapsed).
 - Bottom status bar shows the abbreviated commit SHA (7 characters) and the detected file language. File name and mark count are not shown.
 
 ---
@@ -222,22 +222,57 @@ Rules:
 - **Indentation:** Child nodes (files inside a folder) are indented 16px relative to their parent. This is enforced via the `MuiTreeItem-groupTransition` CSS class on the MUI Tree View component.
 - **Hover:** File and folder rows show a subtle background fill on hover (`--av-hover-bg`).
 
-### 3.3 File View
-- The code editor is rendered with **Monaco Editor** (`@monaco-editor/react`).
-- **Unchanged files (plain blob):** Full file content (read-only), loaded from the blob SHA.
-- **Added files:** Full file content (`after` blob). No diff available. Segmented control shows only "File".
-- **Deleted files:** Old content (`base` blob), read-only, greyed out. No diff, no annotations allowed.
-- **Changed files:** Three view modes via segmented control:
-  - **File** — Full file content (`after` blob), with suggestions and annotations visible and interactive.
-  - **Inline** — Monaco inline diff (`base` vs. `after`).
-  - **Side-by-Side** — Monaco side-by-side diff (`base` vs. `after`).
-- The segmented control is only visible for changed files.
-- Suggestions and annotations are only interactive in **File** mode (gutter selection, accept, reject).
-- On context commits, all files are read-only with no annotation capability.
+### 3.3 File View — single side-by-side diff editor
+
+The code editor is a **single Monaco side-by-side diff editor** (`base` on the left,
+`after` on the right). There are **no view modes** (no File/Inline/Side segmented
+control): every file opens in this one editor. This replaces the earlier three-mode
+design so that **deleted lines are visible and annotatable** — Monaco's inline diff
+cannot select deleted lines (issue #1035), but the side-by-side original editor can.
+
+Both inner editors are interactive: the annotator can select lines, mark, accept, and
+reject on **either** side. A marking on the **after** (right) side is an `L` (after-line)
+reference; a marking on the **base** (left) side is a `D` (base-line) reference.
+
+Rendering per action type:
+- **Changed files** (`action: "change"`): full side-by-side diff, both sides
+  interactive.
+- **Added files** (`action: "add"`): only the `after` content exists; the editor
+  renders as a **single column** (not two panes), annotatable on the after side.
+- **Deleted files** (`action: "delete"`): only the `base` content exists; the editor
+  renders as a **single column**, annotatable on the base side. (Reverses the old rule
+  — deletions **are** annotatable now.)
+- **Unchanged files** (plain blob): single column, read/annotate on the after side.
+
+Only a genuine change with differing content renders two panes; add-only, delete-only,
+and unchanged render one column (via `renderSideBySide: false`).
+
+On context commits, all files are read-only with no annotation capability.
+
+### 3.3.1 Both-sides display of context and edit lines
+
+Selection works internally on a single **diff-line axis** — one continuous run of
+visual lines `1..N` over context, deletions, and additions. A `DiffMap`
+(`src/lib/diff.ts`) translates between that axis and the base/after editor coordinates;
+`base`/`after` are only presentation surfaces. Which side a diff line appears on falls
+out of the DiffMap inverse automatically — there is no separate mirroring step and no
+origin-dependent rule.
+
+- A line that exists on **both** sides of the diff — an unchanged (context) line **or**
+  an edited line (a `-`/`+` pair mapped to each other) — appears on **both** sides
+  (base left, after right). Its canonical reference is the **after** (`L`) number.
+- A **pure addition** (after only) appears **only on the after (right) side** and uses
+  an `L` reference.
+- A **pure deletion** (base only) appears **only on the base (left) side** and uses a
+  `D` reference. Deletions **are annotatable**.
+
+Because a marking is a range on the diff-line axis, it maps to whatever sides those diff
+lines occupy — no explicit per-side spiegelung, no origin distinction between
+suggestions and manual annotations.
 
 ### 3.4 Consistent Monaco Theme
 
-All Monaco editor instances — the file view editor and both diff editors (inline and side-by-side) — use the same visual theme at all times (`vs-dark`). Switching between File, Inline, and Side-by-Side modes must not alter the editor's visual appearance. The theme is set once at initialization and never changed by any user interaction.
+All Monaco editor instances — the side-by-side diff editor and the standalone editor used for unchanged files — use the same visual theme at all times (`vs-dark`). Opening any file (diff or standalone) must not alter the editor's visual appearance. The theme is set once at initialization and never changed by any user interaction.
 
 ### 3.5 Disabled Editor Features
 
@@ -259,13 +294,13 @@ The Monaco editor is configured as a **read-and-annotate** view. All IDE-style i
 
 All Monaco language service diagnostics are explicitly disabled via `setDiagnosticsOptions` for TypeScript and JavaScript. No semantic, syntax, or suggestion validation markers are shown. This is a regression requirement: no squiggly underlines must appear on any file regardless of content.
 
-Diff views (Inline and Side-by-Side) are fully read-only. All editing controls are disabled: text input (`readOnly`, `domReadOnly`), revert hunk indicators (`renderIndicators: false`), diff code lens (`diffCodeLens: false`), and split-view resizing (`enableSplitViewResizing: false`).
+The side-by-side diff editor is fully read-only. All editing controls are disabled: text input (`readOnly`, `domReadOnly`), revert hunk indicators (`renderIndicators: false`), diff code lens (`diffCodeLens: false`), and split-view resizing (`enableSplitViewResizing: false`).
 
 The colored annotation bar (3px vertical stripe) is implemented using `glyphMarginClassName`. It appears in the glyph margin column, which is the outermost column to the left of the line numbers. `glyphMargin: true` is set in the editor options to reserve this column.
 
 The Monaco editor uses font size 12. Accept/reject overlay buttons are positioned at `right: 20px` to avoid overlapping the Monaco scrollbar (which is ~14px wide). This ensures the buttons are always fully visible regardless of scrollbar state.
 
-The only interactive feature beyond reading is the **"Mark selection"** code action (Section 5.2), which appears exclusively when lines are selected in a target file (not context, not deleted).
+The only interactive feature beyond reading is the **"Mark selection"** code action (Section 5.2), which appears exclusively when lines are selected in a target file (not context). It is available on both diff sides, including deletions on the base side.
 
 ---
 
@@ -278,7 +313,7 @@ The only interactive feature beyond reading is the **"Mark selection"** code act
   - **Manual** — Only visible when annotations exist.
 
 ### 4.2 Navigation (Read-Only)
-- Each entry in the list is **navigation only** — clicking jumps to the file and line in the editor (File mode).
+- Each entry in the list is **navigation only** — clicking jumps to the file and line in the editor.
 - **No action buttons** (no accept, reject, delete) in the navigation. This prevents accidental changes.
 - Status is displayed visually using a **label/tag icon** (not a dot). The icon color reflects status:
   - **Pending** (`--av-pending`) — Suggestion, undecided.
@@ -310,7 +345,7 @@ Each model suggestion is displayed inline in the code (colored bar on the left m
 ### 5.2 Annotations
 
 - Create: **Select lines** in the editor (native Monaco text selection). A "Mark selection" code action appears via the Monaco lightbulb. Triggering it records the selected lines as an annotation.
-- Available in **every** file in File mode — regardless of whether the file has suggestions. Exceptions: deleted files (`action: "delete"`), context commits, and diff modes (Inline, Side-by-Side).
+- Available in **every** file — regardless of whether the file has suggestions — and on **both** diff sides (deletions on the base side are annotatable). Exception: context commits.
 - Display: Annotator-colored bar, label with line range.
 - **✗ button** in the label to delete (matching annotator color).
 - Appears in the annotations panel under "Manual".
@@ -454,19 +489,23 @@ Language is detected automatically from the file extension and passed to Monaco.
 
 ## 7. Diff View
 
-Three modes via segmented control in the editor navigation bar:
+There are **no view modes** and no segmented control. Every file opens in a single
+editor whose form follows the file's action (see §3.3):
 
-| Mode | Description |
+| Action | Rendering |
 |---|---|
-| **File** | Full snapshot (`after` blob). Annotations interactive. |
-| **Inline** | Monaco inline diff (`base` vs. `after`). |
-| **Side-by-Side** | Monaco side-by-side diff (`base` vs. `after`). |
+| **change** | Side-by-side diff (`base` left, `after` right), both sides interactive. |
+| **add** | Single column (`after` only), annotatable on the after side (`L`). |
+| **delete** | Single column (`base` only), annotatable on the base side (`D`). |
+| **unchanged** (plain blob) | Standalone editor, annotatable on the after side (`L`). |
 
-- Only visible for changed files (`action: "change"`).
-- Added files (`action: "add"`) show only "File" mode.
-- Deleted files (`action: "delete"`) show only "File" mode (old content, read-only).
-- Decoration highlights (background tint and colored bar) for suggestions and annotations are visible in **File** mode only. Diff modes (Inline, Side-by-Side) show no decorations.
-- Both diff modes are fully read-only (see Section 3.5).
+- Only a genuine change with differing content renders two panes; add-only,
+  delete-only, and unchanged render one column (via `renderSideBySide: false`).
+- Decoration highlights (background tint and colored bar) for suggestions and
+  annotations are visible in every case, on whichever side(s) the diff lines occupy
+  (see §3.3.1).
+- The editor is fully read-only apart from selection and the "Mark selection" action
+  (see §3.5).
 
 ---
 
@@ -486,7 +525,7 @@ Three modes via segmented control in the editor navigation bar:
 ### 9.1 Dependencies
 
 - **React** (TypeScript) as UI framework.
-- **Monaco Editor** (`@monaco-editor/react`) for code view and diff rendering. Syntax highlighting for TypeScript, JavaScript, and Python. Inline and side-by-side diff. Gutter decorations for annotations. Monaco is a text editor; binary files are detected by extension and shown as a non-viewable placeholder (see §1.6.3).
+- **Monaco Editor** (`@monaco-editor/react`) for code view and diff rendering. Syntax highlighting for TypeScript, JavaScript, and Python. Side-by-side diff for changed files; a standalone editor for single-column (add/delete/unchanged) files. Gutter decorations for annotations. Monaco is a text editor; binary files are detected by extension and shown as a non-viewable placeholder (see §1.6.3).
 - **MUI Tree View** (`@mui/x-tree-view`) for the file tree.
 - Data is loaded at runtime from the provided JSON URL. Blob contents are lazy-loaded via HTTP GET.
 - State management within the component (React state). Persistence is not part of the component and is handled externally.
@@ -525,7 +564,8 @@ The entire component lives in a **dedicated directory** within the parent projec
 The component is split into three layers:
 
 **Pure logic modules** (`src/lib/`) — No React, no DOM. Fully testable with Vitest:
-- **`selection.ts`** — Core event log. Tracks explicit annotator decisions (accept, reject, reset) and manual annotations as an ordered event sequence. `project()` is a fold over this log — overlap detection, interval merging, and status derivation (Section 5.3, 5.4) happen there. Removing an annotation removes its event from the log and re-folds.
+- **`selection.ts`** — Core event log, operating purely in **diff-line coordinates** (a single `1..N` axis; see `diff.ts`). Tracks explicit annotator decisions (accept, reject, reset) and manual annotations as an ordered event sequence. `project()` is a fold over this log — overlap detection, interval merging, and status derivation (Section 5.3, 5.4) happen there. Removing an annotation removes its event from the log and re-folds. One `selection.ts` instance exists per open file; the sidebar keeps its own flat state rather than binding directly to the selection.
+- **`diff.ts`** — `DiffMap`, built once per diff from Monaco's line changes. Maps between the base/after editor coordinates and one continuous diff-line axis (`toDiff(line, side)` ↔ `fromDiff(diff)`). Context/edit lines carry both a base and an after line; pure additions carry only after, pure deletions only base. This is the only place base/after meet the diff axis; the selection core never sees base/after directly.
 - **`tree.ts`** — Transforms the flat `changes` map into a hierarchical tree structure for MUI Tree View. Handles filtering (changed-only vs. all), detects action types (add, delete, change, unchanged), computes parent directories.
 - **`blob.ts`** — Resolves blob SHAs to URLs relative to the JSON source URL. Caching is delegated to the browser HTTP cache (blobs are content-addressed by SHA, so URLs are stable and cache-friendly).
 - **`interval.ts`** — Half-open interval operations: merge, union, overlap detection, containment checks.
@@ -536,7 +576,7 @@ The component is split into three layers:
 
 **React components** (`src/components/`) — Thin UI layer using Monaco and MUI:
 - Sidebar (commit list, file tree, annotations list).
-- Editor (Monaco wrapper, diff modes, inline suggestion actions, gutter selection).
+- Editor (Monaco wrapper, side-by-side/standalone rendering, inline suggestion actions, gutter selection).
 - These consume the hooks and render. **No annotation logic in components.** Components receive intervals from `selection.ts` and render them directly — they must not derive, filter, or recompute which intervals to show. All decisions about what is blocked, absorbed, merged, or suppressed live exclusively in `selection.ts`.
 
 ### 9.4 Build System: Vite
@@ -576,16 +616,16 @@ Two test layers, both executable headless (`npm test`):
 
 **Playwright (E2E tests)** — Rendered UI in headless Chromium:
 - Static test fixtures in `tests/fixtures/` for lightweight scenarios.
-- **Lightweight scenario:** Small fixture (few files, few targets). Tests the happy path: loading, navigation, diff modes, annotation interactions, change event dispatch.
+- **Lightweight scenario:** Small fixture (few files, few targets). Tests the happy path: loading, navigation, diff rendering, annotation interactions, change event dispatch.
 - **Heavy scenario:** Fixtures are **generated at test runtime** (not stored on disk). A generator function creates a `meta.json` and in-memory blob responses simulating large repositories (e.g., 500 files per target, 10 targets). Served via a local test server in the Playwright setup. Tests:
   - Initial load time with lazy blob loading.
   - Tree rendering with thousands of entries.
   - File switch latency with Monaco.
   - Memory via CDP (`page.context().newCDPSession()`).
 - **Diff scenarios:** Fixtures for each action type:
-  - `action: "change"` — All three diff modes work.
-  - `action: "add"` — Only File mode, no diff.
-  - `action: "delete"` — Read-only old content, no annotations allowed.
+  - `action: "change"` — Side-by-side diff, both sides interactive.
+  - `action: "add"` — Single column (`after`), annotatable on the after side.
+  - `action: "delete"` — Single column (`base`), annotatable on the base side (`D` reference).
 - **Annotation scenarios:** See table below. Each scenario covers three verification dimensions: **navigation** (sidebar reflects state), **event** (change event is correct), **editor display** (decorations and widgets are correct). All three are checked per scenario where applicable. Tests use real UI interaction — lightbulb → code action — not programmatic command triggers, except where noted.
 
 **Annotation acceptance test matrix**
@@ -702,24 +742,22 @@ Format:
   {
     "sha": "<sha>",
     "path": "<path>",
-    "lines": [10, 15]
+    "lines": [10, 15],
+    "side": "after"
   },
   {
     "sha": "<sha>",
     "path": "<path>",
-    "lines": [22, 26]
-  },
-  {
-    "sha": "<sha>",
-    "path": "<path>",
-    "lines": [3, 8]
+    "lines": [22, 26],
+    "side": "base"
   }
 ]
 ```
 
 - **`sha`** — The commit the annotation refers to (from `targets[].sha`).
-- **`path`** — File path within the commit.
-- **`lines`** — A single half-open line range `[start, end)`. Touching and overlapping ranges are always fused; disjoint ranges yield separate objects.
+- **`path`** — File path within the commit (the plain path; the side is a separate field).
+- **`lines`** — A single half-open line range `[start, end)` on the given `side`. Touching and overlapping ranges are always fused; disjoint ranges yield separate objects.
+- **`side`** (`"base"` | `"after"`) — Which diff side the `lines` refer to. `"after"` = right/added lines (`L`); `"base"` = left/deleted lines (`D`). Base and after markings are independent and never merged with each other.
 
 Entries are one per contiguous range. When a suggestion is accepted, its range appears as an object. When reset, it disappears. Manual annotations appear likewise. There is no distinction by origin.
 
@@ -739,7 +777,7 @@ The event contains the full current state (as described in 10.1). The consumer a
 <code-annotation src="..." id="av"></code-annotation>
 <script>
 document.getElementById("av").addEventListener("change", (e) => {
-  // e.detail: Array<{ sha, path, lines }>
+  // e.detail: Array<{ sha, path, lines, side }>
   console.log(e.detail);
 });
 </script>

@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { SimpleTreeView, TreeItem } from "@mui/x-tree-view";
-import type { Data, Commit, Target } from "../types/index.js";
-import type { Selection } from "../lib/selection.js";
+import type { Data, Commit, Target } from "../hooks/data.js";
+import type { Side } from "../lib/diff.js";
+import type { ListItem } from "../lib/listing.js";
 import { Tree } from "../lib/tree.js";
 import type { Node } from "../lib/tree.js";
 
@@ -498,22 +499,55 @@ function SelectionItem({
   );
 }
 
+// Whether a path is shown as a diff (change/add/delete) rather than a plain unchanged
+// file. Derived straight from the meta: a change entry that is a bare blob string or has
+// action "unchanged" is not a diff.
+function isDiffPath(data: Data, sha: string, path: string): boolean {
+  const commit =
+    data.context.sha === sha
+      ? data.context
+      : (data.targets ?? []).find((t) => t.sha === sha);
+  const c = commit?.changes[path];
+  return c !== undefined && typeof c !== "string" && c.action !== "unchanged";
+}
+
+// The line label for a list entry, in GitHub review notation. For a diff each bound
+// carries its side — R = right (after), L = left (base); for an unchanged file the
+// numbers are shown bare. `end` is half-open internally, so the displayed range is
+// closed (last inclusive line). A single line shows no range.
+function label(item: ListItem, data: Data): string {
+  const pre = isDiffPath(data, item.sha, item.path)
+    ? item.side === "base"
+      ? "L"
+      : "R"
+    : "";
+  const last = item.end - 1;
+  const range =
+    item.line === last
+      ? `${pre}${item.line}`
+      : `${pre}${item.line}–${pre}${last}`;
+  return `${item.path} ${range}`;
+}
+
 function Annotations({
-  state,
+  list,
+  data,
   onSuggestion,
   onAnnotation,
 }: {
-  state: Selection;
-  onSuggestion(sha: string, path: string, line: number): void;
-  onAnnotation(sha: string, path: string, line: number): void;
+  list: ListItem[];
+  data: Data;
+  onSuggestion(sha: string, path: string, line: number, side: Side): void;
+  onAnnotation(sha: string, path: string, line: number, side: Side): void;
 }) {
+  const suggestions = list.filter(
+    (a) => a.origin === "suggestion" && a.status !== "absorbed",
+  );
+  const manuals = list.filter((a) => a.origin === "manual");
   return (
     <div>
       <div style={{ paddingBottom: 8 }}>
-        {state
-          .project()
-          .filter((a) => a.origin === "suggestion" && a.status !== "absorbed")
-          .length > 0 && (
+        {suggestions.length > 0 && (
           <>
             <div
               data-section="suggestions"
@@ -527,27 +561,24 @@ function Annotations({
             >
               Suggestions
             </div>
-            {state
-              .project()
-              .filter((a) => a.origin === "suggestion" && a.status !== "absorbed")
-              .map((a) => (
-                <SelectionItem
-                  key={a.identifier}
-                  labelColor={
-                    a.status === "pending"
-                      ? "var(--av-pending)"
-                      : a.status === "accepted"
-                        ? "var(--av-accepted)"
-                        : "var(--av-muted)"
-                  }
-                  text={`${a.path} L${a.lines[0]}–${a.lines[1]}`}
-                  faded={a.status === "rejected" || a.status === "absorbed"}
-                  onClick={() => onSuggestion(a.sha, a.path, a.lines[0] ?? 1)}
-                />
-              ))}
+            {suggestions.map((a) => (
+              <SelectionItem
+                key={a.identifier}
+                labelColor={
+                  a.status === "pending"
+                    ? "var(--av-pending)"
+                    : a.status === "accepted"
+                      ? "var(--av-accepted)"
+                      : "var(--av-muted)"
+                }
+                text={label(a, data)}
+                faded={a.status === "rejected" || a.status === "absorbed"}
+                onClick={() => onSuggestion(a.sha, a.path, a.line, a.side)}
+              />
+            ))}
           </>
         )}
-        {state.project().filter((a) => a.origin === "manual").length > 0 && (
+        {manuals.length > 0 && (
           <>
             <div
               style={{
@@ -560,20 +591,17 @@ function Annotations({
             >
               Manual
             </div>
-            {state
-              .project()
-              .filter((a) => a.origin === "manual")
-              .map((a) => (
-                <SelectionItem
-                  key={a.identifier}
-                  labelColor="var(--av-annotator)"
-                  text={`${a.path} L${a.lines[0]}–${a.lines[1]}`}
-                  onClick={() => onAnnotation(a.sha, a.path, a.lines[0] ?? 1)}
-                />
-              ))}
+            {manuals.map((a) => (
+              <SelectionItem
+                key={a.identifier}
+                labelColor="var(--av-annotator)"
+                text={label(a, data)}
+                onClick={() => onAnnotation(a.sha, a.path, a.line, a.side)}
+              />
+            ))}
           </>
         )}
-        {state.project().length === 0 && (
+        {list.length === 0 && (
           <div
             style={{
               padding: "12px 16px",
@@ -634,20 +662,20 @@ function CommitsSection({
 
 export interface Properties {
   data: Data;
-  state: Selection;
+  list: ListItem[];
   activeSha: string | null;
   activePath: string | null;
   navigation: number;
   onFile(sha: string, path: string, context: boolean): void;
-  onSuggestion(sha: string, path: string, line: number): void;
-  onAnnotation(sha: string, path: string, line: number): void;
+  onSuggestion(sha: string, path: string, line: number, side: Side): void;
+  onAnnotation(sha: string, path: string, line: number, side: Side): void;
   collapsed: boolean;
   onToggle(): void;
 }
 
 export function Sidebar({
   data,
-  state,
+  list,
   activeSha,
   activePath,
   navigation,
@@ -818,7 +846,8 @@ export function Sidebar({
             </div>
             <div style={{ overflowY: "auto", flex: 1, minHeight: 0 }}>
               <Annotations
-                state={state}
+                list={list}
+                data={data}
                 onSuggestion={onSuggestion}
                 onAnnotation={onAnnotation}
               />

@@ -73,19 +73,28 @@ export class Annotate {
   /**
    * Marks lines in the active editor via the av.mark command.
    */
-  static async mark(page: Page, start: number, end: number): Promise<void> {
+  static async mark(
+    page: Page,
+    start: number,
+    end: number,
+    side: "base" | "after" = "after",
+  ): Promise<void> {
     await page.evaluate(
-      ([startLine, endLine]) => {
+      ([startLine, endLine, markSide]) => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
         const container = Array.from(root?.querySelectorAll("*") ?? []).find(
           (element) => (element as any).annotation,
         ) as any;
         if (!container) throw new Error("no editor");
-        const { editor, monaco } = container.annotation;
-        editor.setSelection(new monaco.Range(startLine, 1, endLine, 1));
-        editor.trigger("test", "av.mark", { start: startLine, end: endLine });
+        // The bridge selects the lines on the right side's editor and runs the mark
+        // command — the exact path a user takes.
+        container.annotation.mark(
+          startLine as number,
+          endLine as number,
+          markSide as "base" | "after",
+        );
       },
-      [start, end] as [number, number],
+      [start, end, side] as [number, number, "base" | "after"],
     );
   }
 
@@ -103,7 +112,8 @@ export class Annotate {
       ) as any;
       if (!container) throw new Error("no editor container");
       const { editor, locals } = container.annotation;
-      const identifier = locals?.current?.find(
+      // locals.current is the flat diff-line annotation list.
+      const identifier = (locals?.current ?? []).find(
         (a: any) => a.origin === "suggestion",
       )?.identifier;
       if (!identifier) throw new Error("no suggestion identifier");
@@ -122,7 +132,7 @@ export class Annotate {
       ) as any;
       if (!container) throw new Error("no editor container");
       const { editor, projection } = container.annotation;
-      const identifier = projection?.current?.find(
+      const identifier = (projection?.current ?? []).find(
         (a: any) => a.origin === "manual",
       )?.identifier;
       if (!identifier) throw new Error("no manual identifier");

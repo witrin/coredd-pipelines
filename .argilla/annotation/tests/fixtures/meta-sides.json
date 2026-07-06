@@ -1,0 +1,49 @@
+{
+  "repository": "demo/repo",
+  "model": "benchmark",
+  "context": {
+    "sha": "ctx",
+    "author": "demo",
+    "message": "context commit",
+    "time": "2025-09-15T10:00:00+00:00",
+    "labels": ["correction"],
+    "changes": {
+      "src/edit.ts": { "action": "change", "source": "s-base.txt", "target": "s-after.txt" }
+    }
+  },
+  "targets": [
+    {
+      "sha": "tgt",
+      "author": "demo",
+      "message": "four kinds",
+      "time": "2025-09-22T12:00:00+00:00",
+      "labels": ["defect"],
+      "changes": {
+        "src/edit.ts": { "action": "change", "source": "s-base.txt", "target": "s-after.txt" },
+        "src/added.ts": { "action": "add", "target": "s-add.txt" },
+        "src/deleted.ts": { "action": "delete", "source": "s-del.txt" },
+        "src/mixed.ts": { "action": "change", "source": "s-mixed-base.txt", "target": "s-mixed-after.txt" }
+      },
+      "annotations": [
+        {
+          "path": "src/edit.ts",
+          "lines": [{ "line": 2 }, { "line": 3 }],
+          "description": "context+edit suggestion (both sides)"
+        },
+        {
+          "path": "src/added.ts",
+          "lines": [{ "line": 2 }, { "line": 3 }],
+          "description": "addition suggestion (after only)"
+        },
+        {
+          "path": "src/deleted.ts",
+          "lines": [
+            { "line": 2, "side": "base" },
+            { "line": 3, "side": "base" }
+          ],
+          "description": "deletion suggestion (base only)"
+        }
+      ]
+    }
+  ]
+}

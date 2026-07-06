@@ -49,50 +49,37 @@ export class Navigate {
   /**
    * Opens bar.ts by clicking it in the tree and waiting for Monaco to mount.
    *
-   * Changed files open in the inline diff by default. Since most tests interact
-   * with the file editor (marking, code lenses, full decorations), this switches
-   * to the File view when the mode selector is present, then waits for the file
-   * editor. Unchanged files have no selector and mount the file editor directly.
+   * There is no diff-mode switcher: a changed path always mounts a side-by-side
+   * diff, an unchanged path a standalone editor. In both cases the bridge's
+   * `editor` getter yields the currently-visible annotatable editor (the
+   * modified/after side in a diff), so this waits until that editor is actually
+   * laid out — the standalone/original editors may report width before the
+   * annotatable side finishes its layout.
    */
   static async openFile(page: Page, name = "bar.ts"): Promise<void> {
     await page.click(`code-annotation >> span:text('${name}')`);
-    await Navigate.showFileView(page);
     await page.waitForFunction(() => {
       const root = document.querySelector("code-annotation")?.shadowRoot;
-      // The file editor carries the `annotation` test handle; the hidden diff
-      // editor (display:none) never carries it. Wait for that editor to be laid
-      // out and visible so tests interacting with it do not race the switch.
       const container = Array.from(root?.querySelectorAll("*") ?? []).find(
         (element) => (element as any).annotation,
-      ) as HTMLElement | null;
-      const editor = container?.querySelector(
-        ".monaco-editor",
-      ) as HTMLElement | null;
-      if (!editor) return false;
-      return editor.getBoundingClientRect().width > 100;
+      ) as any;
+      const node = container?.annotation?.editor?.getDomNode() as
+        | HTMLElement
+        | null
+        | undefined;
+      if (!node) return false;
+      return node.getBoundingClientRect().width > 100;
     });
   }
 
   /**
-   * Switches to the File view if the mode selector is present. A no-op for
-   * unchanged files, which mount the file editor directly. Waits for the File
-   * button to appear so a click is not missed on a slow render.
+   * Retained for compatibility. There is only the side-by-side diff view now, so
+   * this is a no-op that simply waits for the editor to be present.
    */
   static async showFileView(page: Page): Promise<void> {
     await page.waitForFunction(() => {
       const root = document.querySelector("code-annotation")?.shadowRoot;
-      const editor = root?.querySelector(".monaco-editor");
-      const buttons = Array.from(root?.querySelectorAll("button") ?? []);
-      return !!editor || buttons.some((b) => b.textContent === "File");
-    });
-    await page.evaluate(() => {
-      const root = document.querySelector("code-annotation")?.shadowRoot;
-      for (const button of Array.from(root?.querySelectorAll("button") ?? [])) {
-        if (button.textContent === "File") {
-          (button as HTMLButtonElement).click();
-          return;
-        }
-      }
+      return !!root?.querySelector(".monaco-editor");
     });
   }
 
@@ -164,31 +151,5 @@ export class Navigate {
       }
       return null;
     }, label);
-  }
-
-  /**
-   * Switches the editor to the specified diff mode label.
-   */
-  static async switchDiffMode(page: Page, label: string): Promise<void> {
-    await page.evaluate((text) => {
-      const root = document.querySelector("code-annotation")?.shadowRoot;
-      for (const button of Array.from(root?.querySelectorAll("button") ?? [])) {
-        if (button.textContent === text) {
-          (button as HTMLButtonElement).click();
-          return;
-        }
-      }
-    }, label);
-    await page.waitForFunction(
-      () => {
-        const root = document.querySelector("code-annotation")?.shadowRoot;
-        return (
-          (root?.querySelector(".monaco-diff-editor") as HTMLElement | null) !==
-          null
-        );
-      },
-      undefined,
-      { timeout: 5000 },
-    );
   }
 }

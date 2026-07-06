@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { Tree } from "../../src/lib/tree.js";
-import type { Change } from "../../src/types/index.js";
+import type { Change } from "../../src/hooks/data.js";
 import { TreeTraversal } from "./tree.js";
 
 describe("Tree.action()", () => {

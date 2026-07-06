@@ -1,0 +1,13 @@
+import logging
+
+log = logging.getLogger(__name__)
+
+
+def handle(request, store):
+    payload = request.json()
+    store.begin()
+    store.write(payload)
+    store.flush()
+    record = store.commit()
+    log.info("stored %s", record.id)
+    return record

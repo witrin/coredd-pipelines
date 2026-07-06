@@ -238,7 +238,7 @@ test.describe("Selection interactions", () => {
           (element) => (element as any).annotation,
         ) as any;
         return (
-          container?.annotation?.projection?.current?.filter(
+          (container?.annotation?.projection?.current ?? []).filter(
             (a: any) => a.origin === "manual",
           ).length ?? 0
         );
@@ -260,7 +260,7 @@ test.describe("Selection interactions", () => {
           (element) => (element as any).annotation,
         ) as any;
         return (
-          container?.annotation?.projection?.current?.filter(
+          (container?.annotation?.projection?.current ?? []).filter(
             (a: any) => a.origin === "manual",
           ).length ?? 0
         );
@@ -302,7 +302,7 @@ test.describe("Selection interactions", () => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
         return Array.from(root?.querySelectorAll(".av-row") ?? [])
           .map((element) => (element as HTMLElement).innerText?.trim())
-          .filter((t) => t.includes("bar.ts") && t.includes("L3"));
+          .filter((t) => t.includes("bar.ts") && t.includes("R3"));
       });
       expect(visibleEntries).toHaveLength(1);
 
@@ -359,7 +359,7 @@ test.describe("Selection interactions", () => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
         return Array.from(root?.querySelectorAll(".av-row") ?? [])
           .map((element) => (element as HTMLElement).innerText?.trim())
-          .filter((t) => t.includes("bar.ts") && t.includes("L3"));
+          .filter((t) => t.includes("bar.ts") && t.includes("R3"));
       });
       expect(visibleEntries).toHaveLength(1);
 
@@ -492,7 +492,9 @@ test.describe("Selection interactions", () => {
           root?.querySelectorAll(".codelens-decoration a") ?? [],
         ).map((a) => a.textContent);
       });
-      expect(links).toEqual(["Remove"]);
+      // bar.ts (foo.txt→bar.txt) differs only on line 4, so lines 3-6 are context:
+      // the absorbing manual carries the Remove lens on both the base and after side.
+      expect(links).toEqual(["Remove", "Remove"]);
     });
   });
 
@@ -539,7 +541,7 @@ test.describe("Selection interactions", () => {
           (element) => (element as any).annotation,
         ) as any;
         return (
-          container?.annotation?.projection?.current?.filter(
+          (container?.annotation?.projection?.current ?? []).filter(
             (a: any) => a.origin === "manual",
           ).length ?? 0
         );
@@ -633,7 +635,9 @@ test.describe("Selection interactions", () => {
         return !!container?.annotation?.editor;
       });
       await Annotate.clear(page);
-      await Annotate.mark(page, 2, 4);
+      // qux.ts is a single-line add: line 1 carries the only content, so the
+      // selection must span 1..2 to be non-empty on the after side.
+      await Annotate.mark(page, 1, 2);
       await Annotate.wait(page);
       const detail = await Annotate.last(page);
       expect(detail).toHaveLength(1);
@@ -697,49 +701,15 @@ test.describe("Selection interactions", () => {
     });
   });
 
-  test.describe("when switching between file and diff modes", () => {
-    test("manual decoration and badge survive a round-trip through diff mode", async ({
+  test.describe("when marking in the side-by-side diff", () => {
+    test("manual decoration and badge are visible in the diff editor", async ({
       page,
     }) => {
       await Annotate.mark(page, 7, 9);
       await Annotate.wait(page);
 
-      await page.evaluate(() => {
-        const root = document.querySelector("code-annotation")?.shadowRoot;
-        for (const button of Array.from(
-          root?.querySelectorAll("button") ?? [],
-        )) {
-          if (button.textContent === "Inline") {
-            (button as HTMLButtonElement).click();
-            return;
-          }
-        }
-      });
-      // The diff editor is created once and toggled via display, so its presence
-      // in the DOM is not a mode signal; wait until it is actually visible.
-      await page.waitForFunction(() => {
-        const root = document.querySelector("code-annotation")?.shadowRoot;
-        const diff = root?.querySelector(
-          ".monaco-diff-editor",
-        ) as HTMLElement | null;
-        return !!diff && diff.getBoundingClientRect().width > 100;
-      });
-
-      await page.evaluate(() => {
-        const root = document.querySelector("code-annotation")?.shadowRoot;
-        for (const button of Array.from(
-          root?.querySelectorAll("button") ?? [],
-        )) {
-          if (button.textContent === "File") {
-            (button as HTMLButtonElement).click();
-            return;
-          }
-        }
-      });
-
-      // The glyph bar renders in both diff and file modes, so it is not a signal
-      // that the file view has re-decorated; wait for the file-only background,
-      // which confirms the round-trip back to the file editor completed.
+      // A changed path always renders side-by-side; the manual mark must produce
+      // both the background decoration and the glyph on the annotatable side.
       await page.waitForFunction(() => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
         return (root?.querySelectorAll(".av-bg-annotation").length ?? 0) > 0;
@@ -829,26 +799,10 @@ test.describe("Selection interactions", () => {
     });
   });
 
-  test.describe("when switching to diff mode then to a different file", () => {
-    test("manual selection on second file is visible in editor after diff-mode switch", async ({
+  test.describe("when switching to a different file", () => {
+    test("manual selection on second file is visible in editor", async ({
       page,
     }) => {
-      await page.evaluate(() => {
-        const root = document.querySelector("code-annotation")?.shadowRoot;
-        for (const button of Array.from(
-          root?.querySelectorAll("button") ?? [],
-        )) {
-          if (button.textContent === "Inline") {
-            (button as HTMLButtonElement).click();
-            return;
-          }
-        }
-      });
-      await page.waitForFunction(() => {
-        const root = document.querySelector("code-annotation")?.shadowRoot;
-        return !!root?.querySelector(".monaco-diff-editor");
-      });
-
       await page.click("code-annotation >> span:text('qux.ts')");
       await shadowText(page, "src/qux.ts");
       await page.waitForFunction(() => {
@@ -860,7 +814,9 @@ test.describe("Selection interactions", () => {
       });
 
       await Annotate.clear(page);
-      await Annotate.mark(page, 2, 4);
+      // qux.ts is a single-line add: line 1 carries the only content, so the
+      // selection must span 1..2 to be non-empty on the after side.
+      await Annotate.mark(page, 1, 2);
       await Annotate.wait(page);
 
       const detail = await Annotate.last(page);
@@ -915,7 +871,7 @@ test.describe("Selection interactions", () => {
         for (const element of Array.from(
           root?.querySelectorAll(".av-row") ?? [],
         )) {
-          if ((element as HTMLElement).innerText?.includes("src/bar.ts L3")) {
+          if ((element as HTMLElement).innerText?.includes("src/bar.ts R3")) {
             (element as HTMLElement).click();
             return;
           }
@@ -951,7 +907,7 @@ test.describe("Selection interactions", () => {
           (element) => (element as any).annotation,
         ) as any;
         return (
-          container?.annotation?.projection?.current?.filter(
+          (container?.annotation?.projection?.current ?? []).filter(
             (a: any) => a.origin === "manual",
           ).length ?? 0
         );
@@ -964,12 +920,12 @@ test.describe("Selection interactions", () => {
           .filter((t) => t.includes("bar.ts"));
       });
       const annotatorEntries = visibleEntries.filter(
-        (t) => t.includes("L1") || t.includes("L7"),
+        (t) => t.includes("R1") || t.includes("R7"),
       );
       expect(annotatorEntries.length).toBeGreaterThanOrEqual(2);
     });
 
-    test("renders two Remove lenses at the two start lines", async ({
+    test("renders a Remove lens on both sides of each of the two passages", async ({
       page,
     }) => {
       await Annotate.mark(page, 1, 2);
@@ -977,13 +933,15 @@ test.describe("Selection interactions", () => {
       await Annotate.clear(page);
       await Annotate.mark(page, 7, 8);
       await Annotate.wait(page);
+      // Lines 1-2 and 7-8 are context in bar.ts, so each manual carries its Remove
+      // lens on both the base and after side: two passages × two sides = four lenses.
       await page.waitForFunction(
         () => {
           const root = document.querySelector("code-annotation")?.shadowRoot;
           return (
             Array.from(
               root?.querySelectorAll(".codelens-decoration a") ?? [],
-            ).filter((a) => a.textContent === "Remove").length === 2
+            ).filter((a) => a.textContent === "Remove").length === 4
           );
         },
         undefined,
@@ -995,7 +953,7 @@ test.describe("Selection interactions", () => {
           root?.querySelectorAll(".codelens-decoration a") ?? [],
         ).filter((a) => a.textContent === "Remove").length;
       });
-      expect(removeCount).toBe(2);
+      expect(removeCount).toBe(4);
     });
 
     test("removing one passage leaves the other intact", async ({ page }) => {
@@ -1004,13 +962,15 @@ test.describe("Selection interactions", () => {
       await Annotate.clear(page);
       await Annotate.mark(page, 7, 8);
       await Annotate.wait(page);
+      // Both passages sit on context lines, so each carries a Remove on the base and
+      // the after side: two passages × two sides = four Remove lenses.
       await page.waitForFunction(
         () => {
           const root = document.querySelector("code-annotation")?.shadowRoot;
           return (
             Array.from(
               root?.querySelectorAll(".codelens-decoration a") ?? [],
-            ).filter((a) => a.textContent === "Remove").length === 2
+            ).filter((a) => a.textContent === "Remove").length === 4
           );
         },
         undefined,
@@ -1021,17 +981,27 @@ test.describe("Selection interactions", () => {
       await Annotate.wait(page);
       const detail = await Annotate.last(page);
       expect(detail).toHaveLength(1);
+      // Each surviving passage is now a cell list; context lines resolve to the after
+      // side. One of the two passages (1-2 or 7-8) remains after removal.
       expect([
-        [1, 3],
-        [7, 9],
+        [
+          { line: 1, side: "after" },
+          { line: 2, side: "after" },
+        ],
+        [
+          { line: 7, side: "after" },
+          { line: 8, side: "after" },
+        ],
       ]).toContainEqual(detail[0].lines);
+      // Removing one passage clears its Remove on both sides, leaving the surviving
+      // passage's two (base + after).
       await page.waitForFunction(
         () => {
           const root = document.querySelector("code-annotation")?.shadowRoot;
           return (
             Array.from(
               root?.querySelectorAll(".codelens-decoration a") ?? [],
-            ).filter((a) => a.textContent === "Remove").length === 1
+            ).filter((a) => a.textContent === "Remove").length === 2
           );
         },
         undefined,
@@ -1052,7 +1022,7 @@ test.describe("Selection interactions", () => {
         for (const element of Array.from(
           root?.querySelectorAll(".av-row") ?? [],
         )) {
-          if ((element as HTMLElement).innerText?.includes("src/bar.ts L3")) {
+          if ((element as HTMLElement).innerText?.includes("src/bar.ts R3")) {
             (element as HTMLElement).click();
             return;
           }

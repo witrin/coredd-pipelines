@@ -1,50 +1,80 @@
 {
-  "repository": "acme/numbers-cli",
-  "model": "claude-sonnet-4-5",
+  "repository": "demo/repo",
+  "model": "benchmark",
   "context": {
-    "sha": "9a1c4f2",
-    "author": "alice",
-    "message": "Tighten CLI loop boundary and parse start index safely",
+    "sha": "a1c4f2e",
+    "author": "demo",
+    "message": "correction: tighten processing and validation",
     "time": "2025-09-15T10:00:00+00:00",
     "labels": ["correction"],
     "changes": {
-      "src/util.ts": "baz.txt",
-      "src/cli.ts": {
+      "src/pipeline.py": {
         "action": "change",
-        "source": "bar.txt",
-        "target": "foo.txt"
-      }
+        "source": "ctx-base.txt",
+        "target": "ctx-after.txt"
+      },
+      "src/config.py": "unchanged.txt"
     }
   },
   "targets": [
     {
       "sha": "d3e7b81",
-      "author": "bob",
-      "message": "Refactor CLI runner before next release",
+      "author": "demo",
+      "message": "defect: four kinds of change",
       "time": "2025-09-22T12:00:00+00:00",
       "labels": ["defect"],
       "changes": {
-        "src/util.ts": "baz.txt",
-        "src/cli.ts": {
+        "src/pipeline.py": {
           "action": "change",
-          "source": "foo.txt",
-          "target": "bar.txt"
+          "source": "ctx-base.txt",
+          "target": "ctx-after.txt"
         },
-        "src/version.ts": {
+        "src/metrics.py": {
           "action": "add",
-          "target": "qux.txt"
-        }
+          "target": "addonly.txt"
+        },
+        "src/legacy.py": {
+          "action": "delete",
+          "source": "delonly.txt"
+        },
+        "src/handlers.py": {
+          "action": "change",
+          "source": "edit-base.txt",
+          "target": "edit-after.txt"
+        },
+        "src/config.py": "unchanged.txt"
       },
       "annotations": [
         {
-          "path": "src/cli.ts",
-          "lines": [5, 6],
-          "description": "Loop boundary is inclusive; the loop runs 11 times instead of 10."
+          "path": "src/pipeline.py",
+          "lines": [{ "line": 9 }, { "line": 10 }],
+          "description": "edit: divides by count without guarding zero (context suggestion, both sides)"
         },
         {
-          "path": "src/cli.ts",
-          "lines": [7, 8],
-          "description": "Logging inside a tight loop may slow large runs. Consider buffering output."
+          "path": "src/metrics.py",
+          "lines": [{ "line": 12 }, { "line": 13 }, { "line": 14 }],
+          "description": "added rolling-average helper (after side only)"
+        },
+        {
+          "path": "src/legacy.py",
+          "lines": [
+            { "line": 6, "side": "base" },
+            { "line": 7, "side": "base" },
+            { "line": 8, "side": "base" },
+            { "line": 9, "side": "base" },
+            { "line": 10, "side": "base" },
+            { "line": 11, "side": "base" }
+          ],
+          "description": "removed dead retry loop (base side only, delete-only file)"
+        },
+        {
+          "path": "src/handlers.py",
+          "lines": [
+            { "line": 8, "side": "base" },
+            { "line": 9, "side": "base" },
+            { "line": 10, "side": "base" }
+          ],
+          "description": "removed the unconditional flush block (deleted lines, base)"
         }
       ]
     }

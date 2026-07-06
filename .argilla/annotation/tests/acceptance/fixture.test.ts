@@ -26,7 +26,7 @@ test.describe("fixture selections", () => {
   test("suggestions section is visible", async ({ page }) => {
     await setSrc(page, "/tests/fixtures/meta.json");
     await shadowText(page, "Suggestions");
-    await shadowText(page, "src/bar.ts L3");
+    await shadowText(page, "src/bar.ts R3");
   });
 });
 

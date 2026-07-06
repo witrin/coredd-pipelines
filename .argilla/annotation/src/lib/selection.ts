@@ -1,5 +1,34 @@
-import type { Interval, Annotation, Status, Origin } from "../types/index.js";
+import type { Interval } from "./interval.js";
 import { Intervals } from "./interval.js";
+
+/**
+ * The origin of an annotation: model-generated suggestion or annotator-created.
+ */
+export type Origin = "suggestion" | "manual";
+
+/**
+ * The lifecycle status of an annotation.
+ * blocked: suggestion suppressed by an overlapping manual (actions hidden, no output contribution).
+ */
+export type Status =
+  | "pending"
+  | "accepted"
+  | "rejected"
+  | "blocked"
+  | "absorbed";
+
+/**
+ * A single annotation in the runtime state.
+ */
+export interface Annotation {
+  identifier: string;
+  sha: string;
+  path: string;
+  lines: Interval;
+  origin: Origin;
+  status: Status;
+  description: string;
+}
 
 type DecisionEvent = {
     type: "accept" | "reject" | "reset";
@@ -47,8 +76,40 @@ type Group = {
 export class Selection {
     #counter = 0;
 
-    #next(): string {
-        return String(++this.#counter);
+    // A short, stable identifier. Given a value (a suggestion's sha/path/lines) it is a
+    // deterministic hash of that value — the same suggestion yields the same id across
+    // instances and reloads, so per-file selections never collide. Without a value (a
+    // manual mark) it hashes a monotonic key built by string-concatenating a timestamp
+    // and the counter, so marks made in the same millisecond still differ. The id is
+    // opaque: only compared and looked up, never parsed or used arithmetically.
+    #next(value?: unknown): string {
+        const basis =
+            value !== undefined
+                ? Selection.#stable(value)
+                : Date.now().toString() + "-" + String(++this.#counter);
+        return Selection.#hash(basis);
+    }
+
+    // A stable JSON string: object keys sorted so the same value always serializes the
+    // same way regardless of property order.
+    static #stable(value: unknown): string {
+        return JSON.stringify(value, (_key, val) =>
+            val && typeof val === "object" && !Array.isArray(val)
+                ? Object.fromEntries(
+                      Object.entries(val).sort(([a], [b]) => (a < b ? -1 : 1)),
+                  )
+                : val,
+        );
+    }
+
+    // A short 8-char hex hash (FNV-1a) of the basis string.
+    static #hash(basis: string): string {
+        let h = 0x811c9dc5;
+        for (let i = 0; i < basis.length; i++) {
+            h ^= basis.charCodeAt(i);
+            h = Math.imul(h, 0x01000193);
+        }
+        return (h >>> 0).toString(16).padStart(8, "0");
     }
 
     #suggestions: Annotation[];
@@ -66,7 +127,11 @@ export class Selection {
     ) {
         this.#suggestions = items.map((item) => ({
             ...item,
-            identifier: this.#next(),
+            identifier: this.#next({
+                sha: item.sha,
+                path: item.path,
+                lines: item.lines,
+            }),
             origin: "suggestion" as Origin,
             status: "pending" as Status,
         }));

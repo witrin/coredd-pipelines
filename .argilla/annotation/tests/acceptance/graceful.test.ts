@@ -60,6 +60,8 @@ test.describe("read-only mode — no targets", () => {
         const value = await page.evaluate(() => {
           return (document.querySelector("code-annotation") as any)?.value;
         });
+        // The state is now the single Selection checkpoint (one event log), so an
+        // empty record is an empty event log rather than an empty per-file map.
         expect(value).toEqual({
           state: { events: [], counter: 0 },
           annotation: [],

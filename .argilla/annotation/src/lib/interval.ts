@@ -1,4 +1,7 @@
-import type { Interval } from "../types/index.js";
+/**
+ * Half-open line range [start, end) where start is inclusive and end is exclusive, 1-based.
+ */
+export type Interval = [number, number];
 
 /**
  * Utility class for half-open interval arithmetic.

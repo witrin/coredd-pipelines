@@ -1,0 +1,19 @@
+import statistics
+from dataclasses import dataclass
+
+
+@dataclass
+class Sample:
+    label: str
+    values: list[float]
+
+    def mean(self):
+        return sum(self.values) / len(self.values)
+
+
+def summarize(samples):
+    rows = []
+    for sample in samples:
+        rows.append((sample.label, sample.mean()))
+    rows.sort(key=lambda row: row[1], reverse=True)
+    return rows

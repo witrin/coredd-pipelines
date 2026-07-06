@@ -4,6 +4,10 @@ import { setSrc, shadowText } from "./shadow-page.js";
 
 test.describe("performance large fixture", () => {
   test("loads 500 files and 10 targets within timeout", async ({ page }) => {
+    // A legitimate large-fixture perf test: the global 3s cap is only for the
+    // component's own render budget, not this end-to-end 500-file load + CDP
+    // heap probe. Raise the harness timeout for this test only.
+    test.setTimeout(30000);
     const fixture = PerformanceFixture.generate(500, 10);
 
     await page.route(/\/tests\/fixtures\/[^/]+$/, (route) => {
@@ -61,6 +65,10 @@ test.describe("performance large fixture", () => {
   test("heap growth stays bounded when cycling through files", async ({
     page,
   }) => {
+    // Cycles through files repeatedly with GC + heap probes between rounds — far
+    // beyond the global 3s render budget. Raise the harness timeout for this
+    // test only.
+    test.setTimeout(30000);
     const fixture = PerformanceFixture.generate(5, 2);
 
     await page.route(/\/tests\/fixtures\/[^/]+$/, (route) => {

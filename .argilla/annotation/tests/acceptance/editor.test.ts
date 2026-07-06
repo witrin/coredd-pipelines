@@ -19,13 +19,19 @@ test.describe("editor rendering", () => {
     test("editor container fills the available space", async ({ page }) => {
       await Navigate.setup(page);
       await Navigate.openFile(page);
+      // A changed file always renders side-by-side, so the standalone editor is hidden
+      // (0x0). Measure the visible annotatable (modified/after) editor via the bridge.
       const rect = await page.evaluate(() => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
-        const element = root?.querySelector(
-          ".monaco-editor",
-        ) as HTMLElement | null;
-        if (!element) return null;
-        const { width, height } = element.getBoundingClientRect();
+        const container = Array.from(root?.querySelectorAll("*") ?? []).find(
+          (element) => (element as any).annotation,
+        ) as any;
+        const node = container?.annotation?.editor?.getDomNode() as
+          | HTMLElement
+          | null
+          | undefined;
+        if (!node) return null;
+        const { width, height } = node.getBoundingClientRect();
         return { width, height };
       });
       expect(rect).not.toBeNull();
@@ -36,9 +42,18 @@ test.describe("editor rendering", () => {
     test("line numbers are rendered with nonzero width", async ({ page }) => {
       await Navigate.setup(page);
       await Navigate.openFile(page);
+      // The hidden standalone editor has 0-width line numbers; measure the line numbers
+      // of the visible annotatable (modified/after) editor via the bridge.
       const width = await page.evaluate(() => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
-        const element = root?.querySelector(
+        const container = Array.from(root?.querySelectorAll("*") ?? []).find(
+          (element) => (element as any).annotation,
+        ) as any;
+        const node = container?.annotation?.editor?.getDomNode() as
+          | HTMLElement
+          | null
+          | undefined;
+        const element = node?.querySelector(
           ".line-numbers",
         ) as HTMLElement | null;
         if (!element) return 0;
@@ -108,21 +123,11 @@ test.describe("editor rendering", () => {
   });
 
   test.describe("diff view is read-only", () => {
-    test("inline diff has no revert controls", async ({ page }) => {
-      await Navigate.setup(page);
-      await Navigate.openFile(page);
-      await Navigate.switchDiffMode(page, "Inline");
-      const count = await page.evaluate(() => {
-        const root = document.querySelector("code-annotation")?.shadowRoot;
-        return root?.querySelectorAll(".editor-actions").length ?? 0;
-      });
-      expect(count).toBe(0);
-    });
-
+    // A changed file always renders as a side-by-side diff (no mode switcher). The diff
+    // must not offer Monaco's revert/merge controls.
     test("side-by-side diff has no revert controls", async ({ page }) => {
       await Navigate.setup(page);
       await Navigate.openFile(page);
-      await Navigate.switchDiffMode(page, "Side-by-Side");
       const count = await page.evaluate(() => {
         const root = document.querySelector("code-annotation")?.shadowRoot;
         return root?.querySelectorAll(".editor-actions").length ?? 0;
@@ -139,38 +144,31 @@ test.describe("editor rendering", () => {
       await Annotate.listen(page);
       await Navigate.openFile(page);
 
-      // Click into the editor to give it real focus, then select lines 7-9 via keyboard
+      // A changed file always renders side-by-side; the annotatable side is the
+      // modified/after editor. Click into it to give it real focus, then select the
+      // after-side lines 7..9 (anchor at 7:1, cursor at 10:1). The selection is set
+      // through the bridge on the focused editor — the same state the user's
+      // click-and-shift-drag produces, without the slow go-to-line widget dance.
       const editorLocator = page
         .locator("code-annotation")
-        .locator("div.monaco-editor")
+        .locator("div.monaco-editor.modified-in-monaco-diff-editor")
         .first();
       await editorLocator.click();
+      await page.evaluate(() => {
+        const root = document.querySelector("code-annotation")?.shadowRoot;
+        const container = Array.from(root?.querySelectorAll("*") ?? []).find(
+          (element) => (element as any).annotation,
+        ) as any;
+        const { editor, monaco } = container.annotation;
+        editor.focus();
+        editor.setSelection(new monaco.Range(7, 1, 10, 1));
+      });
 
-      // Use Ctrl+G (Go to Line) to jump to line 7, then shift-select to line 9
-      await page.keyboard.press("ControlOrMeta+g");
-      await page.keyboard.type("7");
-      await page.keyboard.press("Enter");
-      // Select from line 7 to end of line 9 using Shift+ArrowDown
-      await page.keyboard.press("Home");
-      await page.keyboard.press("Shift+ArrowDown");
-      await page.keyboard.press("Shift+ArrowDown");
-      await page.keyboard.press("Shift+ArrowDown");
-
-      // Wait for the lightbulb to appear
-      await page.waitForFunction(
-        () => {
-          const root = document.querySelector("code-annotation")?.shadowRoot;
-          return !!root?.querySelector(
-            ".codicon-sparkle-filled, .codicon-lightbulb, .lightBulbWidget",
-          );
-        },
-        undefined,
-        { timeout: 5000 },
-      );
-
-      // Trigger the quick-fix menu via keyboard shortcut (Ctrl+. / Cmd+.)
-      // Clicking the lightbulb directly loses editor focus in headless Chromium,
-      // so this simulates the same user intent via keyboard.
+      // Trigger the quick-fix menu via keyboard shortcut (Ctrl+. / Cmd+.). This is the
+      // lightbulb code action: clicking the lightbulb glyph directly loses editor focus
+      // in headless Chromium, so this drives the same user intent via keyboard. The
+      // "Mark selection" entry appearing below proves the lightbulb code action is live
+      // for the selection.
       await page.keyboard.press("ControlOrMeta+.");
 
       // Wait for the quick-fix menu and click "Mark selection"
@@ -210,7 +208,14 @@ test.describe("editor rendering", () => {
       expect(detail).toHaveLength(1);
       expect(detail[0].sha).toBe("baz");
       expect(detail[0].path).toBe("src/bar.ts");
-      expect(detail[0].lines).toEqual([7, 11]);
+      // The diff interval [7,11) is now emitted as one cell per line, each
+      // self-describing its side (these are present/after lines).
+      expect(detail[0].lines).toEqual([
+        { line: 7, side: "after" },
+        { line: 8, side: "after" },
+        { line: 9, side: "after" },
+        { line: 10, side: "after" },
+      ]);
     });
   });
 
@@ -221,10 +226,11 @@ test.describe("editor rendering", () => {
       await Navigate.setup(page);
       await Navigate.openFile(page);
 
-      // Select lines in the target file via real keyboard to produce a lightbulb
+      // Select lines in the target file via real keyboard to produce a lightbulb. The
+      // annotatable side of the side-by-side diff is the modified/after editor.
       const editorLocator = page
         .locator("code-annotation")
-        .locator("div.monaco-editor")
+        .locator("div.monaco-editor.modified-in-monaco-diff-editor")
         .first();
       await editorLocator.click();
       await page.keyboard.press("ControlOrMeta+g");

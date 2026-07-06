@@ -1,4 +1,4 @@
-import type { Change } from "../types/index.js";
+import type { Change } from "../hooks/data.js";
 
 /**
  * The kind of change a file underwent in a commit.

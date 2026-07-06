@@ -1,9 +1,8 @@
-import { useState, useEffect, useRef } from "react";
-import type { Interval, Change } from "../types/index.js";
-import { Selection } from "../lib/selection.js";
-import { CodeEditor, Callbacks } from "../lib/editor.js";
-
-type Mode = "file" | "inline" | "side";
+import { useEffect, useRef } from "react";
+import type { Change } from "../hooks/data.js";
+import type { Selection } from "../lib/selection.js";
+import type { Side, DiffMaps } from "../lib/diff.js";
+import { FileEditor, DiffEditor, Callbacks } from "../lib/editor.js";
 
 function extension(path: string): string {
   const name = path.split("/").pop() ?? "";
@@ -53,65 +52,20 @@ function viewable(path: string): boolean {
   return !BINARY_EXTENSIONS.has(ext);
 }
 
-function Segment({
-  value,
-  onChange,
-}: {
-  value: Mode;
-  onChange(v: Mode): void;
-}) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        gap: 2,
-        background: "var(--av-border)",
-        borderRadius: 6,
-        padding: 2,
-      }}
-    >
-      {(["file", "inline", "side"] as Mode[]).map((mode) => (
-        <button
-          key={mode}
-          onClick={() => onChange(mode)}
-          style={{
-            padding: "3px 10px",
-            fontSize: 11,
-            border: "none",
-            borderRadius: 4,
-            cursor: "pointer",
-            background: value === mode ? "var(--av-accent)" : "transparent",
-            color: value === mode ? "#fff" : "var(--av-subtext)",
-            fontFamily: "inherit",
-          }}
-        >
-          {mode === "file"
-            ? "File"
-            : mode === "inline"
-              ? "Inline"
-              : "Side-by-Side"}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 export interface Properties {
   sha: string;
   path: string;
   change: string | Change;
   context: boolean;
   blobs: Record<string, string>;
-  failedBlobs: Set<string>;
+  failures: Set<string>;
   load(sha: string): void;
-  state: Selection;
-  accept(identifier: string): void;
-  reject(identifier: string): void;
-  reset(identifier: string): void;
-  add(sha: string, path: string, lines: Interval): void;
-  remove(identifier: string): void;
+  // The one Selection and the shared DiffMaps, both built by Prime at load. Null until
+  // Prime finishes; the editor decorates once they are present.
+  selection: Selection | null;
+  maps: DiffMaps | null;
   repository: string;
-  reveal?: number;
+  reveal?: { line: number; side: Side };
   navigation: number;
   collapsed: boolean;
   onToggle(): void;
@@ -125,14 +79,10 @@ export function Editor({
   change,
   context,
   blobs,
-  failedBlobs,
+  failures,
   load,
-  state,
-  accept,
-  reject,
-  reset,
-  add,
-  remove,
+  selection,
+  maps,
   repository,
   reveal,
   navigation,
@@ -151,22 +101,12 @@ export function Editor({
         : null;
   const action = typeof change === "string" ? "unchanged" : change.action;
   const deleted = action === "delete";
-  const changed = action === "change";
-
-  // Changed files open in the inline diff by default; everything else opens in the
-  // plain file view. The active file is tracked alongside the mode so switching to
-  // another file (without this component unmounting) re-derives the default, while
-  // toggling the mode within a file is preserved. Navigation does not reset the
-  // mode, so a sidebar jump stays in the current diff and scrolls the after side.
-  const [[file, mode], setState] = useState<[string, Mode]>([
-    `${sha}\0${path}`,
-    changed ? "inline" : "file",
-  ]);
-  if (file !== `${sha}\0${path}`)
-    setState([`${sha}\0${path}`, changed ? "inline" : "file"]);
-  const setMode = (next: Mode) => setState([`${sha}\0${path}`, next]);
+  // Any real change (change/add/delete) is shown as a side-by-side diff so both the
+  // deleted (base) and present (after) lines are annotatable. Only an unchanged path
+  // (context view, or a file with no diff) opens the plain standalone editor.
+  const isDiff = action !== "unchanged";
   const containerRef = useRef<HTMLDivElement>(null);
-  const editor = useRef<CodeEditor | null>(null);
+  const editor = useRef<FileEditor | DiffEditor | null>(null);
 
   const isViewable = viewable(path);
 
@@ -179,58 +119,79 @@ export function Editor({
     if (source && blobs[source] === undefined) load(source);
   }, [source, isViewable]);
 
+  // The two diff sides, straight from the source (base) and target (after) blobs. An
+  // add has no source (base empty), a delete has no target (after empty), so the diff
+  // shows the lines as purely added or purely deleted. `content` is the single blob the
+  // standalone (unchanged) editor shows.
+  const baseText = source ? (blobs[source] ?? "") : "";
+  const afterText = target ? (blobs[target] ?? "") : "";
   const content = target
     ? (blobs[target] ?? "")
     : source
       ? (blobs[source] ?? "")
       : "";
-  const original = source ? (blobs[source] ?? "") : "";
 
   const primaryBlob = deleted ? source : target;
-  const blobFailed = primaryBlob != null && failedBlobs.has(primaryBlob);
+  const blobFailed = primaryBlob != null && failures.has(primaryBlob);
 
-  const projection = state.project(sha, path);
+  const blobsReady =
+    isViewable &&
+    !blobFailed &&
+    (target == null || blobs[target] !== undefined) &&
+    (source == null || blobs[source] !== undefined);
 
-  // Bridge React callbacks to Monaco commands
-  Callbacks.add.current = add;
-  Callbacks.accept.current = accept;
-  Callbacks.reject.current = reject;
-  Callbacks.reset.current = reset;
-  Callbacks.remove.current = remove;
+  // Ready once Prime has built the one Selection + DiffMaps and this file's blobs are in.
+  const ready = blobsReady && selection !== null && maps !== null;
+
+  // The current view for THIS file: the Selection projected to (sha, path). The Selection
+  // speaks diff lines; the DiffEditor translates them to base/after via its own DiffMap.
+  const projection = ready ? selection.project(sha, path) : [];
+
+  // Bridge Monaco commands to the one Selection (idempotent) and mark the active file.
+  if (selection) Callbacks.bind(selection);
   Callbacks.active.current = {
     sha,
     path,
-    readonly:
-      context || (typeof change !== "string" && change.action === "delete"),
+    readonly: context,
   };
   Callbacks.projection.current = projection;
-  Callbacks.locals.current = state.project(sha, path);
+  Callbacks.locals.current = projection;
 
-  // Create editor once
+  // Create exactly ONE editor instance — the kind this file needs. A changed file gets a
+  // DiffEditor, an unchanged path a FileEditor. Re-created only when `isDiff` flips (a
+  // rare unchanged↔diff switch; a fixed file path never changes it), so there is only one
+  // `.annotation` bridge in the DOM at a time.
   useEffect(() => {
     if (!containerRef.current) return;
-    editor.current = new CodeEditor(containerRef.current);
+    editor.current = isDiff
+      ? new DiffEditor(containerRef.current)
+      : new FileEditor(containerRef.current);
     return () => {
       editor.current?.dispose();
       editor.current = null;
     };
-  }, []);
+  }, [isDiff]);
 
-  // Switch content on file change or mode change
+  // Switch content on file change. The DiffEditor is handed this file's DiffMap from the
+  // shared registry (built by Prime for suggestion files, or built now for a file first
+  // opened here), so rendering and the suggestion translation share one diff source. An
+  // ADD has no source (base empty), a DELETE no target (after empty).
   useEffect(() => {
-    if (!editor.current || blobFailed || !isViewable) return;
+    const current = editor.current;
+    if (!current || !ready) return;
     const lang = language(path);
-    if (mode === "file" || !changed) {
-      editor.current.open(deleted ? original : content, lang);
-    } else {
-      editor.current.diff(original, content, lang, mode === "side");
+    if (isDiff && current instanceof DiffEditor) {
+      const map = maps.ensure(sha, path, baseText, afterText, true);
+      current.show(map, baseText, afterText, lang);
+    } else if (!isDiff && current instanceof FileEditor) {
+      current.show(content, lang);
     }
-  }, [mode, content, original, path, sha, blobFailed, isViewable]);
+  }, [isDiff, baseText, afterText, content, path, sha, ready, maps]);
 
   // Update decorations
   useEffect(() => {
     editor.current?.decorate(projection);
-  }, [projection, mode]);
+  }, [projection, isDiff]);
 
   // Scroll to the requested line. This effect is declared *after* the content
   // switch above, so on any render where the model was just (re)opened — including
@@ -240,13 +201,14 @@ export function Editor({
   useEffect(() => {
     if (reveal == null) return;
     if (blobFailed || !isViewable) return;
-    editor.current?.revealLine(reveal);
+    editor.current?.reveal(reveal);
   }, [
-    reveal,
+    reveal?.line,
+    reveal?.side,
     navigation,
-    mode,
+    isDiff,
     content,
-    original,
+    baseText,
     path,
     sha,
     blobFailed,
@@ -304,17 +266,6 @@ export function Editor({
           }}
         >
           {path}
-          {deleted && (
-            <span
-              style={{
-                color: "var(--av-deleted)",
-                marginLeft: 6,
-                fontSize: 11,
-              }}
-            >
-              (deleted)
-            </span>
-          )}
           {context && (
             <span
               style={{ color: "var(--av-muted)", marginLeft: 6, fontSize: 11 }}
@@ -323,7 +274,6 @@ export function Editor({
             </span>
           )}
         </span>
-        {changed && isViewable && <Segment value={mode} onChange={setMode} />}
         <button
           className="av-collapse-btn"
           onClick={onFullscreen}

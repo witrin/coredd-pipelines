@@ -1,0 +1,16 @@
+import time
+
+
+def fetch(client, url):
+    attempts = 0
+    while attempts < 5:
+        try:
+            return client.get(url)
+        except TimeoutError:
+            attempts += 1
+            time.sleep(2 ** attempts)
+    raise RuntimeError("giving up on " + url)
+
+
+def teardown(client):
+    client.close()

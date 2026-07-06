@@ -1,0 +1,10 @@
+import os
+
+DEBUG = os.environ.get("DEBUG") == "1"
+MAX_RETRIES = 3
+TIMEOUT_SECONDS = 30
+DEFAULT_ENCODING = "utf-8"
+
+
+def load(key, fallback=None):
+    return os.environ.get(key, fallback)

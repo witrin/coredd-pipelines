@@ -38,7 +38,7 @@
       "annotations": [
         {
           "path": "src/bar.ts",
-          "lines": [3, 6],
+          "lines": [{ "line": 3 }, { "line": 4 }, { "line": 5 }],
           "description": "foo bar baz"
         }
       ]

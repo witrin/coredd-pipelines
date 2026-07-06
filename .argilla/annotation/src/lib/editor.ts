@@ -1,6 +1,13 @@
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
-import type { Interval, Annotation } from "../types/index.js";
+import type { Interval } from "./interval.js";
+import type { Annotation } from "./selection.js";
+import type { DiffMap } from "./diff.js";
+import { IdentityDiffMap } from "./diff.js";
+import { Surface } from "./surface.js";
+import type { SurfaceMark, LensAction } from "./surface.js";
+import { MonacoRegistry } from "./registry.js";
+import type { Annotatable } from "./registry.js";
 
 self.MonacoEnvironment = {
   getWorker() {
@@ -9,188 +16,66 @@ self.MonacoEnvironment = {
 };
 
 /**
- * Mutable refs that bridge Monaco commands to React callbacks.
- * Commands are registered once but the callbacks they invoke change with every render.
+ * The global Monaco command/provider registry, shared by every editor. Re-exported here
+ * so importers keep their path; it is the single `MonacoRegistry.shared` instance.
  */
-export class Callbacks {
-  static add = {
-    current: (_sha: string, _path: string, _lines: Interval) => {},
-  };
-  static active = { current: { sha: "", path: "", readonly: false } };
-  static accept = { current: (_identifier: string) => {} };
-  static reject = { current: (_identifier: string) => {} };
-  static reset = { current: (_identifier: string) => {} };
-  static remove = { current: (_identifier: string) => {} };
-  static projection = { current: [] as Annotation[] };
-  static locals = { current: [] as Annotation[] };
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  static refreshLens: { current: (...args: any[]) => void } = {
-    current: () => {},
-  };
-}
+export const Callbacks = MonacoRegistry.shared;
+
+// Shared Monaco construction options for the standalone editor.
+const OPTIONS: monaco.editor.IStandaloneEditorConstructionOptions = {
+  readOnly: false,
+  domReadOnly: false,
+  minimap: { enabled: false },
+  scrollBeyondLastLine: false,
+  lineNumbers: "on",
+  glyphMargin: true,
+  folding: true,
+  renderLineHighlight: "none",
+  overviewRulerBorder: false,
+  theme: "vs-dark",
+  fontSize: 12,
+  fontFamily: "monospace",
+  wordWrap: "off",
+  automaticLayout: true,
+  padding: { top: 8, bottom: 8 },
+  quickSuggestions: false,
+  suggestOnTriggerCharacters: false,
+  parameterHints: { enabled: false },
+  hover: { enabled: false },
+  links: false,
+  contextmenu: false,
+  matchBrackets: "never",
+  occurrencesHighlight: "off",
+  selectionHighlight: false,
+  hideCursorInOverviewRuler: true,
+  lightbulb: { enabled: "onCode" as monaco.editor.ShowLightbulbIconMode },
+  codeLens: true,
+};
+
+// The diff is fully annotatable: both inner editors are editable (so selection + the mark
+// code action work on base and after). `diffCodeLens` (Monaco's built-in diff lens) is
+// left as-is; our own code-lens provider renders Accept/Reject/Remove per side.
+const DIFF_OPTIONS: monaco.editor.IDiffEditorConstructionOptions = {
+  ...OPTIONS,
+  readOnly: false,
+  domReadOnly: false,
+  originalEditable: true,
+  enableSplitViewResizing: false,
+  renderIndicators: false,
+  renderMarginRevertIcon: false,
+  renderGutterMenu: false,
+  diffCodeLens: true,
+  renderOverviewRuler: true,
+};
 
 /**
- * Wraps a Monaco standalone editor and a diff editor in a single long-lived object.
- * The editor is created once and survives file switches — only the model is swapped.
+ * The decoration vocabulary shared by both editors: which CSS class an annotation gets,
+ * which code-lens actions it offers, and how a projection becomes per-side surface marks.
+ * Pure translation of an `Annotation` into `SurfaceMark`s — no editor state.
  */
-export class CodeEditor {
-  #code: monaco.editor.IStandaloneCodeEditor;
-  #diff: monaco.editor.IStandaloneDiffEditor;
-  #container: HTMLDivElement;
-  #codeContainer: HTMLDivElement;
-  #diffContainer: HTMLDivElement;
-  #decorations: monaco.editor.IEditorDecorationsCollection | null = null;
-  #diffDecorations: monaco.editor.IEditorDecorationsCollection | null = null;
-  #languages = new Set<string>();
-  #lensLanguages = new Set<string>();
-
-  constructor(container: HTMLDivElement) {
-    this.#container = container;
-
-    this.#codeContainer = document.createElement("div");
-    this.#codeContainer.style.cssText = "width:100%;height:100%;";
-    this.#diffContainer = document.createElement("div");
-    this.#diffContainer.style.cssText = "width:100%;height:100%;display:none;";
-    this.#container.appendChild(this.#codeContainer);
-    this.#container.appendChild(this.#diffContainer);
-
-    this.#code = monaco.editor.create(this.#codeContainer, CodeEditor.#options);
-    this.#diff = monaco.editor.createDiffEditor(
-      this.#diffContainer,
-      CodeEditor.#diffOptions,
-    );
-
-    // Expose internals on the DOM node so acceptance tests can drive the editor programmatically.
-    (this.#codeContainer as any).annotation = {
-      editor: this.#code,
-      monaco,
-      projection: Callbacks.projection,
-      locals: Callbacks.locals,
-    };
-
-    monaco.editor.setTheme("vs-dark");
-    this.#injectStyles();
-    this.#suppressDiagnostics();
-    this.#registerSelectionPreview();
-    this.#registerMarkCommand();
-  }
-
-  /**
-   * Shows a single file in the code editor.
-   */
-  open(content: string, lang: string): void {
-    this.#codeContainer.style.display = "";
-    this.#diffContainer.style.display = "none";
-
-    this.#registerLanguage(lang);
-
-    const previous = this.#code.getModel();
-    const model = monaco.editor.createModel(content, lang);
-    this.#code.setModel(model);
-    previous?.dispose();
-
-    // Clear selection so stale lightbulbs and preview decorations don't persist across file switches.
-    this.#code.setSelection({
-      startLineNumber: 1,
-      startColumn: 1,
-      endLineNumber: 1,
-      endColumn: 1,
-    });
-
-    this.#decorations = null;
-    this.#diffDecorations?.clear();
-    requestAnimationFrame(() => this.#code.layout());
-  }
-
-  /**
-   * Shows a diff between original and modified content.
-   */
-  diff(
-    original: string,
-    modified: string,
-    lang: string,
-    sideBySide: boolean,
-  ): void {
-    this.#codeContainer.style.display = "none";
-    this.#diffContainer.style.display = "";
-
-    const previousModel = this.#diff.getModel();
-    const originalModel = monaco.editor.createModel(original, lang);
-    const modifiedModel = monaco.editor.createModel(modified, lang);
-    this.#diff.setModel({ original: originalModel, modified: modifiedModel });
-    this.#diff.updateOptions({ renderSideBySide: sideBySide });
-    previousModel?.original.dispose();
-    previousModel?.modified.dispose();
-
-    // The modified model was just replaced, so any collection bound to the old
-    // model is stale — drop it and rebuild lazily in decorate().
-    this.#decorations?.clear();
-    this.#diffDecorations = null;
-    requestAnimationFrame(() => this.#diff.layout());
-  }
-
-  /**
-   * Applies annotation decorations to whichever editor is currently visible.
-   *
-   * In the file editor the full marking is drawn (line background, glyph-margin
-   * bar, and a `●` at the range start). In the diff editor only a discreet
-   * glyph-margin bar is drawn on the modified (after) side — no background and no
-   * bullet — so the annotator can still spot where the markings sit without
-   * cluttering the diff's own change highlighting. The diff overview ruler is
-   * left to Monaco, where it reflects the diff hunks rather than the markings.
-   */
-  decorate(annotations: Annotation[]): void {
-    if (this.#codeContainer.style.display === "none") {
-      this.#decorations?.clear();
-      const modified = this.#diff.getModifiedEditor();
-      if (!this.#diffDecorations)
-        this.#diffDecorations = modified.createDecorationsCollection();
-      const marks: monaco.editor.IModelDeltaDecoration[] = [];
-      for (const a of annotations) {
-        if (a.status === "absorbed") continue;
-        const cls = CodeEditor.#class(a);
-        const [start, end] = a.lines;
-        for (let line = start; line < end; line++) {
-          marks.push({
-            range: new monaco.Range(line, 1, line, 1),
-            options: {
-              isWholeLine: true,
-              glyphMarginClassName: `av-glyph-${cls}`,
-            },
-          });
-        }
-      }
-      this.#diffDecorations.set(marks);
-      return;
-    }
-    this.#diffDecorations?.clear();
-    if (!this.#decorations)
-      this.#decorations = this.#code.createDecorationsCollection();
-    const result: monaco.editor.IModelDeltaDecoration[] = [];
-    for (const a of annotations) {
-      if (a.status === "absorbed") continue;
-      const cls = CodeEditor.#class(a);
-      const [start, end] = a.lines;
-      for (let line = start; line < end; line++) {
-        const options: monaco.editor.IModelDecorationOptions = {
-          isWholeLine: true,
-          className: `av-bg-${cls}`,
-          glyphMarginClassName: `av-glyph-${cls}`,
-        };
-        if (line === start) {
-          options.after = {
-            content: "  ●",
-            inlineClassName: `av-after-${cls}`,
-          };
-        }
-        result.push({ range: new monaco.Range(line, 1, line, 1), options });
-      }
-    }
-    this.#decorations.set(result);
-    Callbacks.refreshLens.current();
-  }
-
-  static #class(a: Annotation): string {
+export class Marks {
+  /** The background/glyph CSS class for an annotation, by origin and status. */
+  static class(a: Annotation): string {
     return a.origin === "suggestion"
       ? a.status === "pending"
         ? "pending"
@@ -201,311 +86,328 @@ export class CodeEditor {
   }
 
   /**
-   * Scrolls the visible editor so `line` is centered and places the cursor there.
-   * When a diff is shown, scrolls the modified (after) editor — `line` is an
-   * after-side line number, since markings live on the after side.
-   *
-   * Deferred to the next frame: sidebar navigation to a not-yet-loaded file opens
-   * a fresh model in the same tick, and revealing before that model has been laid
-   * out computes scroll against a zero-height viewport (the jump is silently lost,
-   * leaving the editor pinned at the top). Waiting one frame lets `open()`'s layout
-   * settle first. Clamps to the model's line count so a stale line never throws.
+   * The lens actions for one annotation (accept/reject when pending, reset when decided,
+   * remove for a manual marking). Blocked/absorbed suggestions get none.
    */
-  revealLine(line: number): void {
-    const inDiff = this.#codeContainer.style.display === "none";
-    const editor = inDiff ? this.#diff.getModifiedEditor() : this.#code;
-    requestAnimationFrame(() => {
-      const model = editor.getModel();
-      if (!model) return;
-      const target = Math.max(1, Math.min(line, model.getLineCount()));
-      editor.revealLineInCenter(target);
-      editor.setPosition({ lineNumber: target, column: 1 });
-    });
+  static lenses(a: Annotation): LensAction[] {
+    if (a.origin === "suggestion") {
+      if (a.status === "blocked" || a.status === "absorbed") return [];
+      if (a.status === "pending")
+        return [
+          { id: "av.accept", title: "Accept", argument: a.identifier },
+          { id: "av.reject", title: "Reject", argument: a.identifier },
+        ];
+      return [{ id: "av.reset", title: "Reset", argument: a.identifier }];
+    }
+    return [{ id: "av.remove", title: "Remove", argument: a.identifier }];
   }
 
   /**
-   * Destroys both editor instances and cleans up DOM.
+   * Build the SurfaceMark list for one side by mapping each annotation's diff lines to
+   * that side's line numbers. The full marking (background) is drawn wherever the
+   * annotation has a line on this side, and the bullet on the first such line. The lens
+   * sits ONLY on the annotation's FIRST diff line, and only on the side(s) that own that
+   * start line: a delete-start shows it on base only, an add-start on after only, a
+   * context/edit start on both. The standalone (`base`-less) side has every line on one
+   * axis, so it uses the diff line directly.
+   *
+   * `map` is null for the standalone editor (identity: diff line = file line); otherwise
+   * it is the diff editor's own map and `side` selects which inner editor this is for.
    */
-  dispose(): void {
-    this.#code.getModel()?.dispose();
-    const diffModel = this.#diff.getModel();
-    diffModel?.original.dispose();
-    diffModel?.modified.dispose();
-    this.#code.dispose();
-    this.#diff.dispose();
-    this.#codeContainer.remove();
-    this.#diffContainer.remove();
-  }
-
-  #injectStyles(): void {
-    const root = this.#container.getRootNode();
-    const host = root instanceof ShadowRoot ? root : document.head;
-    if (host.querySelector("#av-styles")) return;
-    const style = document.createElement("style");
-    style.id = "av-styles";
-    style.textContent = `
-      .av-bg-pending  { background: rgba(232,168,85,0.12) !important; }
-      .av-glyph-pending { background: var(--av-pending) !important; width: 3px !important; }
-      .av-bg-accepted { background: rgba(126,142,231,0.15) !important; }
-      .av-glyph-accepted { background: var(--av-accepted) !important; width: 3px !important; }
-      .av-bg-rejected { background: rgba(100,103,118,0.08) !important; opacity: 0.45; }
-      .av-glyph-rejected { background: var(--av-rejected) !important; width: 3px !important; opacity: 0.45; }
-      .av-bg-annotation { background: rgba(126,142,231,0.15) !important; }
-      .av-glyph-annotation { background: var(--av-annotator) !important; width: 3px !important; }
-      .av-bg-sel { background: rgba(126,142,231,0.25) !important; }
-      .monaco-diff-editor:not(.side-by-side) .editor.modified .glyph-margin { background: var(--vscode-editor-background) !important; }
-      .monaco-diff-editor:not(.side-by-side) .editor.modified [class*="av-glyph-"] { transform: translateX(6px) !important; }
-      .monaco-diff-editor:not(.side-by-side) .editor.modified .margin-view-overlays .line-numbers { margin-left: -7px !important; }
-      .monaco-editor .codicon-sparkle-filled::before { content: "\\ea66" !important; font-family: "codicon" !important; }
-      .monaco-editor .cursors-layer { display: none !important; }
-      .monaco-editor .current-line-margin { background: transparent !important; }
-      .monaco-editor .current-line { background: transparent !important; border-color: transparent !important; }
-      .monaco-editor .line-numbers.active-line-number { color: var(--vscode-editorLineNumber-foreground) !important; font-weight: inherit !important; }
-      .monaco-editor .current-line-margin-both { border: none !important; background: transparent !important; }
-      .monaco-editor .inputarea { pointer-events: none !important; }
-      .av-after-pending  { color: var(--av-pending);   opacity: 0.7;  margin-left: 12px; font-size: 11px; font-family: monospace; }
-      .av-after-rejected { color: var(--av-rejected);  opacity: 0.5;  margin-left: 12px; font-size: 11px; font-family: monospace; }
-      .av-after-accepted { color: var(--av-accepted);  opacity: 0.65; margin-left: 12px; font-size: 11px; font-family: monospace; }
-      .av-after-annotation { color: var(--av-annotator); opacity: 0.65; margin-left: 12px; font-size: 11px; font-family: monospace; }
-    `;
-    host.appendChild(style);
-  }
-
-  #suppressDiagnostics(): void {
-    const tsLang = (monaco.languages as any).typescript;
-    const diagOff = {
-      noSemanticValidation: true,
-      noSyntaxValidation: true,
-      noSuggestionDiagnostics: true,
-    };
-    tsLang?.typescriptDefaults?.setDiagnosticsOptions(diagOff);
-    tsLang?.javascriptDefaults?.setDiagnosticsOptions(diagOff);
-    const clearMarkers = () => {
-      const model = this.#code.getModel();
-      if (!model) return;
-      for (const owner of ["typescript", "javascript"]) {
-        if (
-          monaco.editor.getModelMarkers({ resource: model.uri, owner }).length >
-          0
-        )
-          monaco.editor.setModelMarkers(model, owner, []);
-      }
-    };
-    clearMarkers();
-    monaco.editor.onDidChangeMarkers(() => clearMarkers());
-  }
-
-  #registerSelectionPreview(): void {
-    const collection = this.#code.createDecorationsCollection();
-    this.#code.onDidChangeCursorSelection((event) => {
-      const range = event.selection;
-      if (range.isEmpty()) {
-        collection.clear();
-        return;
-      }
-      const next: monaco.editor.IModelDeltaDecoration[] = [];
-      for (
-        let line = range.startLineNumber;
-        line <= range.endLineNumber;
-        line++
-      ) {
-        next.push({
-          range: new monaco.Range(line, 1, line, 1),
-          options: {
-            isWholeLine: true,
-            className: "av-bg-sel",
-            glyphMarginClassName: "av-glyph-annotation",
-          },
+  static build(
+    annotations: Annotation[],
+    side: "base" | "after",
+    map: DiffMap | IdentityDiffMap | null,
+  ): SurfaceMark[] {
+    const marks: SurfaceMark[] = [];
+    for (const a of annotations) {
+      if (a.status === "absorbed") continue;
+      const cls = Marks.class(a);
+      const [start, end] = a.lines;
+      let firstOnSide = true;
+      for (let diff = start; diff < end; diff++) {
+        const line = map === null ? diff : map.fromDiff(diff)[side];
+        if (line === undefined) continue;
+        const lensHere = map === null ? firstOnSide : diff === start;
+        marks.push({
+          line,
+          cls,
+          full: true,
+          bullet: firstOnSide,
+          lenses: lensHere ? Marks.lenses(a) : [],
         });
+        firstOnSide = false;
       }
-      collection.set(next);
+    }
+    return marks;
+  }
+}
+
+/**
+ * Exposes the active editor's internals on its container DOM node so acceptance tests can
+ * drive it. All getters read `Callbacks.annotatable` (the mounted editor), never a
+ * captured `this`, so the bridge always follows whichever editor is currently mounted —
+ * exactly one is at a time.
+ */
+function bridge(container: HTMLElement): void {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (container as any).annotation = {
+    get editor() {
+      return Callbacks.annotatable?.editor ?? null;
+    },
+    get baseEditor() {
+      return Callbacks.annotatable?.baseEditor ?? null;
+    },
+    monaco,
+    projection: Callbacks.projection,
+    locals: Callbacks.locals,
+    mark: (start: number, end: number, side: "base" | "after" = "after") => {
+      Callbacks.annotatable?.mark(start, end, side);
+    },
+  };
+}
+
+/**
+ * A standalone Monaco editor for an unchanged file. It has no DiffMap — the file has one
+ * line axis, so a diff line IS a file line. It marks/decorates/reveals on that single
+ * axis. Annotatable: the whole file is markable (unless the active file is read-only).
+ */
+export class FileEditor implements Annotatable {
+  #editor: monaco.editor.IStandaloneCodeEditor;
+  #container: HTMLDivElement;
+  #surface: Surface;
+
+  /** The one annotatable inner editor. */
+  get editor(): monaco.editor.ICodeEditor {
+    return this.#editor;
+  }
+
+  /** No base companion in the standalone view. */
+  get baseEditor(): monaco.editor.ICodeEditor | null {
+    return null;
+  }
+
+  constructor(container: HTMLDivElement) {
+    this.#container = container;
+    this.#editor = monaco.editor.create(container, OPTIONS);
+    this.#surface = new Surface(this.#editor);
+    Callbacks.focus(this);
+    bridge(container);
+
+    monaco.editor.setTheme("vs-dark");
+    Callbacks.styles(container);
+    Callbacks.diagnostics(this.#editor);
+    Callbacks.register();
+  }
+
+  /**
+   * Shows a single file's content. Swaps the model and re-decorates from the current
+   * projection.
+   */
+  show(content: string, lang: string): void {
+    Callbacks.focus(this);
+    Callbacks.language(lang);
+
+    const previous = this.#editor.getModel();
+    const model = monaco.editor.createModel(content, lang);
+    this.#editor.setModel(model);
+    Callbacks.surfaces.set(model, this.#surface);
+    if (previous) Callbacks.surfaces.delete(previous);
+    previous?.dispose();
+
+    this.#editor.setSelection(new monaco.Range(1, 1, 1, 1));
+    this.#surface.clear();
+    this.decorate(Callbacks.projection.current);
+    requestAnimationFrame(() => this.#editor.layout());
+  }
+
+  /** Draws the projection on the single surface (identity axis). */
+  decorate(annotations: Annotation[]): void {
+    Callbacks.projection.current = annotations;
+    this.#surface.decorate(Marks.build(annotations, "after", null));
+    Callbacks.refresh.current();
+  }
+
+  /**
+   * Reads the surface selection and hands it to `add` on the file's own line axis. The
+   * three-argument form selects `start..end` first — the exact path a user drives; used
+   * by the test bridge. The `side` argument is ignored (a standalone file has one side).
+   */
+  mark(): void;
+  mark(start: number, end: number, side: "base" | "after"): void;
+  mark(start?: number, end?: number, _side?: "base" | "after"): void {
+    if (start !== undefined && end !== undefined) {
+      this.#editor.focus();
+      this.#editor.setSelection(new monaco.Range(start, 1, end, 1));
+    }
+    const { sha, path, readonly } = Callbacks.active.current;
+    if (readonly) return;
+    const picked = this.#surface.selection();
+    if (!picked) return;
+    Callbacks.add.current(sha, path, [picked.start, picked.end + 1]);
+    this.#surface.clearSelection();
+  }
+
+  /** Scrolls to a file line. `side` is irrelevant for a standalone file. */
+  reveal(target: { line: number; side: "base" | "after" }): void {
+    requestAnimationFrame(() => this.#surface.reveal(target.line));
+  }
+
+  /** Destroys the editor and cleans up. */
+  dispose(): void {
+    Callbacks.blur(this);
+    const model = this.#editor.getModel();
+    if (model) Callbacks.surfaces.delete(model);
+    model?.dispose();
+    this.#editor.dispose();
+    this.#container.replaceChildren();
+  }
+}
+
+/**
+ * A side-by-side Monaco diff editor for a changed file. It holds its own DiffMap (built
+ * headless from the same two blobs it renders) purely for VIEW work: distributing the
+ * diff-line projection onto the base/after surfaces, mapping a surface selection back onto
+ * the diff axis for `add`, and revealing a side line. The Selection never sees this map.
+ * Annotatable: both inner editors are markable (base = deletions, after = present lines).
+ */
+export class DiffEditor implements Annotatable {
+  #diff: monaco.editor.IStandaloneDiffEditor;
+  #container: HTMLDivElement;
+  #base: Surface | null = null;
+  #after: Surface | null = null;
+  #map: DiffMap | IdentityDiffMap = new IdentityDiffMap(0);
+
+  /** The annotatable inner editor (the modified/after side). */
+  get editor(): monaco.editor.ICodeEditor {
+    return this.#diff.getModifiedEditor();
+  }
+
+  /** The read-only base companion (the original side). */
+  get baseEditor(): monaco.editor.ICodeEditor | null {
+    return this.#diff.getOriginalEditor();
+  }
+
+  constructor(container: HTMLDivElement) {
+    this.#container = container;
+    this.#diff = monaco.editor.createDiffEditor(container, DIFF_OPTIONS);
+    Callbacks.focus(this);
+    bridge(container);
+
+    monaco.editor.setTheme("vs-dark");
+    Callbacks.styles(container);
+    Callbacks.diagnostics(this.#diff.getModifiedEditor());
+    Callbacks.register();
+  }
+
+  /**
+   * Shows a diff between original (base) and modified (after) content. The DiffMap is
+   * supplied (built headless from the same two blobs), so rendering and the projection
+   * translation share one diff source — no async getLineChanges dance.
+   */
+  show(
+    map: DiffMap | IdentityDiffMap,
+    original: string,
+    modified: string,
+    lang: string,
+  ): void {
+    this.#map = map;
+    Callbacks.focus(this);
+    Callbacks.language(lang);
+
+    const previous = this.#diff.getModel();
+    const originalModel = monaco.editor.createModel(original, lang);
+    const modifiedModel = monaco.editor.createModel(modified, lang);
+    this.#diff.setModel({ original: originalModel, modified: modifiedModel });
+    this.#diff.updateOptions({ renderSideBySide: true });
+    if (previous) {
+      Callbacks.surfaces.delete(previous.original);
+      Callbacks.surfaces.delete(previous.modified);
+    }
+    previous?.original.dispose();
+    previous?.modified.dispose();
+
+    // Build the base/after surfaces on first show, reusing the inner editors.
+    if (!this.#base) this.#base = new Surface(this.#diff.getOriginalEditor());
+    if (!this.#after) this.#after = new Surface(this.#diff.getModifiedEditor());
+    Callbacks.surfaces.set(originalModel, this.#base);
+    Callbacks.surfaces.set(modifiedModel, this.#after);
+
+    this.#base.clear();
+    this.#after.clear();
+    this.decorate(Callbacks.projection.current);
+    requestAnimationFrame(() => this.#diff.layout());
+  }
+
+  /**
+   * Distributes the diff-line projection onto both surfaces via the DiffMap inverse: a
+   * context/edit line lands on both, an addition only on after, a deletion only on base.
+   * The after side draws the full marking with lenses; the base companion the same,
+   * following each interval's start side.
+   */
+  decorate(annotations: Annotation[]): void {
+    Callbacks.projection.current = annotations;
+    this.#after?.decorate(Marks.build(annotations, "after", this.#map));
+    this.#base?.decorate(Marks.build(annotations, "base", this.#map));
+    Callbacks.refresh.current();
+  }
+
+  /**
+   * Reads the focused side's surface selection, maps it onto the diff axis, and hands it
+   * to `add`. Called with no arguments by `av.mark` (side picked by focus). The
+   * three-argument form selects `start..end` on the given side's editor first — the exact
+   * path a user drives; used by the test bridge.
+   */
+  mark(): void;
+  mark(start: number, end: number, side: "base" | "after"): void;
+  mark(start?: number, end?: number, forceSide?: "base" | "after"): void {
+    if (start !== undefined && end !== undefined && forceSide !== undefined) {
+      const editor =
+        forceSide === "base"
+          ? this.#diff.getOriginalEditor()
+          : this.#diff.getModifiedEditor();
+      editor.focus();
+      editor.setSelection(new monaco.Range(start, 1, end, 1));
+    }
+    const { sha, path, readonly } = Callbacks.active.current;
+    if (readonly) return;
+    const side: "base" | "after" =
+      forceSide ?? (this.#base?.focused() ? "base" : "after");
+    const surface = side === "base" ? this.#base : this.#after;
+    const picked = surface?.selection();
+    if (!surface || !picked) return;
+    const interval: Interval = [picked.start, picked.end + 1];
+    const diff =
+      this.#map instanceof IdentityDiffMap
+        ? this.#map.interval(interval)
+        : this.#map.interval(interval, side);
+    if (!diff) return;
+    Callbacks.add.current(sha, path, diff);
+    surface.clearSelection();
+  }
+
+  /**
+   * Scrolls to a target given in SIDE coordinates (`{line, side}` — the sidebar's raw
+   * value): it scrolls the given side's surface directly.
+   */
+  reveal(target: { line: number; side: "base" | "after" }): void {
+    requestAnimationFrame(() => {
+      const surface = target.side === "base" ? this.#base : this.#after;
+      surface?.reveal(target.line);
     });
   }
 
-  #registerMarkCommand(): void {
-    const editor = this.#code;
-    monaco.editor.registerCommand(
-      "av.mark",
-      (_, payload: { start: number; end: number }) => {
-        const { sha, path, readonly } = Callbacks.active.current;
-        if (readonly) return;
-        Callbacks.add.current(sha, path, [payload.start, payload.end + 1]);
-        editor.setSelection({
-          startLineNumber: 1,
-          startColumn: 1,
-          endLineNumber: 1,
-          endColumn: 1,
-        });
-      },
-    );
-  }
-
-  #registerLanguage(name: string): void {
-    if (!this.#languages.has(name)) {
-      this.#languages.add(name);
-      monaco.languages.registerCodeActionProvider(name, {
-        provideCodeActions(_model, range) {
-          if (range.isEmpty() || Callbacks.active.current.readonly)
-            return { actions: [], dispose() {} };
-          return {
-            actions: [
-              {
-                title: "Mark selection",
-                kind: "av.mark",
-                isPreferred: true,
-                isAI: true,
-                command: {
-                  id: "av.mark",
-                  title: "Mark selection",
-                  arguments: [
-                    { start: range.startLineNumber, end: range.endLineNumber },
-                  ],
-                },
-              },
-            ],
-            dispose() {},
-          };
-        },
-      });
+  /** Destroys the diff editor and cleans up. */
+  dispose(): void {
+    Callbacks.blur(this);
+    const model = this.#diff.getModel();
+    if (model) {
+      Callbacks.surfaces.delete(model.original);
+      Callbacks.surfaces.delete(model.modified);
     }
-    if (!this.#lensLanguages.has(name)) {
-      this.#lensLanguages.add(name);
-      monaco.languages.registerCodeLensProvider(name, {
-        provideCodeLenses() {
-          const lenses: monaco.languages.CodeLens[] = [];
-          for (const a of Callbacks.projection.current) {
-            const line = a.lines[0];
-            if (line === undefined) continue;
-            const range = new monaco.Range(line, 1, line, 1);
-            if (a.origin === "suggestion") {
-              if (a.status !== "blocked" && a.status !== "absorbed") {
-                if (a.status === "pending") {
-                  lenses.push({
-                    range,
-                    command: {
-                      id: "av.accept",
-                      title: "Accept",
-                      arguments: [a.identifier],
-                    },
-                  });
-                  lenses.push({
-                    range,
-                    command: {
-                      id: "av.reject",
-                      title: "Reject",
-                      arguments: [a.identifier],
-                    },
-                  });
-                } else {
-                  lenses.push({
-                    range,
-                    command: {
-                      id: "av.reset",
-                      title: "Reset",
-                      arguments: [a.identifier],
-                    },
-                  });
-                }
-              }
-            } else {
-              lenses.push({
-                range,
-                command: {
-                  id: "av.remove",
-                  title: "Remove",
-                  arguments: [a.identifier],
-                },
-              });
-            }
-          }
-          return { lenses, dispose() {} };
-        },
-        resolveCodeLens(_model, lens) {
-          return lens;
-        },
-        onDidChange(listener) {
-          Callbacks.refreshLens.current = listener;
-          return {
-            dispose() {
-              Callbacks.refreshLens.current = () => {};
-            },
-          };
-        },
-      });
-      monaco.editor.registerCommand("av.accept", (_, identifier: string) => {
-        Callbacks.projection.current = Callbacks.projection.current.map((a) =>
-          a.identifier === identifier
-            ? { ...a, status: "accepted" as const }
-            : a,
-        );
-        Callbacks.refreshLens.current();
-        Callbacks.accept.current(identifier);
-      });
-      monaco.editor.registerCommand("av.reject", (_, identifier: string) => {
-        Callbacks.projection.current = Callbacks.projection.current.map((a) =>
-          a.identifier === identifier
-            ? { ...a, status: "rejected" as const }
-            : a,
-        );
-        Callbacks.refreshLens.current();
-        Callbacks.reject.current(identifier);
-      });
-      monaco.editor.registerCommand("av.reset", (_, identifier: string) => {
-        Callbacks.projection.current = Callbacks.projection.current.map((a) =>
-          a.identifier === identifier
-            ? { ...a, status: "pending" as const }
-            : a,
-        );
-        Callbacks.refreshLens.current();
-        Callbacks.reset.current(identifier);
-      });
-      monaco.editor.registerCommand("av.remove", (_, identifier: string) => {
-        Callbacks.projection.current = Callbacks.projection.current.filter(
-          (a) => a.identifier !== identifier,
-        );
-        Callbacks.refreshLens.current();
-        Callbacks.remove.current(identifier);
-      });
-    }
+    model?.original.dispose();
+    model?.modified.dispose();
+    this.#diff.dispose();
+    this.#container.replaceChildren();
   }
-
-  static #options: monaco.editor.IStandaloneEditorConstructionOptions = {
-    readOnly: false,
-    domReadOnly: false,
-    minimap: { enabled: false },
-    scrollBeyondLastLine: false,
-    lineNumbers: "on",
-    glyphMargin: true,
-    folding: true,
-    renderLineHighlight: "none",
-    overviewRulerBorder: false,
-    theme: "vs-dark",
-    fontSize: 12,
-    fontFamily: "monospace",
-    wordWrap: "off",
-    automaticLayout: true,
-    padding: { top: 8, bottom: 8 },
-    quickSuggestions: false,
-    suggestOnTriggerCharacters: false,
-    parameterHints: { enabled: false },
-    hover: { enabled: false },
-    links: false,
-    contextmenu: false,
-    matchBrackets: "never",
-    occurrencesHighlight: "off",
-    selectionHighlight: false,
-    hideCursorInOverviewRuler: true,
-    lightbulb: { enabled: "onCode" as monaco.editor.ShowLightbulbIconMode },
-    codeLens: true,
-  };
-
-  static #diffOptions: monaco.editor.IDiffEditorConstructionOptions = {
-    ...CodeEditor.#options,
-    readOnly: true,
-    domReadOnly: true,
-    enableSplitViewResizing: false,
-    renderIndicators: false,
-    diffCodeLens: false,
-    renderOverviewRuler: true,
-  };
 }
