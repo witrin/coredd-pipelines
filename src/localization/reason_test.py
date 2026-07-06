@@ -90,7 +90,7 @@ class TestLocateNode(unittest.TestCase):
     def test_locate_returns_agent_locations(self) -> None:
         response = LocateResponseSchema.model_validate(
             {
-                "locations": [{"file": "a.py", "line": 5}],
+                "locations": [{"file": "a.py", "line": "L5"}],
                 "reason": "Missing null check.",
             }
         )
@@ -101,14 +101,14 @@ class TestLocateNode(unittest.TestCase):
         ):
             result = node.run(self._inputs())
 
-        self.assertEqual(result["locations"], [{"file": "a.py", "line": 5}])
+        self.assertEqual(result["locations"], [{"file": "a.py", "line": "L5"}])
         self.assertEqual(result["reason"], "Missing null check.")
 
     def test_locate_passes_locations_through_unvalidated(self) -> None:
         # No post-hoc validation: whatever the agent reports is taken as-is,
         # mirroring attribution. A line the snippet never showed still passes.
         response = LocateResponseSchema.model_validate(
-            {"locations": [{"file": "other.py", "line": 99}]}
+            {"locations": [{"file": "other.py", "line": "L99"}]}
         )
         node, agent = self._node(response)
 
@@ -117,14 +117,14 @@ class TestLocateNode(unittest.TestCase):
         ):
             result = node.run(self._inputs())
 
-        self.assertEqual(result["locations"], [{"file": "other.py", "line": 99}])
+        self.assertEqual(result["locations"], [{"file": "other.py", "line": "L99"}])
         self.assertNotIn("reason", result)
 
     def test_locate_does_not_reveal_inducing_change(self) -> None:
         # The inducing change diff must NOT be handed to the agent — that would
         # trivialise the search. The message carries only root cause + fix context.
         response = LocateResponseSchema.model_validate(
-            {"locations": [{"file": "a.py", "line": 5}]}
+            {"locations": [{"file": "a.py", "line": "L5"}]}
         )
         node, agent = self._node(response)
 
@@ -219,8 +219,9 @@ class TestLocateTool(unittest.TestCase):
 
         out = self._show(tool, commit="da", file="a.py")
 
-        # The defect side renders a diff with after line numbers in grep format.
-        self.assertIn("L5: | +buggy_line", out["patch"])
+        # The defect side renders a signed diff: one copyable reference per line, an
+        # after line as ``L<n>`` with no trailing colon.
+        self.assertIn("L5 | +buggy_line", out["patch"])
 
     def test_show_correction_is_plain(self) -> None:
         tool, _ = self._tool()
@@ -229,7 +230,7 @@ class TestLocateTool(unittest.TestCase):
 
         # The correction side renders the same diff without line numbers.
         self.assertIn("+buggy_line", out["patch"])
-        self.assertNotIn("L5:", out["patch"])
+        self.assertNotIn("L5 |", out["patch"])
 
     def test_show_rejects_unknown_commit(self) -> None:
         tool, _ = self._tool()

@@ -585,6 +585,9 @@ class RepositorySearchNode:
         graph, result, limit = self._invoke(seed, tool, steps=steps)
         output = SearchNormalizer().normalize(result)
 
+        if retries == 0:
+            return output
+
         # Retry: the tools guard exploration, but the final SHA can still be a
         # hallucinated or post-correction commit. Validate it and give the agent one
         # more attempt with the concrete reason, keeping its full search context.

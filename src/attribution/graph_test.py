@@ -2778,6 +2778,7 @@ class TestAgentSZZGraph(unittest.TestCase):
                 "seed": [{"title": "Commit Message", "body": "Fix parser"}],
             },
             steps=13,
+            retries=0,
         )
         self.assertEqual(
             result,
@@ -2823,6 +2824,7 @@ class TestAgentSZZGraph(unittest.TestCase):
                 "seed": [{"title": "Commit Message", "body": "Fix parser"}],
             },
             steps=17,
+            retries=0,
         )
         self.assertEqual(
             result,
