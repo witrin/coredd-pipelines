@@ -14,6 +14,7 @@ from benchmark.attribution.domain import (
 from benchmark.attribution.history import VersionControl
 from benchmark.attribution.search import (
     DuplicateCallGuard,
+    IntroducerValidator,
     KnowledgeGraphSearchNode,
     KnowledgeGraphSeedNode,
     RepositorySearchNode,
@@ -836,3 +837,50 @@ class TestResolvedErrorFilter(unittest.TestCase):
                         tool_message_ids,
                         f"Orphaned tool_call id: {call['id']}",
                     )
+
+
+class TestIntroducerValidator(unittest.TestCase):
+    def _repo(self, *, resolves, descendant):
+        # Fake VersionControl.handle: revparse_single peels to a commit whose id is
+        # the resolved sha; descendant_of returns the configured ancestry answer.
+        handle = Mock()
+        if resolves is None:
+            handle.revparse_single.side_effect = KeyError("missing")
+        else:
+            commit = Mock()
+            commit.id = resolves
+            node = Mock()
+            node.peel.return_value = commit
+            handle.revparse_single.return_value = node
+        handle.descendant_of.return_value = descendant
+        repository = Mock()
+        repository.handle = handle
+        return repository
+
+    def test_null_is_not_an_error(self) -> None:
+        v = IntroducerValidator(self._repo(resolves=None, descendant=False), "a" * 40)
+        self.assertEqual(v.check(None), (True, None))
+
+    def test_missing_commit_rejected(self) -> None:
+        v = IntroducerValidator(self._repo(resolves=None, descendant=False), "a" * 40)
+        ok, feedback = v.check("b" * 40)
+        self.assertFalse(ok)
+        self.assertIn("does not exist", feedback)
+
+    def test_non_ancestor_rejected(self) -> None:
+        v = IntroducerValidator(
+            self._repo(resolves="b" * 40, descendant=False), "a" * 40
+        )
+        ok, feedback = v.check("b" * 40)
+        self.assertFalse(ok)
+        self.assertIn("predate", feedback)
+
+    def test_valid_ancestor_accepted(self) -> None:
+        v = IntroducerValidator(
+            self._repo(resolves="b" * 40, descendant=True), "a" * 40
+        )
+        self.assertEqual(v.check("b" * 40), (True, None))
+
+
+if __name__ == "__main__":
+    unittest.main()

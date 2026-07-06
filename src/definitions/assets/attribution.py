@@ -64,6 +64,7 @@ class BenchmarkConfig(dg.Config):
     compute: str = "default"
     strategy: str = "stat"
     logprobs: bool = False
+    retries: int = 1
 
 
 class AttributionEvaluationConfig(dg.Config):
@@ -78,7 +79,7 @@ class AttributionEvaluationConfig(dg.Config):
 
 
 @asset(
-    metadata={"version": "2.0.0"},
+    metadata={"version": "2.1.0"},
     partitions_def=partitions.attribution_change_partition,
     group_name="attribution",
     pool="default",
@@ -148,6 +149,7 @@ def attribution_change_trace(
             llm=llm,
         ),
         steps=config.steps,
+        retries=config.retries,
     )
 
     monitor = TraceMonitor(sink=context.log.info)

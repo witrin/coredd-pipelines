@@ -94,7 +94,7 @@ def localization_inducer_reference(
 
 
 @asset(
-    metadata={"version": "2.0.0"},
+    metadata={"version": "2.1.0"},
     partitions_def=partitions.localization_inducer_partition,
     group_name="localization",
     pool="default",
@@ -174,6 +174,7 @@ def localization_change_trace(
         locate=LocateNode(
             tool=LocateToolFactory(repository),
             llm=llm,
+            retries=config.retries,
         ),
     )
     monitor = TraceMonitor(sink=context.log.info)

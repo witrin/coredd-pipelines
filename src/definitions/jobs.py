@@ -908,10 +908,12 @@ def audit_change_request_op(
     }
 
     # Defect line markings from the localization stage, keyed by
-    # (name, number, defect-sha) -> path -> sorted unique 1-based line numbers.
-    # Single lines are collapsed into half-open [start, end) intervals when
-    # written onto the target so the annotation component can pre-mark them.
-    markings: dict[tuple[str, int, str], dict[str, list[int]]] = {}
+    # (name, number, defect-sha) -> (path, side) -> sorted unique 1-based line numbers.
+    # A location's line is an L<n>/D<n> reference: L is an after-side line, D a
+    # deleted base-side line. The side-by-side annotation component pre-marks each on
+    # the matching side, so deletions (D) are shown on the base editor. Single lines
+    # are collapsed into half-open [start, end) intervals per (path, side).
+    markings: dict[tuple[str, int, str], dict[tuple[str, str], list[int]]] = {}
     localization = pools.get("localization-change-trace")
     if localization is not None:
         seen_locations: set[str] = set()
@@ -934,7 +936,14 @@ def audit_change_request_op(
                 line = entry.get("line")
                 if path is None or line is None:
                     continue
-                paths.setdefault(path, []).append(int(line))
+                # Resolve the L<n>/D<n> reference to (side, line). A bare number is
+                # an after line for backward compatibility with pre-2.1.0 data.
+                token = str(line).strip()
+                side = "base" if token[:1] == "D" else "after"
+                number = token[1:] if token[:1] in ("L", "D") else token
+                if not number.isdigit():
+                    continue
+                paths.setdefault((path, side), []).append(int(number))
 
     if selection.height == 0:
         raise dg.Failure(description="Audit selection is empty")
@@ -1135,8 +1144,8 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
 
             marks = markings.get((row["name"], int(row["number"]), introducer), {})
             target_annotations = []
-            for path in sorted(marks):
-                lines = sorted(set(marks[path]))
+            for path, side in sorted(marks):
+                lines = sorted(set(marks[(path, side)]))
                 intervals: list[list[int]] = []
                 for line in lines:
                     if intervals and line == intervals[-1][1]:
@@ -1149,6 +1158,7 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
                             "path": path,
                             "lines": interval,
                             "description": "Localized by the benchmark.",
+                            "side": side,
                         }
                     )
             if target_annotations:

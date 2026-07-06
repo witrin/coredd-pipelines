@@ -601,14 +601,18 @@ class AgentSZZGraph:
         seed: Any | None = None,
         search: Any | None = None,
         steps: int = 15,
+        retries: int = 0,
     ) -> None:
         if seed is None or search is None:
             raise ValueError("AgentSZZGraph requires explicit seed and search nodes.")
         if steps < 1:
             raise ValueError("AgentSZZGraph steps must be positive.")
+        if retries < 0:
+            raise ValueError("AgentSZZGraph retries must be non-negative.")
         self._seed = seed
         self._search = search
         self._steps = steps
+        self._retries = retries
         self._graph: AttributionRunnable | None = None
 
     def build(self) -> object:
@@ -674,6 +678,7 @@ class AgentSZZGraph:
                 "seed": state["seed"],
             },
             steps=self._steps,
+            retries=self._retries,
         )
         return {
             "introducer": output["introducer"],
@@ -692,14 +697,18 @@ class AgentSZZGraphBuilder:
         seed: Callable[[VersionControl], Any] | None = None,
         search: Callable[[VersionControl], Any] | None = None,
         steps: int = 15,
+        retries: int = 0,
     ) -> None:
         if seed is None or search is None:
             raise ValueError("AgentSZZGraphBuilder requires explicit node builders.")
         if steps < 1:
             raise ValueError("AgentSZZGraphBuilder steps must be positive.")
+        if retries < 0:
+            raise ValueError("AgentSZZGraphBuilder retries must be non-negative.")
         self._seed = seed
         self._search = search
         self._steps = steps
+        self._retries = retries
 
     def create(
         self,
@@ -709,4 +718,5 @@ class AgentSZZGraphBuilder:
             seed=self._seed(repository),
             search=self._search(repository),
             steps=self._steps,
+            retries=self._retries,
         )

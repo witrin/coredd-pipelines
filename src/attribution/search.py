@@ -310,6 +310,46 @@ class SearchNormalizer:
         return {"introducer": introducer}
 
 
+class IntroducerValidator:
+    """Check that a reported introducer exists and predates the correction.
+
+    The search tools already forbid the agent from inspecting commits that are not
+    ancestors of the correction, but the final structured answer bypasses those
+    guards. A ``null`` answer is a deliberate abstention, not an error, so it is left
+    to the caller; a non-null SHA is rejected when it does not resolve in the
+    repository or is not an ancestor of the correction's after commit.
+    """
+
+    def __init__(self, repository: VersionControl, after: str) -> None:
+        self._repository = repository
+        self._after = after
+
+    def check(self, introducer: str | None) -> tuple[bool, str | None]:
+        if introducer is None:
+            return True, None
+        import pygit2
+
+        handle = self._repository.handle
+        try:
+            resolved = str(
+                handle.revparse_single(introducer).peel(pygit2.Commit).id
+            )
+        except (KeyError, ValueError):
+            return False, (
+                f"Commit {introducer} does not exist in this repository. Return the "
+                f"full SHA of a real commit that predates the correction, or null."
+            )
+        after_oid = pygit2.Oid(hex=self._after)
+        oid = pygit2.Oid(hex=resolved)
+        if oid == after_oid or not handle.descendant_of(after_oid, oid):
+            return False, (
+                f"Commit {introducer[:12]} does not predate the correction. The "
+                f"introducer must be an ancestor of {self._after[:12]}. Return an "
+                f"earlier commit, or null."
+            )
+        return True, None
+
+
 class DuplicateCallGuard:
     """Skip tool execution when the same call was already made with identical arguments."""
 
@@ -518,12 +558,15 @@ class RepositorySearchNode:
         input: Seed,
         *,
         steps: int = 30,
+        retries: int = 0,
     ) -> SearchOutput:
         base = input.get("base")
         after = input.get("after")
         seed = input.get("seed")
         if steps < 1:
             raise ValueError("RepositorySearchNode steps must be positive.")
+        if retries < 0:
+            raise ValueError("RepositorySearchNode retries must be non-negative.")
         if (
             base is None
             or after is None
@@ -539,8 +582,25 @@ class RepositorySearchNode:
         if isinstance(tool, RepositoryToolFactory):
             tool = tool.create(base, after)
 
-        result = self._invoke(seed, tool, steps=steps)
-        return SearchNormalizer().normalize(result)
+        graph, result, limit = self._invoke(seed, tool, steps=steps)
+        output = SearchNormalizer().normalize(result)
+
+        # Retry: the tools guard exploration, but the final SHA can still be a
+        # hallucinated or post-correction commit. Validate it and give the agent one
+        # more attempt with the concrete reason, keeping its full search context.
+        validator = IntroducerValidator(tool._repository, tool._after)
+        for _ in range(retries):
+            ok, feedback = validator.check(output["introducer"])
+            if ok or not isinstance(result, dict):
+                break
+            messages = list(result["messages"])
+            messages.append(HumanMessage(content=feedback))
+            result = graph.invoke(
+                {"messages": messages, "remaining_steps": limit},
+                config={"recursion_limit": limit},
+            )
+            output = SearchNormalizer().normalize(result)
+        return output
 
     def _invoke(
         self,
@@ -548,7 +608,7 @@ class RepositorySearchNode:
         tool: RepositoryTool,
         *,
         steps: int,
-    ) -> object:
+    ) -> tuple[object, object, int]:
         tools = tool.tools()
         node = ToolNode(
             tools,
@@ -609,10 +669,11 @@ class RepositorySearchNode:
             pre_model_hook=ResolvedErrorFilter(),
             post_model_hook=budget,
         )
-        return graph.invoke(
+        result = graph.invoke(
             {
                 "messages": [HumanMessage(content=SearchPrompt().render(seed))],
                 "remaining_steps": limit,
             },
             config={"recursion_limit": limit},
         )
+        return graph, result, limit

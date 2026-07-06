@@ -29,6 +29,10 @@ class Numbering(enum.Enum):
     NONE prefixes nothing. REF prefixes the file-hunk-line reference label (used by
     HintNode to address lines). AFTER and BASE prefix the absolute line number in the
     grep format ``L<n>:`` on the after / base revision; BOTH prefixes both numbers.
+    SIGNED gives every line exactly one reference the agent can copy verbatim:
+    ``L<after>`` for a present line (context or addition) and ``D<base>`` for a deleted
+    line, which has no after-side number. The distinct ``L``/``D`` namespaces keep a
+    deleted line unambiguous even when its base number equals an after number.
     """
 
     NONE = "none"
@@ -36,6 +40,7 @@ class Numbering(enum.Enum):
     AFTER = "after"
     BASE = "base"
     BOTH = "both"
+    SIGNED = "signed"
 
 
 class PatchView:
@@ -84,6 +89,15 @@ class PatchView:
         # numbers in grep format, blank where the line has no number on that side.
         if self._numbering is Numbering.REF:
             return f"{file_index}-{hunk_index}-{line_index}"
+        if self._numbering is Numbering.SIGNED:
+            # One copyable reference per line: L<after> for a present line, D<base>
+            # for a deleted line (no after number). No trailing colon so the agent
+            # reports it verbatim.
+            if isinstance(line.target_line_no, int):
+                return f"L{line.target_line_no}"
+            if isinstance(line.source_line_no, int):
+                return f"D{line.source_line_no}"
+            return ""
         after = (
             f"L{line.target_line_no}:"
             if isinstance(line.target_line_no, int)

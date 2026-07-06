@@ -359,5 +359,166 @@ class TestLocateGraph(unittest.TestCase):
         self.assertEqual(result["nodes"]["locate"], locate.run.return_value)
 
 
+class _Delta:
+    def __init__(self, path: str) -> None:
+        self.new_file = type("F", (), {"path": path})()
+        self.old_file = type("F", (), {"path": path})()
+
+
+class _Hunk:
+    def __init__(self, old_start, old_lines, new_start, new_lines) -> None:
+        self.old_start = old_start
+        self.old_lines = old_lines
+        self.new_start = new_start
+        self.new_lines = new_lines
+
+
+class _Patch:
+    def __init__(self, path, hunks) -> None:
+        self.delta = _Delta(path)
+        self.hunks = hunks
+
+
+class _Repo:
+    """Minimal VersionControl stand-in exposing only diff()."""
+
+    def __init__(self, patches) -> None:
+        self._patches = patches
+
+    def diff(self, base, after, context=0):
+        return self._patches
+
+
+class TestReferenceLine(unittest.TestCase):
+    def setUp(self) -> None:
+        from benchmark.localization.reason import HunkSpans
+
+        # deletion of base 543-544, addition of after 545-550
+        self.spans = HunkSpans(before=[(543, 545)], after=[(545, 551)])
+
+    def test_addition_reference_valid(self) -> None:
+        from benchmark.localization.reason import ReferenceLine
+
+        self.assertEqual(ReferenceLine("L548").classify(self.spans), "ok")
+
+    def test_deletion_reference_valid(self) -> None:
+        from benchmark.localization.reason import ReferenceLine
+
+        self.assertEqual(ReferenceLine("D543").classify(self.spans), "ok")
+        self.assertEqual(ReferenceLine("D544").classify(self.spans), "ok")
+
+    def test_outside_hunks(self) -> None:
+        from benchmark.localization.reason import ReferenceLine
+
+        self.assertEqual(ReferenceLine("L999").classify(self.spans), "outside_hunks")
+        self.assertEqual(ReferenceLine("D999").classify(self.spans), "outside_hunks")
+
+    def test_bad_reference(self) -> None:
+        from benchmark.localization.reason import ReferenceLine
+
+        self.assertEqual(ReferenceLine("junk").classify(self.spans), "bad_ref")
+
+    def test_bare_number_is_after(self) -> None:
+        from benchmark.localization.reason import ReferenceLine
+
+        ref = ReferenceLine("548")
+        self.assertFalse(ref.deleted)
+        self.assertEqual(ref.number, 548)
+
+    def test_wrong_file(self) -> None:
+        from benchmark.localization.reason import HunkSpans, ReferenceLine
+
+        self.assertEqual(ReferenceLine("L548").classify(HunkSpans([], [])), "wrong_file")
+
+
+class TestLocationValidator(unittest.TestCase):
+    def test_partition_splits_good_and_bad(self) -> None:
+        from benchmark.localization.reason import LocationValidator
+
+        repo = _Repo([_Patch("f.py", [_Hunk(543, 2, 545, 6)])])
+        validator = LocationValidator(
+            repo, Change(number=0, base="b", after="a", description="d")
+        )
+        accepted, rejected = validator.partition(
+            [
+                {"file": "f.py", "line": "D543"},
+                {"file": "f.py", "line": "L548"},
+                {"file": "f.py", "line": "L999"},
+                {"file": "other.py", "line": "L5"},
+            ]
+        )
+        self.assertEqual(
+            accepted,
+            [{"file": "f.py", "line": "D543"}, {"file": "f.py", "line": "L548"}],
+        )
+        verdicts = {loc["line"]: verdict for loc, verdict in rejected}
+        self.assertEqual(verdicts["L999"], "outside_hunks")
+        self.assertEqual(verdicts["L5"], "wrong_file")
+
+
+class TestLocateNodeRetry(unittest.TestCase):
+    def _tool(self):
+        tool = Mock()
+        tool.tools.return_value = []
+        # repo diff: change to f.py adding after lines 5-6
+        tool._repository = _Repo([_Patch("f.py", [_Hunk(5, 0, 5, 2)])])
+        return tool
+
+    def test_retry_keeps_good_replaces_bad(self) -> None:
+        from benchmark.localization import reason as R
+
+        node = R.LocateNode(tool=Mock(), llm=Mock(), retries=1)
+        tool = self._tool()
+        first = R.LocateResponseSchema(
+            locations=[
+                R.LocateItemSchema(file="f.py", line="L5"),
+                R.LocateItemSchema(file="f.py", line="L999"),
+            ],
+            reason="first",
+        )
+        second = R.LocateResponseSchema(
+            locations=[R.LocateItemSchema(file="f.py", line="L6")],
+            reason="second",
+        )
+        graph = Mock()
+        graph.invoke.side_effect = [
+            {"messages": [], "structured_response": first},
+            {"messages": [], "structured_response": second},
+        ]
+        with patch.object(R, "create_react_agent", return_value=graph):
+            out = node._search(
+                rationale="r",
+                files=["f.py"],
+                defect=Change(number=0, base="db", after="da", description="d"),
+                correction=Change(number=1, base="cb", after="ca", description="c"),
+                tool=tool,
+            )
+
+        self.assertEqual(graph.invoke.call_count, 2)
+        # L5 (good, kept) and L6 (replacement) survive; L999 (bad) is dropped.
+        self.assertEqual(sorted(item.line for item in out.locations), ["L5", "L6"])
+
+    def test_no_retry_when_all_valid(self) -> None:
+        from benchmark.localization import reason as R
+
+        node = R.LocateNode(tool=Mock(), llm=Mock(), retries=1)
+        tool = self._tool()
+        good = R.LocateResponseSchema(
+            locations=[R.LocateItemSchema(file="f.py", line="L5")], reason=None
+        )
+        graph = Mock()
+        graph.invoke.side_effect = [{"messages": [], "structured_response": good}]
+        with patch.object(R, "create_react_agent", return_value=graph):
+            out = node._search(
+                rationale="r",
+                files=["f.py"],
+                defect=Change(number=0, base="db", after="da", description="d"),
+                correction=Change(number=1, base="cb", after="ca", description="c"),
+                tool=tool,
+            )
+        self.assertEqual(graph.invoke.call_count, 1)
+        self.assertEqual([i.line for i in out.locations], ["L5"])
+
+
 if __name__ == "__main__":
     unittest.main()
