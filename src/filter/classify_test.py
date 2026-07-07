@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from benchmark.filter.classify import ClassifyNode
+from benchmark.filter.classify import ClassifyNode, ErrorPolicy
 from benchmark.filter.graph import ClassifyGraph
 
 
@@ -84,6 +84,53 @@ class TestClassifyGraph(unittest.TestCase):
 
         classify.run.assert_called_once_with({"title": "t", "description": "d"})
         self.assertEqual(result, {"labels": ["Intrinsic"]})
+
+
+class TestErrorPolicy(unittest.TestCase):
+    """Only PR-specific, deterministically hopeless failures are abortable."""
+
+    def _length_error(self):
+        import openai
+
+        # The constructor needs a full completion object; only the type matters
+        # for the isinstance check, so build the instance without running it.
+        return openai.LengthFinishReasonError.__new__(openai.LengthFinishReasonError)
+
+    def _unicode_error(self):
+        try:
+            "\ud800".encode("utf-8")
+        except UnicodeError as error:
+            return error
+
+    def _status_error(self, cls):
+        import httpx
+
+        response = httpx.Response(500, request=httpx.Request("POST", "http://x"))
+        return cls("boom", response=response, body=None)
+
+    def test_length_is_abortable(self) -> None:
+        self.assertTrue(ErrorPolicy().is_abortable(self._length_error()))
+
+    def test_unicode_is_abortable(self) -> None:
+        self.assertTrue(ErrorPolicy().is_abortable(self._unicode_error()))
+
+    def test_transient_and_config_not_abortable(self) -> None:
+        import openai
+
+        policy = ErrorPolicy()
+        for cls in (
+            openai.RateLimitError,
+            openai.InternalServerError,
+            openai.BadRequestError,
+            openai.AuthenticationError,
+        ):
+            self.assertFalse(policy.is_abortable(self._status_error(cls)), cls.__name__)
+
+    def test_unknown_not_abortable(self) -> None:
+        self.assertFalse(ErrorPolicy().is_abortable(RuntimeError("boom")))
+
+    def test_label_is_type_name(self) -> None:
+        self.assertEqual(ErrorPolicy().label(self._unicode_error()), "UnicodeEncodeError")
 
 
 if __name__ == "__main__":

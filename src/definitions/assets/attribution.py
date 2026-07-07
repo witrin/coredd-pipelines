@@ -101,8 +101,10 @@ def attribution_change_trace(
     correction = keys["correction"]
     run = int(keys["run"])
 
-    frame = pl.from_arrow(pa.concat_tables(filter_change_labels.values())).filter(
-        pl.col("labels").list.contains("Intrinsic")
+    frame = (
+        pl.from_arrow(pa.concat_tables(filter_change_labels.values()))
+        .filter(~pl.col("aborted"))
+        .filter(pl.col("labels").list.contains("Intrinsic"))
     )
     pairs = [
         f"{name}#{number}"

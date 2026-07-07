@@ -94,7 +94,7 @@ def localization_inducer_reference(
 
 
 @asset(
-    metadata={"version": "2.1.0"},
+    metadata={"version": "2.2.0"},
     partitions_def=partitions.localization_inducer_partition,
     group_name="localization",
     pool="default",
@@ -185,6 +185,7 @@ def localization_change_trace(
     try:
         result = graph.invoke(change, defect=defect, trace=trace)
         locations = json.dumps(result.get("locations") or [], sort_keys=True)
+        aborted = False
     except Exception as error:
         context.log.warning(
             "Localization failed for %s/%s defect %s: %s",
@@ -194,6 +195,7 @@ def localization_change_trace(
             error,
         )
         locations = json.dumps([])
+        aborted = True
 
     table = trace.to_table()
     rows = table.num_rows
@@ -203,6 +205,7 @@ def localization_change_trace(
         .append_column("number", pa.array([number] * rows, type=pa.int64()))
         .append_column("defect", pa.array([sha] * rows, type=pa.string()))
         .append_column("locations", pa.array([locations] * rows, type=pa.string()))
+        .append_column("aborted", pa.array([aborted] * rows, type=pa.bool_()))
     )
 
     context.log.info("Localized %s/%s defect %s", name, number, sha[:8])

@@ -424,7 +424,7 @@ def filter_change_reference(
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "2.0.0"},
     partitions_def=partitions.filter_change_labels_partition,
     group_name="filter",
     kinds={"gcs"},
@@ -437,7 +437,7 @@ def filter_change_labels(
     import os
 
     from langchain_openai import ChatOpenAI
-    from benchmark.filter.classify import ClassifyNode
+    from benchmark.filter.classify import ClassifyNode, ErrorPolicy
     from benchmark.filter.graph import ClassifyGraph
 
     partition = context.partition_key
@@ -461,19 +461,47 @@ def filter_change_labels(
         streaming=True,
     )
     graph = ClassifyGraph(classify=ClassifyNode(llm=llm))
+    policy = ErrorPolicy()
 
     names: list[str] = []
     numbers: list[int] = []
     labels: list[list[str]] = []
+    aborted: list[bool] = []
+    errors: list[str | None] = []
     for row in rows:
-        output = graph.invoke(
-            title=row["title"] or "",
-            description=row["body"] or "",
-        )
+        try:
+            output = graph.invoke(
+                title=row["title"] or "",
+                description=row["body"] or "",
+            )
+            row_labels = output["labels"]
+            row_aborted = False
+            row_error = None
+        except Exception as error:
+            # Only PR-specific, deterministically hopeless failures are quit here;
+            # transient/config/unknown errors propagate so the shard fails loudly.
+            if not policy.is_abortable(error):
+                raise
+            context.log.warning(
+                "Filter aborted %s/%s: %s", row["name"], row["number"], error
+            )
+            row_labels = []
+            row_aborted = True
+            row_error = policy.label(error)
         names.append(row["name"])
         numbers.append(row["number"])
-        labels.append(output["labels"])
+        labels.append(row_labels)
+        aborted.append(row_aborted)
+        errors.append(row_error)
 
     context.log.info("Classified %d changes in %s", len(rows), partition)
 
-    return pa.table({"name": names, "number": numbers, "labels": labels})
+    return pa.table(
+        {
+            "name": names,
+            "number": numbers,
+            "labels": labels,
+            "aborted": aborted,
+            "error": errors,
+        }
+    )

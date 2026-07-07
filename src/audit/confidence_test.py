@@ -118,5 +118,75 @@ class TestResolveVoteAndTieBreak(unittest.TestCase):
         self.assertAlmostEqual(rows[0]["temporal_distance"], 20.0)
 
 
+class TestAbortedInducers(unittest.TestCase):
+    """_aborted_inducers collects (name, number, defect) of aborted localizations."""
+
+    def _partition(self, name, number, defect, aborted) -> pa.Table:
+        return pa.table(
+            {
+                "name": pa.array([name, name], type=pa.string()),
+                "number": pa.array([number, number], type=pa.int64()),
+                "defect": pa.array([defect, defect], type=pa.string()),
+                "aborted": pa.array([aborted, aborted], type=pa.bool_()),
+            }
+        )
+
+    def test_collects_only_aborted(self) -> None:
+        localization = {
+            "loc|0": self._partition("o/r", 1, "foo", True),
+            "loc|1": self._partition("o/r", 2, "bar", False),
+        }
+        aborted = ConfidenceComputation({}, localization)._aborted_inducers()
+        self.assertEqual(aborted, {("o/r", 1, "foo")})
+
+    def test_empty_without_localization(self) -> None:
+        self.assertEqual(ConfidenceComputation({})._aborted_inducers(), set())
+
+
+class TestComputeExcludesAbortedLocalization(unittest.TestCase):
+    """A correction whose voted introducer aborted localization gets no rho."""
+
+    def _localization(self, name, number, defect, aborted) -> pa.Table:
+        return pa.table(
+            {
+                "name": pa.array([name], type=pa.string()),
+                "number": pa.array([number], type=pa.int64()),
+                "defect": pa.array([defect], type=pa.string()),
+                "aborted": pa.array([aborted], type=pa.bool_()),
+            }
+        )
+
+    def test_aborted_correction_dropped(self) -> None:
+        resolved = [
+            {"name": "o/r", "number": 1, "introducer": "foo",
+             "vote": 1.0, "temporal_distance": 1.0},
+            {"name": "o/r", "number": 2, "introducer": "bar",
+             "vote": 1.0, "temporal_distance": 2.0},
+        ]
+        localization = {"loc|0": self._localization("o/r", 1, "foo", True)}
+        computation = ConfidenceComputation({}, localization)
+        with patch.object(ConfidenceComputation, "_resolve", return_value=resolved), \
+             patch.object(ConfidenceComputation, "_predictions", return_value=pl.DataFrame()):
+            table = computation.compute(pl.DataFrame(), ["o/r"])
+        result = pl.from_arrow(table)
+        # #1 (foo) is aborted -> dropped; only #2 (bar) survives, single row -> rho 1.0
+        self.assertEqual(result.height, 1)
+        self.assertEqual(result["number"].to_list(), [2])
+        self.assertAlmostEqual(result["rho"].to_list()[0], 1.0)
+
+    def test_no_localization_keeps_all(self) -> None:
+        resolved = [
+            {"name": "o/r", "number": 1, "introducer": "foo",
+             "vote": 1.0, "temporal_distance": 1.0},
+            {"name": "o/r", "number": 2, "introducer": "bar",
+             "vote": 0.5, "temporal_distance": 2.0},
+        ]
+        computation = ConfidenceComputation({})
+        with patch.object(ConfidenceComputation, "_resolve", return_value=resolved), \
+             patch.object(ConfidenceComputation, "_predictions", return_value=pl.DataFrame()):
+            table = computation.compute(pl.DataFrame(), ["o/r"])
+        self.assertEqual(pl.from_arrow(table).height, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

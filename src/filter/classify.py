@@ -82,3 +82,24 @@ class ClassifyNode:
             title=title or "(none)",
             description=description or "(none)",
         )
+
+
+class ErrorPolicy:
+    """Decide whether a classification failure may be silently marked aborted.
+
+    Only PR-specific, deterministically hopeless failures are abortable: retrying
+    them on the same PR input would reproduce the exact same error, so the shard
+    quits that one PR and keeps going. Everything else — transient provider errors
+    (rate limit, timeout, 5xx), configuration/environment errors (auth, malformed
+    request), and unknown exceptions — is left to propagate so the shard fails
+    loudly: a re-run heals the transient ones, and the rest stay visible instead of
+    vanishing as a wrongly-aborted whole shard.
+    """
+
+    def is_abortable(self, error: Exception) -> bool:
+        from openai import LengthFinishReasonError
+
+        return isinstance(error, (LengthFinishReasonError, UnicodeError))
+
+    def label(self, error: Exception) -> str:
+        return type(error).__name__

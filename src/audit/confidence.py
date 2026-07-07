@@ -21,8 +21,37 @@ class ConfidenceComputation:
     confidence notebook.
     """
 
-    def __init__(self, traces: dict[str, pa.Table]) -> None:
+    def __init__(
+        self,
+        traces: dict[str, pa.Table],
+        localization: dict[str, pa.Table] | None = None,
+    ) -> None:
         self._traces = traces
+        self._localization = localization or {}
+
+    def _aborted_inducers(self) -> set[tuple[str, int, str]]:
+        # (name, number, defect) of every localization run that aborted. A
+        # correction whose voted introducer aborted localization is dropped
+        # before ranking, so it never receives an rho and never reaches the
+        # audit sample.
+        aborted: set[tuple[str, int, str]] = set()
+        for table in self._localization.values():
+            if table.num_rows == 0:
+                continue
+            record = (
+                pl.from_arrow(table)
+                .select("name", "number", "defect", "aborted")
+                .row(0, named=True)
+            )
+            if record["aborted"]:
+                aborted.add(
+                    (
+                        str(record["name"]),
+                        int(record["number"]),
+                        str(record["defect"]),
+                    )
+                )
+        return aborted
 
     def _predictions(self) -> pl.DataFrame:
         rows: list[dict[str, object]] = []
@@ -107,6 +136,13 @@ class ConfidenceComputation:
 
     def compute(self, reference: pl.DataFrame, names: list[str]) -> pa.Table:
         rows = self._resolve(self._predictions(), reference, names)
+        aborted = self._aborted_inducers()
+        rows = [
+            row
+            for row in rows
+            if (str(row["name"]), int(row["number"]), str(row["introducer"]))
+            not in aborted
+        ]
         if not rows:
             return pa.table(
                 {
