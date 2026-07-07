@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, TypeAlias, TypedDict
 
 from benchmark.attribution.domain import Change, JsonDict
-from benchmark.attribution.tracing import AttributionRunnable, Trace
+from benchmark.tracing import TracedRunnable, Trace
 
 
 NodeState: TypeAlias = JsonDict
@@ -40,7 +40,7 @@ class LocateGraph:
         self._explain = explain
         self._aggregate = aggregate
         self._locate = locate
-        self._graph: AttributionRunnable | None = None
+        self._graph: TracedRunnable | None = None
 
     def build(self) -> object:
         from langchain_core.runnables import RunnableLambda
@@ -73,7 +73,7 @@ class LocateGraph:
         )
         graph.add_edge("aggregate", "locate")
         graph.add_edge("locate", END)
-        return AttributionRunnable(graph.compile())
+        return TracedRunnable(graph.compile())
 
     def invoke(
         self,
@@ -93,7 +93,7 @@ class LocateGraph:
             "locations": list(result.get("locations") or []),
         }
 
-    def _compiled(self) -> AttributionRunnable:
+    def _compiled(self) -> TracedRunnable:
         if self._graph is None:
             self._graph = self.build()
         return self._graph

@@ -17,7 +17,7 @@ from benchmark.attribution.history import (
     VersionControl,
     VersionControlSnapshot,
 )
-from benchmark.attribution.tracing import Trace
+from benchmark.tracing import Trace
 
 
 @dataclass(frozen=True)

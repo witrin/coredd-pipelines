@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, TypedDict
 
 from benchmark.filter.classify import ClassifyOutput
+from benchmark.tracing import TracedRunnable, Trace
 
 
 class ClassifyGraphState(TypedDict, total=False):
@@ -18,7 +19,7 @@ class ClassifyGraph:
         if classify is None:
             raise ValueError("ClassifyGraph requires an explicit classify node.")
         self._classify = classify
-        self._graph: object | None = None
+        self._graph: TracedRunnable | None = None
 
     def build(self) -> object:
         from langchain_core.runnables import RunnableLambda
@@ -31,21 +32,24 @@ class ClassifyGraph:
         )
         graph.add_edge(START, "classify")
         graph.add_edge("classify", END)
-        return graph.compile()
+        return TracedRunnable(graph.compile())
 
     def invoke(
         self,
         title: str,
         description: str,
+        *,
+        trace: Trace | None = None,
         **kwargs: object,
     ) -> ClassifyOutput:
         result = self._compiled().invoke(
             {"title": title, "description": description},
+            trace=trace,
             **kwargs,
         )
         return {"labels": list(result.get("labels", []))}
 
-    def _compiled(self) -> object:
+    def _compiled(self) -> TracedRunnable:
         if self._graph is None:
             self._graph = self.build()
         return self._graph

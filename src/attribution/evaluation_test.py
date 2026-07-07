@@ -16,7 +16,7 @@ from benchmark.attribution.evaluation import (
     TraceProcessor,
     TraceSerializer,
 )
-from benchmark.attribution.tracing import Trace
+from benchmark.tracing import Trace
 
 
 class TestTraceSerializer(unittest.TestCase):

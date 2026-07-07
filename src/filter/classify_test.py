@@ -72,8 +72,25 @@ class TestClassifyGraph(unittest.TestCase):
 
         result = graph.invoke("t", "d")
 
-        compiled.invoke.assert_called_once_with({"title": "t", "description": "d"})
+        compiled.invoke.assert_called_once_with(
+            {"title": "t", "description": "d"}, trace=None
+        )
         self.assertEqual(result, {"labels": ["Other"]})
+
+    def test_classify_invoke_forwards_trace(self) -> None:
+        from benchmark.tracing import Trace
+
+        graph = ClassifyGraph(classify=Mock(spec_set=["run"]))
+        compiled = Mock(spec_set=["invoke"])
+        compiled.invoke.return_value = {"labels": ["Other"]}
+        graph.build = Mock(return_value=compiled)
+        trace = Trace(seed="filter-test")
+
+        graph.invoke("t", "d", trace=trace)
+
+        compiled.invoke.assert_called_once_with(
+            {"title": "t", "description": "d"}, trace=trace
+        )
 
     def test_run_classify_delegates_to_node(self) -> None:
         classify = Mock(spec_set=["run"])

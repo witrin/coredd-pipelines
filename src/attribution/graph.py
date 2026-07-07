@@ -12,7 +12,7 @@ from benchmark.attribution.reason import (
     SelectNode,
 )
 from benchmark.attribution.search import SeedItem
-from benchmark.attribution.tracing import AttributionRunnable, Trace
+from benchmark.tracing import TracedRunnable, Trace
 
 
 NodeState: TypeAlias = JsonDict
@@ -106,7 +106,7 @@ class LLM4SZZGraph:
         self._select = select or SelectNode()
         self._abort = abort or AbortNode()
         self._finalize = finalize or FinalizeNode()
-        self._graph: AttributionRunnable | None = None
+        self._graph: TracedRunnable | None = None
 
     def build(self) -> object:
         from langchain_core.runnables import RunnableLambda
@@ -191,7 +191,7 @@ class LLM4SZZGraph:
         )
         graph.add_edge("abort", END)
         graph.add_edge("finalize", END)
-        return AttributionRunnable(graph.compile())
+        return TracedRunnable(graph.compile())
 
     def invoke(
         self,
@@ -210,7 +210,7 @@ class LLM4SZZGraph:
             "aborted": bool(result.get("aborted", False)),
         }
 
-    def _compiled(self) -> AttributionRunnable:
+    def _compiled(self) -> TracedRunnable:
         if self._graph is None:
             self._graph = self.build()
         return self._graph
@@ -427,7 +427,7 @@ class AgenticSZZGraph:
         self._seed = seed
         self._search = search
         self._steps = steps
-        self._graph: AttributionRunnable | None = None
+        self._graph: TracedRunnable | None = None
 
     def build(self) -> object:
         from langchain_core.runnables import RunnableLambda
@@ -445,7 +445,7 @@ class AgenticSZZGraph:
         graph.add_edge(START, "seed")
         graph.add_edge("seed", "search")
         graph.add_edge("search", END)
-        return AttributionRunnable(graph.compile())
+        return TracedRunnable(graph.compile())
 
     def invoke(
         self,
@@ -467,7 +467,7 @@ class AgenticSZZGraph:
             "aborted": bool(result.get("aborted", False)),
         }
 
-    def _compiled(self) -> AttributionRunnable:
+    def _compiled(self) -> TracedRunnable:
         if self._graph is None:
             self._graph = self.build()
         return self._graph
@@ -613,7 +613,7 @@ class AgentSZZGraph:
         self._search = search
         self._steps = steps
         self._retries = retries
-        self._graph: AttributionRunnable | None = None
+        self._graph: TracedRunnable | None = None
 
     def build(self) -> object:
         from langchain_core.runnables import RunnableLambda
@@ -631,7 +631,7 @@ class AgentSZZGraph:
         graph.add_edge(START, "seed")
         graph.add_edge("seed", "search")
         graph.add_edge("search", END)
-        return AttributionRunnable(graph.compile())
+        return TracedRunnable(graph.compile())
 
     def invoke(
         self,
@@ -653,7 +653,7 @@ class AgentSZZGraph:
             "aborted": bool(result.get("aborted", False)),
         }
 
-    def _compiled(self) -> AttributionRunnable:
+    def _compiled(self) -> TracedRunnable:
         if self._graph is None:
             self._graph = self.build()
         return self._graph

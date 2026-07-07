@@ -43,7 +43,7 @@ from benchmark.attribution.search import (
     RepositorySearchNode,
     RepositorySeedNode,
 )
-from benchmark.attribution.tracing import Trace
+from benchmark.tracing import Trace
 from benchmark.attribution.validation import (
     GitHubRedaction,
     KnowledgeGraphSetup,
@@ -104,6 +104,7 @@ def attribution_change_trace(
     frame = (
         pl.from_arrow(pa.concat_tables(filter_change_labels.values()))
         .filter(~pl.col("aborted"))
+        .unique(subset=["name", "number"])
         .filter(pl.col("labels").list.contains("Intrinsic"))
     )
     pairs = [

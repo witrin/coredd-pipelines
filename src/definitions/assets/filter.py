@@ -424,21 +424,31 @@ def filter_change_reference(
 
 
 @asset(
-    metadata={"version": "2.0.0"},
+    metadata={"version": "3.0.0"},
     partitions_def=partitions.filter_change_labels_partition,
     group_name="filter",
+    pool="default",
     kinds={"gcs"},
 )
 def filter_change_labels(
     context: dg.AssetExecutionContext,
     filter_change_corpus: pa.Table,
 ) -> pa.Table:
-    """Intrinsic/extrinsic/other labels per pull request, sharded over the change corpus."""
+    """Intrinsic/extrinsic/other labels per pull request, sharded over the change corpus.
+
+    One trace per pull request: the shard partition is the concatenation of every
+    PR's trace, so an event row is attributable to a single (shard, PR) through its
+    ``trace`` value plus the ``name``/``number`` columns. A PR-specific, hopeless
+    failure (see ``ErrorPolicy``) is quit with ``aborted``/``error`` and keeps the
+    shard running; any other error propagates so the shard fails loudly.
+    """
     import os
 
     from langchain_openai import ChatOpenAI
     from benchmark.filter.classify import ClassifyNode, ErrorPolicy
     from benchmark.filter.graph import ClassifyGraph
+    from benchmark.attribution.evaluation import TraceMonitor
+    from benchmark.tracing import Trace
 
     partition = context.partition_key
     bucket = partitions.Shard.from_key(partition)
@@ -462,46 +472,62 @@ def filter_change_labels(
     )
     graph = ClassifyGraph(classify=ClassifyNode(llm=llm))
     policy = ErrorPolicy()
+    monitor = TraceMonitor(sink=context.log.info)
 
-    names: list[str] = []
-    numbers: list[int] = []
-    labels: list[list[str]] = []
-    aborted: list[bool] = []
-    errors: list[str | None] = []
+    if not rows:
+        empty = Trace(seed=f"filter-{partition}").to_table()
+        return (
+            empty
+            .append_column("name", pa.array([], type=pa.string()))
+            .append_column("number", pa.array([], type=pa.int64()))
+            .append_column("labels", pa.array([], type=pa.list_(pa.string())))
+            .append_column("aborted", pa.array([], type=pa.bool_()))
+            .append_column("error", pa.array([], type=pa.string()))
+        )
+
+    tables: list[pa.Table] = []
     for row in rows:
+        name, number = row["name"], row["number"]
+        trace = Trace(
+            seed=f"filter-{partition}-{name.replace('/', '-')}-{number}",
+            hook=lambda event: monitor({"event": event}),
+        )
         try:
             output = graph.invoke(
                 title=row["title"] or "",
                 description=row["body"] or "",
+                trace=trace,
             )
             row_labels = output["labels"]
             row_aborted = False
             row_error = None
         except Exception as error:
-            # Only PR-specific, deterministically hopeless failures are quit here;
-            # transient/config/unknown errors propagate so the shard fails loudly.
             if not policy.is_abortable(error):
                 raise
-            context.log.warning(
-                "Filter aborted %s/%s: %s", row["name"], row["number"], error
-            )
+            context.log.warning("Filter aborted %s/%s: %s", name, number, error)
             row_labels = []
             row_aborted = True
             row_error = policy.label(error)
-        names.append(row["name"])
-        numbers.append(row["number"])
-        labels.append(row_labels)
-        aborted.append(row_aborted)
-        errors.append(row_error)
+
+        table = trace.to_table()
+        count = max(table.num_rows, 1)
+        if table.num_rows == 0:
+            # A failure before any event still keeps the PR's row so it is never
+            # silently dropped from the shard output.
+            table = pa.table(
+                {field.name: pa.array([None], type=field.type) for field in table.schema}
+            )
+        tables.append(
+            table
+            .append_column("name", pa.array([name] * count, type=pa.string()))
+            .append_column("number", pa.array([number] * count, type=pa.int64()))
+            .append_column(
+                "labels", pa.array([row_labels] * count, type=pa.list_(pa.string()))
+            )
+            .append_column("aborted", pa.array([row_aborted] * count, type=pa.bool_()))
+            .append_column("error", pa.array([row_error] * count, type=pa.string()))
+        )
 
     context.log.info("Classified %d changes in %s", len(rows), partition)
 
-    return pa.table(
-        {
-            "name": names,
-            "number": numbers,
-            "labels": labels,
-            "aborted": aborted,
-            "error": errors,
-        }
-    )
+    return pa.concat_tables(tables)

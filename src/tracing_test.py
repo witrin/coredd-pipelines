@@ -4,9 +4,8 @@ import json
 import unittest
 from unittest.mock import Mock
 
-from benchmark.attribution.tracing import (
-    AttributionRunnable,
-    ResultTable,
+from benchmark.tracing import (
+    TracedRunnable,
     Trace,
     TracingCallbackHandler,
 )
@@ -76,18 +75,6 @@ class TestTrace(unittest.TestCase):
                 "event",
                 "payload",
             ],
-        )
-
-        result_table = ResultTable.from_result(
-            {
-                "summary": "ok",
-                "introducer": None,
-                "aborted": False,
-            }
-        )
-        self.assertEqual(
-            result_table.column_names,
-            ["summary", "introducer", "aborted", "state_json"],
         )
 
     def test_trace_roundtrip(self) -> None:
@@ -396,11 +383,11 @@ class TestTracingCallbackHandler(unittest.TestCase):
         )
 
 
-class TestAttributionRunnable(unittest.TestCase):
+class TestTracedRunnable(unittest.TestCase):
     def test_invoke_trace(self) -> None:
         compiled = Mock(spec_set=["invoke"])
         compiled.invoke.return_value = {"summary": "ok", "aborted": False}
-        runnable = AttributionRunnable(compiled)
+        runnable = TracedRunnable(compiled)
 
         result, trace = runnable.invoke_with_trace(
             {"correction": "value"},
@@ -418,7 +405,7 @@ class TestAttributionRunnable(unittest.TestCase):
     def test_invoke_kwargs(self) -> None:
         compiled = Mock(spec_set=["invoke"])
         compiled.invoke.return_value = {"summary": "ok", "aborted": False}
-        runnable = AttributionRunnable(compiled)
+        runnable = TracedRunnable(compiled)
 
         result = runnable.invoke(
             {"correction": "value"},

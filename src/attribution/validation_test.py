@@ -10,7 +10,7 @@ from benchmark.attribution.domain import Change
 from benchmark.attribution.history import VersionControl
 from benchmark.attribution.history_fixture import HistoryFixture
 from benchmark.attribution.knowledge import KnowledgeGraphStore
-from benchmark.attribution.tracing import Trace
+from benchmark.tracing import Trace
 from benchmark.attribution.validation import (
     GitHubRedaction,
     RepositorySetup,

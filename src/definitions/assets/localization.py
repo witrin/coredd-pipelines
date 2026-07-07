@@ -21,7 +21,7 @@ from benchmark.attribution.reason import (
     ExplainNode,
     SummarizeNode,
 )
-from benchmark.attribution.tracing import Trace
+from benchmark.tracing import Trace
 from benchmark.localization.agent import LocateToolFactory
 from benchmark.localization.graph import LocateGraph
 from benchmark.localization.reason import LocateNode

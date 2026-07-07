@@ -9,7 +9,7 @@ from typing import IO, Callable, Iterable, Mapping, Protocol, Sequence
 
 from benchmark.attribution.history import VersionControlSnapshot
 from benchmark.attribution.knowledge import KnowledgeGraphStore
-from benchmark.attribution.tracing import Trace
+from benchmark.tracing import Trace
 
 
 Line = tuple[str, str, int]

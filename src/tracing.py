@@ -531,7 +531,7 @@ class TracingCallbackHandler(BaseCallbackHandler):
             return value
 
 
-class AttributionRunnable:
+class TracedRunnable:
     def __init__(self, compiled: object) -> None:
         self._compiled = compiled
 
@@ -574,18 +574,3 @@ class AttributionRunnable:
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._compiled, name)
-
-
-class ResultTable:
-    @classmethod
-    def from_result(cls, result: dict[str, object]) -> pa.Table:
-        return pa.table(
-            {
-                "summary": [result.get("summary")],
-                "introducer": [result.get("introducer")],
-                "aborted": [result.get("aborted")],
-                "state_json": [
-                    json.dumps(result, default=Trace._json_default, sort_keys=True)
-                ],
-            }
-        )
