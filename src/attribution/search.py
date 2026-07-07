@@ -310,6 +310,17 @@ class SearchNormalizer:
         return {"introducer": introducer}
 
 
+class MalformedSha:
+    """Sentinel type distinguishing a malformed answer from a ``null`` abstention.
+
+    The class object itself is the marker (compared with ``is MalformedSha``). A
+    malformed answer must trigger a retry with a concrete format complaint, whereas
+    ``null`` is a legitimate "no decision" and is left untouched. The marker never
+    escapes the node: the caller degrades a leftover ``MalformedSha`` back to
+    ``None`` before returning.
+    """
+
+
 class IntroducerValidator:
     """Check that a reported introducer exists and predates the correction.
 
@@ -324,9 +335,15 @@ class IntroducerValidator:
         self._repository = repository
         self._after = after
 
-    def check(self, introducer: str | None) -> tuple[bool, str | None]:
+    def check(self, introducer: object) -> tuple[bool, str | None]:
         if introducer is None:
             return True, None
+        if introducer is MalformedSha:
+            return False, (
+                "That is not a valid commit SHA. Answer with the full 7-to-40 "
+                "character hexadecimal SHA of a real commit that predates the "
+                "correction and nothing else, or null."
+            )
         import pygit2
 
         handle = self._repository.handle
@@ -542,6 +559,30 @@ class RepositorySeedNode:
         return result
 
 
+class StrictSearchNormalizer:
+    """Normalize a search answer, rejecting anything that is not wholly a SHA.
+
+    Unlike ``SearchNormalizer``, which extracts the first hex run from the answer,
+    this treats the entire answer as the SHA (surrounding whitespace tolerated),
+    7 to 40 hex characters, case-insensitive, normalized to lowercase. A partial
+    match inside prose, a fragment of a longer token, or a bare short number are
+    reported as ``MalformedSha`` rather than silently accepted, so the retry can
+    complain about the format; ``null`` stays a legitimate abstention.
+    """
+
+    def normalize(self, value: object) -> SearchOutput:
+        structured = value["structured_response"] if isinstance(value, dict) else value
+        introducer = (
+            structured.introducer
+            if isinstance(structured, BaseModel)
+            else structured["introducer"]
+        )
+        if isinstance(introducer, str):
+            match = re.fullmatch(r"[0-9a-fA-F]{7,40}", introducer.strip())
+            introducer = match.group(0).lower() if match else MalformedSha
+        return {"introducer": introducer}
+
+
 class RepositorySearchNode:
     """Run the AgentSZZ-style repository search flow over the prepared tools."""
 
@@ -583,14 +624,15 @@ class RepositorySearchNode:
             tool = tool.create(base, after)
 
         graph, result, limit = self._invoke(seed, tool, steps=steps)
-        output = SearchNormalizer().normalize(result)
+        output = StrictSearchNormalizer().normalize(result)
 
         if retries == 0:
-            return output
+            return self._settle(output)
 
         # Retry: the tools guard exploration, but the final SHA can still be a
-        # hallucinated or post-correction commit. Validate it and give the agent one
-        # more attempt with the concrete reason, keeping its full search context.
+        # hallucinated or post-correction commit, or malformed. Validate it and give
+        # the agent one more attempt with the concrete reason, keeping its full
+        # search context.
         validator = IntroducerValidator(tool._repository, tool._after)
         for _ in range(retries):
             ok, feedback = validator.check(output["introducer"])
@@ -602,7 +644,18 @@ class RepositorySearchNode:
                 {"messages": messages, "remaining_steps": limit},
                 config={"recursion_limit": limit},
             )
-            output = SearchNormalizer().normalize(result)
+            output = StrictSearchNormalizer().normalize(result)
+        return self._settle(output)
+
+    @staticmethod
+    def _settle(output: SearchOutput) -> SearchOutput:
+        """Collapse a still-malformed answer to a null abstention before returning.
+
+        The ``MalformedSha`` sentinel drives the retry feedback but is never a valid
+        result; if the agent never produced a well-formed SHA, the case abstains.
+        """
+        if output["introducer"] is MalformedSha:
+            return {"introducer": None}
         return output
 
     def _invoke(

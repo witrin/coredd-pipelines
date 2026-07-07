@@ -419,12 +419,28 @@ class TestReferenceLine(unittest.TestCase):
 
         self.assertEqual(ReferenceLine("junk").classify(self.spans), "bad_ref")
 
-    def test_bare_number_is_after(self) -> None:
+    def test_bare_number_is_rejected(self) -> None:
         from benchmark.localization.reason import ReferenceLine
 
+        # A bare number hides its side (L vs D); the prefix is mandatory.
         ref = ReferenceLine("548")
-        self.assertFalse(ref.deleted)
-        self.assertEqual(ref.number, 548)
+        self.assertIsNone(ref.number)
+        self.assertIsNone(ref.deleted)
+        self.assertFalse(ref.valid_syntax)
+        self.assertEqual(ref.classify(self.spans), "bad_ref")
+
+    def test_zero_line_is_rejected(self) -> None:
+        from benchmark.localization.reason import ReferenceLine
+
+        # Line numbers are 1-based; L0/D0 are malformed, not a valid location.
+        self.assertEqual(ReferenceLine("L0").classify(self.spans), "bad_ref")
+        self.assertEqual(ReferenceLine("D0").classify(self.spans), "bad_ref")
+        self.assertFalse(ReferenceLine("L0").valid_syntax)
+
+    def test_lowercase_prefix_is_rejected(self) -> None:
+        from benchmark.localization.reason import ReferenceLine
+
+        self.assertEqual(ReferenceLine("l548").classify(self.spans), "bad_ref")
 
     def test_wrong_file(self) -> None:
         from benchmark.localization.reason import HunkSpans, ReferenceLine

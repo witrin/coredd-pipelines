@@ -17,10 +17,12 @@ from benchmark.attribution.search import (
     IntroducerValidator,
     KnowledgeGraphSearchNode,
     KnowledgeGraphSeedNode,
+    MalformedSha,
     RepositorySearchNode,
     RepositorySeedNode,
     ResolvedErrorFilter,
     SearchResult,
+    StrictSearchNormalizer,
     TurnBudget,
 )
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -880,6 +882,48 @@ class TestIntroducerValidator(unittest.TestCase):
             self._repo(resolves="b" * 40, descendant=True), "a" * 40
         )
         self.assertEqual(v.check("b" * 40), (True, None))
+
+    def test_malformed_sentinel_rejected(self) -> None:
+        v = IntroducerValidator(self._repo(resolves=None, descendant=False), "a" * 40)
+        ok, feedback = v.check(MalformedSha)
+        self.assertFalse(ok)
+        self.assertIn("not a valid commit SHA", feedback)
+
+
+class TestStrictSearchNormalizer(unittest.TestCase):
+    def _normalize(self, introducer):
+        return StrictSearchNormalizer().normalize(
+            {"structured_response": {"introducer": introducer}}
+        )["introducer"]
+
+    def test_full_lowercase_sha_passes(self) -> None:
+        self.assertEqual(self._normalize("a" * 40), "a" * 40)
+
+    def test_short_sha_passes(self) -> None:
+        self.assertEqual(self._normalize("deadbeef"), "deadbeef")
+
+    def test_surrounding_whitespace_is_trimmed(self) -> None:
+        self.assertEqual(self._normalize("  2777f2a566bb\n"), "2777f2a566bb")
+
+    def test_uppercase_is_lowercased(self) -> None:
+        self.assertEqual(self._normalize("DEADBEEF"), "deadbeef")
+
+    def test_null_stays_none(self) -> None:
+        self.assertIsNone(self._normalize(None))
+
+    def test_prose_is_malformed(self) -> None:
+        # A partial match inside a sentence must not be silently extracted.
+        self.assertIs(self._normalize("the introducer is deadbeef"), MalformedSha)
+
+    def test_bare_decimal_is_malformed(self) -> None:
+        # Six chars: below the 7-char minimum -> not a SHA.
+        self.assertIs(self._normalize("123456"), MalformedSha)
+
+    def test_too_long_is_malformed(self) -> None:
+        self.assertIs(self._normalize("a" * 41), MalformedSha)
+
+    def test_non_hex_is_malformed(self) -> None:
+        self.assertIs(self._normalize("zzzzzzz"), MalformedSha)
 
 
 if __name__ == "__main__":

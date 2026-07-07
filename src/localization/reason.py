@@ -55,9 +55,12 @@ class ReferenceLine:
     """Parse and validate a ``L<n>``/``D<n>`` line reference against a diff.
 
     ``L<n>`` addresses an after-side line (context or addition); ``D<n>`` a deleted
-    base-side line. A bare number is read as ``L`` for tolerance with older data. The
-    reference is valid when it falls inside a changed hunk of the defective change:
-    ``L`` against the hunk's after range, ``D`` against its before range.
+    base-side line. The prefix is mandatory: a bare number is rejected, because it
+    hides which side it means and would silently be tested against the after range
+    even when the agent meant a deletion. The reference is valid when it falls inside
+    a changed hunk of the defective change: ``L`` against the hunk's after range,
+    ``D`` against its before range. Line numbers are 1-based, so ``n`` must be
+    positive; ``L0``/``D0`` are malformed.
     """
 
     def __init__(self, reference: str) -> None:
@@ -66,11 +69,10 @@ class ReferenceLine:
         self.number: int | None = None
         token = self.raw
         if token[:1] in ("L", "D") and token[1:].isdigit():
-            self.deleted = token[0] == "D"
-            self.number = int(token[1:])
-        elif token.isdigit():
-            self.deleted = False
-            self.number = int(token)
+            number = int(token[1:])
+            if number >= 1:
+                self.deleted = token[0] == "D"
+                self.number = number
 
     @property
     def valid_syntax(self) -> bool:
