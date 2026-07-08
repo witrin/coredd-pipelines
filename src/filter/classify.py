@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import json
 from textwrap import dedent
 from typing import TypedDict
+
+from pydantic import BaseModel, Field
 
 
 class ClassifyInput(TypedDict, total=False):
@@ -12,6 +13,16 @@ class ClassifyInput(TypedDict, total=False):
 
 class ClassifyOutput(TypedDict):
     labels: list[str]
+
+
+class ClassifyResult(BaseModel):
+    labels: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Applicable categories from Intrinsic, Extrinsic, Other; "
+            "1 to 3, no duplicates."
+        ),
+    )
 
 
 class ClassifyNode:
@@ -29,16 +40,13 @@ class ClassifyNode:
         description = input.get("description") or ""
 
         prompt = self._build_prompt(title=title, description=description)
-        response = self._llm.invoke(prompt)
-        text = response.text.strip()
+        result = self._llm.with_structured_output(ClassifyResult).invoke(prompt)
 
-        labels: list[str] = []
+        # Structured output enforces the shape, not the values: keep the allowed
+        # filter and dedup as a second line of defence against a stray label.
         allowed = ["Intrinsic", "Extrinsic", "Other"]
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            payload = {}
-        for label in payload.get("labels", []) if isinstance(payload, dict) else []:
+        labels: list[str] = []
+        for label in result.labels:
             if label in allowed and label not in labels:
                 labels.append(label)
 

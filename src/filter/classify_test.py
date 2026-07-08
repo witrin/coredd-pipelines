@@ -1,52 +1,48 @@
 from __future__ import annotations
 
 import unittest
-from types import SimpleNamespace
 from unittest.mock import Mock
 
-from benchmark.filter.classify import ClassifyNode, ErrorPolicy
+from benchmark.filter.classify import ClassifyNode, ClassifyResult, ErrorPolicy
 from benchmark.filter.graph import ClassifyGraph
 
 
 class TestClassifyNode(unittest.TestCase):
+    def _node(self, labels: list[str]):
+        # Mirror ClassifyNode.run: llm.with_structured_output(...).invoke(prompt).
+        structured = Mock(spec_set=["invoke"])
+        structured.invoke.return_value = ClassifyResult(labels=labels)
+        llm = Mock(spec_set=["with_structured_output"])
+        llm.with_structured_output.return_value = structured
+        return ClassifyNode(llm=llm), llm, structured
+
     def test_classify(self) -> None:
-        llm = Mock(spec_set=["invoke"])
-        llm.invoke.return_value = SimpleNamespace(text='{"labels": ["Intrinsic"]}')
-        node = ClassifyNode(llm=llm)
+        node, llm, structured = self._node(["Intrinsic"])
 
         result = node.run({"title": "Fix crash", "description": "Resolve a parser bug."})
 
-        llm.invoke.assert_called_once()
-        self.assertIn("Fix crash", llm.invoke.call_args.args[0])
-        self.assertIn("Resolve a parser bug.", llm.invoke.call_args.args[0])
+        llm.with_structured_output.assert_called_once_with(ClassifyResult)
+        structured.invoke.assert_called_once()
+        self.assertIn("Fix crash", structured.invoke.call_args.args[0])
+        self.assertIn("Resolve a parser bug.", structured.invoke.call_args.args[0])
         self.assertEqual(result["labels"], ["Intrinsic"])
 
     def test_classify_filters_unknown_labels(self) -> None:
-        llm = Mock(spec_set=["invoke"])
-        llm.invoke.return_value = SimpleNamespace(
-            text='{"labels": ["Intrinsic", "Bogus", "Other"]}'
-        )
-        node = ClassifyNode(llm=llm)
+        node, _, _ = self._node(["Intrinsic", "Bogus", "Other"])
 
         result = node.run({"title": "t", "description": "d"})
 
         self.assertEqual(result["labels"], ["Intrinsic", "Other"])
 
     def test_classify_deduplicates_labels(self) -> None:
-        llm = Mock(spec_set=["invoke"])
-        llm.invoke.return_value = SimpleNamespace(
-            text='{"labels": ["Other", "Other"]}'
-        )
-        node = ClassifyNode(llm=llm)
+        node, _, _ = self._node(["Other", "Other"])
 
         result = node.run({"title": "t", "description": "d"})
 
         self.assertEqual(result["labels"], ["Other"])
 
-    def test_classify_non_json(self) -> None:
-        llm = Mock(spec_set=["invoke"])
-        llm.invoke.return_value = SimpleNamespace(text="not json at all")
-        node = ClassifyNode(llm=llm)
+    def test_classify_empty_result(self) -> None:
+        node, _, _ = self._node([])
 
         result = node.run({"title": "t", "description": "d"})
 
