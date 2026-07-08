@@ -468,7 +468,11 @@ def filter_change_labels(
         base_url="https://api.together.xyz/v1",
         temperature=0.0,
         max_tokens=4096,
-        streaming=True,
+        # with_structured_output drops usage_metadata when the response is
+        # streamed, so the classification call is unstreamed to keep the trace's
+        # token accounting. A single short classify call gains nothing from
+        # streaming anyway.
+        streaming=False,
     )
     graph = ClassifyGraph(classify=ClassifyNode(llm=llm))
     policy = ErrorPolicy()

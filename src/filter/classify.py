@@ -3,7 +3,7 @@ from __future__ import annotations
 from textwrap import dedent
 from typing import TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 
 class ClassifyInput(TypedDict, total=False):
@@ -40,7 +40,20 @@ class ClassifyNode:
         description = input.get("description") or ""
 
         prompt = self._build_prompt(title=title, description=description)
-        result = self._llm.with_structured_output(ClassifyResult).invoke(prompt)
+        try:
+            response = self._llm.with_structured_output(
+                ClassifyResult,
+                method="json_schema",
+                strict=True,
+            ).invoke(prompt)
+        except (AttributeError, TypeError) as error:
+            raise ValueError(
+                "ClassifyNode requires an llm that supports structured schema mode."
+            ) from error
+        try:
+            result = ClassifyResult.model_validate(response)
+        except (ValidationError, TypeError, ValueError) as error:
+            raise ValueError("ClassifyNode requires structured classify output.") from error
 
         # Structured output enforces the shape, not the values: keep the allowed
         # filter and dedup as a second line of defence against a stray label.

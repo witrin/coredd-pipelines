@@ -138,7 +138,10 @@ def attribution_change_trace(
         base_url="https://api.together.xyz/v1",
         temperature=config.temperature,
         max_tokens=8000,
-        streaming=True,
+        # Unstreamed: with_structured_output drops usage_metadata on a streamed
+        # response, so the final structured call would lose its token accounting.
+        # Streaming is never consumed here (only .invoke is used).
+        streaming=False,
         logprobs=config.logprobs,
         top_logprobs=5 if config.logprobs else None,
     )

@@ -9,9 +9,10 @@ from benchmark.filter.graph import ClassifyGraph
 
 class TestClassifyNode(unittest.TestCase):
     def _node(self, labels: list[str]):
-        # Mirror ClassifyNode.run: llm.with_structured_output(...).invoke(prompt).
+        # Mirror ClassifyNode.run: the json_schema call returns a mapping that
+        # model_validate turns into a ClassifyResult.
         structured = Mock(spec_set=["invoke"])
-        structured.invoke.return_value = ClassifyResult(labels=labels)
+        structured.invoke.return_value = {"labels": labels}
         llm = Mock(spec_set=["with_structured_output"])
         llm.with_structured_output.return_value = structured
         return ClassifyNode(llm=llm), llm, structured
@@ -21,7 +22,9 @@ class TestClassifyNode(unittest.TestCase):
 
         result = node.run({"title": "Fix crash", "description": "Resolve a parser bug."})
 
-        llm.with_structured_output.assert_called_once_with(ClassifyResult)
+        llm.with_structured_output.assert_called_once_with(
+            ClassifyResult, method="json_schema", strict=True
+        )
         structured.invoke.assert_called_once()
         self.assertIn("Fix crash", structured.invoke.call_args.args[0])
         self.assertIn("Resolve a parser bug.", structured.invoke.call_args.args[0])
