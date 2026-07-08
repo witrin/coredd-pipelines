@@ -111,7 +111,7 @@ def attribution_change_trace(
         f"{name}#{number}"
         for name, number in zip(frame["name"].to_list(), frame["number"].to_list())
     ]
-    pair = next(p for p in pairs if Shard.to_space([p]) == correction)
+    pair = next(p for p in pairs if Shard.to_token(p) == correction)
     name, number = pair.split("#")
     number = int(number)
 

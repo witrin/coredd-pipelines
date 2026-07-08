@@ -59,6 +59,15 @@ class Shard:
         return cls(space=space, shards=shards)
 
     @classmethod
+    def to_token(cls, identifier: Any) -> str:
+        # A collision-resistant partition key for a single identifier (e.g. a
+        # "name#number" pull request or a "correction#bic" pair). Unlike a set's
+        # space, which needs only to name a group, a per-identifier token must stay
+        # unique across the whole corpus, so it uses 8 hex characters (32 bits)
+        # rather than the 4-hex space width.
+        return hashlib.sha256(repr(identifier).encode()).hexdigest()[:8]
+
+    @classmethod
     def to_space(cls, items: list[Any], element: Any | None = None) -> str:
         values = [repr(x) for x in items]
         ordered = sorted(values)

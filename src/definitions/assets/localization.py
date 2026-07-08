@@ -55,7 +55,7 @@ def localization_inducer_reference(
         .with_columns(
             pl.struct("name", "number")
             .map_elements(
-                lambda row: Shard.to_space([f"{row['name']}#{row['number']}"]),
+                lambda row: Shard.to_token(f"{row['name']}#{row['number']}"),
                 return_dtype=pl.Utf8,
             )
             .alias("correction")
@@ -122,7 +122,7 @@ def localization_change_trace(
         )
     ]
     pair = next(
-        p for p in pairs if Shard.to_space([p]) == context.partition_key
+        p for p in pairs if Shard.to_token(p) == context.partition_key
     )
     correction, sha = pair.split("#", 1)
 

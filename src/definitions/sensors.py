@@ -194,7 +194,7 @@ def filter_change_correction_sensor(
         f"{name}#{number}"
         for name, number in zip(frame["name"].to_list(), frame["number"].to_list())
     ]
-    keys = {Shard.to_space([pair]) for pair in pairs}
+    keys = {Shard.to_token(pair) for pair in pairs}
 
     existing = set(instance.get_dynamic_partitions("filter_change_correction"))
     to_add = keys - existing
@@ -239,7 +239,7 @@ def localization_inducer_sensor(
 
     frame = pl.from_arrow(table).filter(pl.col("python") > 0)
     keys = {
-        Shard.to_space([f"{correction}#{bic}"])
+        Shard.to_token(f"{correction}#{bic}")
         for correction, bic in zip(
             frame["correction"].to_list(), frame["bic"].to_list()
         )
