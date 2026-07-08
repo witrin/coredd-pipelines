@@ -34,7 +34,14 @@ from langchain_openai import ChatOpenAI
     kinds={"gcs"},
     ins={
         "attribution_change_trace": dg.AssetIn(
-            partition_mapping=dg.AllPartitionMapping()
+            partition_mapping=dg.AllPartitionMapping(),
+            # Only the per-run scalar columns are needed; pushing them down at
+            # the parquet read keeps the fat `payload` column out of memory
+            # (it is ~99.8% of each trace partition) and avoids an OOM when all
+            # partitions are loaded together.
+            metadata={
+                "columns": ["name", "number", "introducer", "aborted"]
+            },
         ),
     },
 )

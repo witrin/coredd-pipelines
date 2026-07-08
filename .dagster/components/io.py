@@ -250,13 +250,15 @@ class AssetCloudStorage:
 class TableAssetStorage(AssetCloudStorage):
     """Loads and stores asset tables (Parquet) on cloud storage."""
 
-    def _load_parquet(self, name: str) -> Optional[pa.Table]:
+    def _load_parquet(
+        self, name: str, columns: list[str] | None = None
+    ) -> Optional[pa.Table]:
         blob = self._bucket.blob(name)
         if not blob.exists():
             return None
 
         data = blob.download_as_bytes()
-        return pq.read_table(pa.BufferReader(data))
+        return pq.read_table(pa.BufferReader(data), columns=columns)
 
     def _store_parquet(self, name: str, table: pa.Table) -> None:
         blob = self._bucket.blob(name)
@@ -280,10 +282,13 @@ class TableAssetStorage(AssetCloudStorage):
         event: Optional[dg.EventLogEntry] = None,
         location: str | None = None,
         partition: str | None = None,
+        columns: list[str] | None = None,
     ) -> Optional[pa.Table]: ...
 
     @overload
-    def load(self, *, blob: str) -> Optional[pa.Table]: ...
+    def load(
+        self, *, blob: str, columns: list[str] | None = None
+    ) -> Optional[pa.Table]: ...
 
     def load(
         self,
@@ -298,10 +303,11 @@ class TableAssetStorage(AssetCloudStorage):
         location: str | None = None,
         partition: str | None = None,
         blob: str | None = None,
+        columns: list[str] | None = None,
     ) -> Optional[pa.Table]:
         """Loads the table for the given context, optionally scoped by a materialization event."""
         if blob is not None:
-            return self._load_parquet(blob)
+            return self._load_parquet(blob, columns=columns)
 
         if context is None:
             raise ValueError("Either context or blob must be provided")
@@ -322,7 +328,7 @@ class TableAssetStorage(AssetCloudStorage):
             partition=partition,
         )
 
-        return self._load_parquet(blob_path)
+        return self._load_parquet(blob_path, columns=columns)
 
     @overload
     def store(
@@ -520,12 +526,16 @@ class CloudStorageManager(dg.IOManager):
         )
 
     def _load_table_partition(
-        self, context: dg.InputContext, partition: str | None = None
+        self,
+        context: dg.InputContext,
+        partition: str | None = None,
+        columns: list[str] | None = None,
     ) -> pa.Table | None:
         table = self._tables.load(
             context=context,
             location=self._location.current,
             partition=partition,
+            columns=columns,
         )
 
         if table is None and self._location.current != self._location.default:
@@ -533,6 +543,7 @@ class CloudStorageManager(dg.IOManager):
                 context=context,
                 location=self._location.default,
                 partition=partition,
+                columns=columns,
             )
 
         return table
@@ -551,8 +562,15 @@ class CloudStorageManager(dg.IOManager):
 
         return result
 
-    def _load_partition(self, context: dg.InputContext, partition: str | None = None):
-        result = self._load_table_partition(context, partition=partition)
+    def _load_partition(
+        self,
+        context: dg.InputContext,
+        partition: str | None = None,
+        columns: list[str] | None = None,
+    ):
+        result = self._load_table_partition(
+            context, partition=partition, columns=columns
+        )
         if result is not None:
             return result
 
@@ -587,6 +605,13 @@ class CloudStorageManager(dg.IOManager):
                 )
 
     def load_input(self, context: dg.InputContext):
+        # Column pushdown: an AssetIn may request a subset of columns via
+        # AssetIn(metadata={"columns": [...]}). definition_metadata is scoped to
+        # the single input being loaded, so multiple AllPartitionMapping inputs
+        # each carry their own independent list without colliding.
+        meta = getattr(context, "definition_metadata", None) or {}
+        columns = meta.get("columns")
+
         if context.has_asset_partitions:
             partition_keys = list(context.asset_partition_keys)
 
@@ -594,7 +619,9 @@ class CloudStorageManager(dg.IOManager):
                 result = {}
                 missing = []
                 for key in partition_keys:
-                    obj = self._load_partition(context, partition=key)
+                    obj = self._load_partition(
+                        context, partition=key, columns=columns
+                    )
                     if obj is not None:
                         result[key] = obj
                         self._log_loaded(context, obj, partition=key)
@@ -611,7 +638,7 @@ class CloudStorageManager(dg.IOManager):
 
                 return result
 
-        obj = self._load_partition(context)
+        obj = self._load_partition(context, columns=columns)
 
         if obj is None:
             raise FileNotFoundError(
