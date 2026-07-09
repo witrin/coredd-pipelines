@@ -758,12 +758,12 @@ def audit_change_collect_sensor(context: dg.SensorEvaluationContext):
             api_url=os.environ["ARGILLA_API_URL"],
             api_key=os.environ["ARGILLA_API_KEY"],
         )
-        dataset = client.datasets(name="benchmark-audit", workspace="bug-request")
+        dataset = client.datasets(name="benchmark", workspace="audit")
     except Exception as exc:
         return dg.SkipReason(f"Argilla unavailable: {exc!r}")
 
     if dataset is None:
-        return dg.SkipReason("Dataset benchmark-audit does not exist yet.")
+        return dg.SkipReason("Dataset benchmark does not exist yet.")
 
     completed = int(dataset.progress()["completed"])
 

@@ -22,6 +22,10 @@ class HybridAuditSampling:
         rng = np.random.default_rng(self._seed)
         strata = self.strata(rho)
         total = len(strata)
+        # An empty pool (e.g. no localization traces yet) has nothing to draw and
+        # no strata to allocate over, so return before the population divisions.
+        if total == 0:
+            return []
         unique, counts = np.unique(strata, return_counts=True)
 
         draw = min(budget, total)

@@ -825,7 +825,7 @@ def filter_annotation_collect():
 
 class AuditPushConfig(dg.Config):
     reset: bool = False
-    workspace: str = "bug-request"
+    workspace: str = "audit"
 
 
 @dg.op(name="audit_change_request_op")
@@ -1053,7 +1053,7 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
                     "an origin, the audit for the pair ends. Otherwise it "
                     "continues to Localization."
                 ),
-                labels={"yes": "Yes", "no": "No"},
+                labels={"correct": "Correct", "wrong": "Wrong"},
                 required=False,
             ),
             rg.RatingQuestion(
@@ -1087,16 +1087,16 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
             rg.TermsMetadataProperty(name="introducer"),
             rg.TermsMetadataProperty(name="rho_bin"),
         ],
-        distribution=rg.TaskDistribution(min_submitted=1),
+        distribution=rg.TaskDistribution(min_submitted=3),
     )
 
-    dataset = client.datasets(name="benchmark-audit", workspace=workspace)
+    dataset = client.datasets(name="benchmark", workspace=workspace)
     if dataset is not None and config.reset:
         dataset.delete()
         dataset = None
     if dataset is None:
         dataset = rg.Dataset(
-            name="benchmark-audit",
+            name="benchmark",
             workspace=workspace,
             settings=settings,
             client=client,
@@ -1270,6 +1270,7 @@ def audit_change_request():
 
 class AuditCollectConfig(dg.Config):
     version: str = "1.0.0"
+    workspace: str = "audit"
 
 
 @dg.op(name="audit_change_collect_op")
@@ -1284,51 +1285,61 @@ def audit_change_collect_op(
         api_key=os.environ["ARGILLA_API_KEY"],
     )
 
-    dataset = client.datasets(name="benchmark-audit", workspace="bug-request")
+    dataset = client.datasets(name="benchmark", workspace=config.workspace)
     if dataset is None:
-        raise dg.Failure(description="Dataset benchmark-audit does not exist")
+        raise dg.Failure(description="Dataset benchmark does not exist")
 
-    query = rg.Query(filter=rg.Filter([("status", "==", "completed")]))
+    query = rg.Query(filter=rg.Filter([("response.status", "==", "submitted")]))
 
     rows: list[dict[str, object]] = []
     for record in dataset.records(query=query, with_responses=True):
-        answers: dict[str, list] = {}
+        selections = (record.fields.get("localization") or {}).get("annotation") or []
+
+        # Group every submitted response by its annotator so each person's
+        # answers stay together. One output row per (record x annotator) keeps
+        # the raw multi-annotator signal intact for downstream agreement
+        # analysis; nothing depends on the record reaching min_submitted.
+        per_annotator: dict[object, dict[str, list]] = {}
         for response in record.responses:
             if response.status != rg.ResponseStatus.submitted:
                 continue
+            answers = per_annotator.setdefault(response.user_id, {})
             answers.setdefault(response.question_name, []).append(response.value)
 
-        categories = next(iter(answers.get("categories", [])), None) or []
-        origin = next(iter(answers.get("attribution", [])), None)
-        confidence = next(iter(answers.get("confidence", [])), None)
-        selections = (record.fields.get("localization") or {}).get("annotation") or []
+        for user_id, answers in per_annotator.items():
+            categories = next(iter(answers.get("categories", [])), None) or []
+            origin = next(iter(answers.get("attribution", [])), None)
+            confidence = next(iter(answers.get("confidence", [])), None)
 
-        if "intrinsic" not in categories:
-            verdict = "filter"
-        elif origin == "no":
-            verdict = "attribution"
-        elif origin == "yes":
-            verdict = "none"
-        else:
-            verdict = None
+            if "intrinsic" not in categories:
+                verdict = "filter"
+            elif origin == "wrong":
+                verdict = "attribution"
+            elif origin == "correct":
+                verdict = "none"
+            else:
+                verdict = None
 
-        rows.append(
-            {
-                "repository": record.metadata.get("repository"),
-                "number": int(record.metadata.get("change")),
-                "introducer": record.metadata.get("introducer"),
-                "rho_bin": int(record.metadata.get("rho_bin", -1)),
-                "categories": sorted(categories),
-                "attribution": origin,
-                "confidence": int(confidence) if confidence is not None else None,
-                "verdict": verdict,
-                "selections": json.dumps(selections, sort_keys=True),
-                "comment": "\n".join(
-                    note for note in answers.get("comment", []) if note
-                ),
-                "status": str(record.status),
-            }
-        )
+            rows.append(
+                {
+                    "repository": record.metadata.get("repository"),
+                    "number": int(record.metadata.get("change")),
+                    "introducer": record.metadata.get("introducer"),
+                    "rho_bin": int(record.metadata.get("rho_bin", -1)),
+                    "annotator": str(user_id),
+                    "categories": sorted(categories),
+                    "attribution": origin,
+                    "confidence": (
+                        int(confidence) if confidence is not None else None
+                    ),
+                    "verdict": verdict,
+                    "selections": json.dumps(selections, sort_keys=True),
+                    "comment": "\n".join(
+                        note for note in answers.get("comment", []) if note
+                    ),
+                    "status": str(record.status),
+                }
+            )
 
     schema = pa.schema(
         [
@@ -1336,6 +1347,7 @@ def audit_change_collect_op(
             ("number", pa.int64()),
             ("introducer", pa.string()),
             ("rho_bin", pa.int64()),
+            ("annotator", pa.string()),
             ("categories", pa.list_(pa.string())),
             ("attribution", pa.string()),
             ("confidence", pa.int64()),
@@ -1360,7 +1372,9 @@ def audit_change_collect_op(
     )
     storage.store(blob=blob, table=table)
 
-    context.log.info("Pulled %d completed audits into %s.", table.num_rows, blob)
+    context.log.info(
+        "Pulled %d annotator responses into %s.", table.num_rows, blob
+    )
 
     return dg.Output(
         value=None,
@@ -1374,3 +1388,89 @@ def audit_change_collect_op(
 @dg.job(name="audit_change_collect")
 def audit_change_collect():
     audit_change_collect_op()
+
+
+class AnnotatorAccount(dg.Config):
+    username: str
+    password: str
+    role: str = "annotator"
+    workspace: str = "audit"
+
+
+class AnnotatorConfig(dg.Config):
+    create: list[AnnotatorAccount] = []
+    delete: list[str] = []
+
+
+@dg.op(name="audit_annotator_access_op")
+def audit_annotator_access_op(
+    context: dg.OpExecutionContext, config: AnnotatorConfig
+) -> dg.Output:
+    """Provision and revoke annotator accounts for the audit workspace.
+
+    Each create entry is an account (username, password, role, workspace); the
+    account is created if absent and joined to its workspace, so the op is
+    idempotent and can be re-run to add newcomers. The annotator role sees only
+    its assigned workspace, so pointing annotators at a dedicated workspace
+    hides every other dataset from them. Delete removes the named accounts
+    following Argilla's own semantics for their responses.
+    """
+    import argilla as rg
+
+    client = rg.Argilla(
+        api_url=os.environ["ARGILLA_API_URL"],
+        api_key=os.environ["ARGILLA_API_KEY"],
+    )
+
+    created = 0
+    skipped = 0
+    for account in config.create:
+        if client.users(account.username) is not None:
+            context.log.info("User %s already exists.", account.username)
+            skipped += 1
+            continue
+
+        workspace = client.workspaces(account.workspace)
+        if workspace is None:
+            workspace = rg.Workspace(name=account.workspace, client=client)
+            workspace.create()
+
+        user = rg.User(
+            username=account.username,
+            password=account.password,
+            role=account.role,
+            client=client,
+        )
+        user.create()
+        workspace.add_user(user)
+        context.log.info(
+            "Created %s (%s) in workspace %s.",
+            account.username,
+            account.role,
+            account.workspace,
+        )
+        created += 1
+
+    deleted = 0
+    for username in config.delete:
+        user = client.users(username)
+        if user is None:
+            context.log.info("User %s does not exist.", username)
+            continue
+        user.delete()
+        context.log.info("Deleted %s.", username)
+        deleted += 1
+
+    return dg.Output(
+        value=None,
+        metadata={
+            "created": dg.MetadataValue.int(created),
+            "skipped": dg.MetadataValue.int(skipped),
+            "deleted": dg.MetadataValue.int(deleted),
+        },
+    )
+
+
+@dg.job(name="audit_annotator_access")
+def audit_annotator_access():
+    audit_annotator_access_op()
