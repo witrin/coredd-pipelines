@@ -29,7 +29,7 @@ from langchain_openai import ChatOpenAI
 
 
 @asset(
-    metadata={"version": "2.0.0"},
+    metadata={"version": "3.1.0"},
     group_name="localization",
     kinds={"gcs"},
     ins={
@@ -40,7 +40,7 @@ from langchain_openai import ChatOpenAI
             # (it is ~99.8% of each trace partition) and avoids an OOM when all
             # partitions are loaded together.
             metadata={
-                "columns": ["name", "number", "introducer", "aborted"]
+                "columns": ["name", "number", "introducer", "aborted", "trace"]
             },
         ),
     },
@@ -51,7 +51,7 @@ def localization_inducer_reference(
     filter_change_reference: pa.Table,
     scope_repository_stationary: pa.Table,
 ) -> pa.Table:
-    """The released bug-inducing commit per correction, resolved to its pull request and Python-file count and classified for localization: python>0 is processed, otherwise reported (non-Python PR, or orphan when the SHA belongs to no corpus PR).
+    """The released bug-inducing commit per correction, classified for localization by the defect commit's own Python-file count and whether a pull request identifies it: python>0 and not direct is processed, otherwise reported (no Python file changed, or direct when no corpus PR contains the SHA).
 
     The release is the majority vote across the attribution runs of a correction,
     ties broken by temporal distance to the correction. Only the released commit
@@ -62,6 +62,10 @@ def localization_inducer_reference(
         pl.from_arrow(pa.concat_tables(attribution_change_trace.values()))
         .filter(~pl.col("aborted"))
         .filter(pl.col("introducer").is_not_null())
+        # A run writes one row per trace event, all sharing the same trace id
+        # and introducer. Collapse each run to a single row so the vote counts
+        # runs, not events (otherwise votes weight by trace length).
+        .unique(subset=["trace"])
         .select("name", "number", "introducer")
     )
 
@@ -110,60 +114,77 @@ def localization_inducer_reference(
             votes, distance, sha = min(
                 candidates, key=lambda item: (-item[0], item[1], item[2])
             )
+            # Localization runs on the defect commit, not its pull request, so
+            # the Python-file count is the commit's own changed .py files, not
+            # the PR aggregate. A root commit (no parent) has no diff to localize
+            # against, so it counts as zero and is reported.
+            parents = repository.parents(sha)
+            if parents:
+                diff = repository.diff(parents[0], sha)
+                paths = {
+                    path
+                    for delta in diff.deltas
+                    for path in (delta.new_file.path, delta.old_file.path)
+                    if path and path.endswith(".py")
+                }
+            else:
+                paths = set()
             winners.append(
                 {
-                    "correction": Shard.to_token(f"{name}#{number}"),
-                    "bic": sha,
+                    # The correction is identified by its real merge-commit SHA,
+                    # not a name#number token, so the whole Localization->Audit
+                    # tail keys on one stable identifier.
+                    "correction": change["after"],
+                    "defect": sha,
                     "name": name,
-                    "number": number,
+                    "python": len(paths),
                     "vote": votes / group.height,
-                    "temporal_distance": distance,
+                    "distance": distance,
                 }
             )
 
-    inducers = pl.DataFrame(
+    released = pl.DataFrame(
         winners,
         schema={
             "correction": pl.Utf8,
-            "bic": pl.Utf8,
+            "defect": pl.Utf8,
             "name": pl.Utf8,
-            "number": pl.Int64,
+            "python": pl.Int64,
             "vote": pl.Float64,
-            "temporal_distance": pl.Float64,
+            "distance": pl.Float64,
         },
     )
 
-    # Resolve each released BIC SHA to its corpus PR by exploding the reference commit lists.
-    resolved = (
+    # A defect is direct when no pull request identifies it: its SHA appears in
+    # no corpus PR commits list. Direct defects (and defects touching no Python
+    # file) are reported but never localized.
+    corpus = (
         reference.explode("commits")
-        .select(
-            pl.col("commits").alias("bic"),
-            pl.col("number").alias("pr"),
-            "python",
-        )
-        .unique(subset=["bic"])
+        .select(pl.col("commits").alias("defect"))
+        .unique(subset=["defect"])
+        .with_columns(pl.lit(False).alias("direct"))
     )
 
     released = (
-        inducers.join(resolved, on="bic", how="left")
-        # Orphans (SHA in no corpus PR) get python=null/0 and a null PR.
-        .with_columns(pl.col("python").fill_null(0))
+        released.join(corpus, on="defect", how="left")
+        .with_columns(pl.col("direct").fill_null(True))
         .select(
             "correction",
-            "bic",
+            "defect",
             "name",
-            "number",
-            "pr",
             "python",
+            "direct",
             "vote",
-            "temporal_distance",
+            "distance",
         )
-        .sort("correction", "bic")
+        .sort("correction", "defect")
     )
 
-    processed = released.filter(pl.col("python") > 0).height
+    processed = released.filter(
+        (pl.col("python") > 0) & ~pl.col("direct")
+    ).height
     context.log.info(
-        "Released %d inducers; %d Python-PR (processed), %d reported.",
+        "Released %d defects; %d processed (python>0 & not direct), %d reported.",
         released.height,
         processed,
         released.height - processed,
@@ -173,7 +194,7 @@ def localization_inducer_reference(
 
 
 @asset(
-    metadata={"version": "2.2.0"},
+    metadata={"version": "3.1.0"},
     partitions_def=partitions.localization_inducer_partition,
     group_name="localization",
     pool="default",
@@ -191,25 +212,21 @@ def localization_change_trace(
     scope_repository_stationary: pa.Table,
 ) -> pa.Table:
     """One localization trace per (correction, bug-inducing commit) partition."""
-    inducers = pl.from_arrow(localization_inducer_reference).filter(
-        pl.col("python") > 0
+    defects = pl.from_arrow(localization_inducer_reference).filter(
+        (pl.col("python") > 0) & ~pl.col("direct")
     )
-    pairs = [
-        f"{correction}#{bic}"
-        for correction, bic in zip(
-            inducers["correction"].to_list(), inducers["bic"].to_list()
-        )
-    ]
-    pair = next(
-        p for p in pairs if Shard.to_token(p) == context.partition_key
+    # The partition token encodes (name, correction). Exactly one released
+    # defect exists per (name, correction) — the vote winner — so the token
+    # selects a single reference row, and the defect SHA is read from it.
+    row = next(
+        r
+        for r in defects.iter_rows(named=True)
+        if Shard.to_token(f"{r['name']}#{r['correction']}")
+        == context.partition_key
     )
-    correction, sha = pair.split("#", 1)
-
-    inducer = inducers.filter(
-        (pl.col("correction") == correction) & (pl.col("bic") == sha)
-    )
-    row = inducer.row(0, named=True)
-    name, number = row["name"], int(row["number"])
+    name = row["name"]
+    correction = row["correction"]
+    sha = row["defect"]
 
     reference = pl.from_arrow(filter_change_reference)
     names = sorted(pl.from_arrow(scope_repository_stationary)["name"].to_list())
@@ -227,7 +244,8 @@ def localization_change_trace(
     platform = PlatformCache(
         enricher.table(), repository=repository, filter=enricher.enrich
     )
-    change = platform.load(number)
+    change = platform.resolve(correction)
+    number = change["number"]
     factory = PatchFactory(repository)
     llm = ChatOpenAI(
         model=config.model,
@@ -284,7 +302,7 @@ def localization_change_trace(
     table = (
         table
         .append_column("name", pa.array([name] * rows, type=pa.string()))
-        .append_column("number", pa.array([number] * rows, type=pa.int64()))
+        .append_column("correction", pa.array([correction] * rows, type=pa.string()))
         .append_column("defect", pa.array([sha] * rows, type=pa.string()))
         .append_column("locations", pa.array([locations] * rows, type=pa.string()))
         .append_column("aborted", pa.array([aborted] * rows, type=pa.bool_()))

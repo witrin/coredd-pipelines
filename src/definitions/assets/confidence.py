@@ -6,7 +6,7 @@ from benchmark.audit.confidence import ConfidenceComputation
 
 
 @asset(
-    metadata={"version": "2.0.0"},
+    metadata={"version": "3.0.0"},
     group_name="confidence",
     ins={
         "localization_change_trace": dg.AssetIn(
@@ -15,7 +15,7 @@ from benchmark.audit.confidence import ConfidenceComputation
             # parquet read keeps the fat `payload` column out of memory (~99.8%
             # of each trace) and avoids an OOM across all partitions.
             metadata={
-                "columns": ["name", "number", "defect", "aborted"]
+                "columns": ["name", "correction", "defect", "aborted"]
             },
         ),
     },

@@ -15,7 +15,7 @@ class AuditConfig(dg.Config):
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "2.0.0"},
     group_name="audit",
 )
 def audit_change_sample(
@@ -36,7 +36,7 @@ def audit_change_sample(
         pl.Series("rho_bin", sampler.strata(rho)).cast(pl.Int64)
     )
     table = binned[selected].select(
-        "name", "number", "introducer", "rho", "rho_bin"
+        "name", "correction", "defect", "rho", "rho_bin"
     ).to_arrow()
     context.log.info(
         "Selected %d of %d corrections.", table.num_rows, frame.height

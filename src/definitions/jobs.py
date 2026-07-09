@@ -908,18 +908,18 @@ def audit_change_request_op(
     }
 
     # Defect line markings from the localization stage, keyed by
-    # (name, number, defect-sha) -> (path, side) -> sorted unique 1-based line numbers.
+    # (name, correction-sha, defect-sha) -> (path, side) -> sorted unique 1-based line numbers.
     # A location's line is an L<n>/D<n> reference: L is an after-side line, D a
     # deleted base-side line. The side-by-side annotation component pre-marks each on
     # the matching side, so deletions (D) are shown on the base editor. Each marked line
     # becomes one coordinate ({line, side}) in the annotation's line list.
-    markings: dict[tuple[str, int, str], dict[tuple[str, str], list[int]]] = {}
+    markings: dict[tuple[str, str, str], dict[tuple[str, str], list[int]]] = {}
     localization = pools.get("localization-change-trace")
     if localization is not None:
         seen_locations: set[str] = set()
         for record in (
             pl.from_arrow(localization)
-            .select("name", "number", "defect", "locations")
+            .select("name", "correction", "defect", "locations")
             .iter_rows(named=True)
         ):
             payload = record["locations"]
@@ -929,7 +929,11 @@ def audit_change_request_op(
             entries = json.loads(payload)
             if not entries:
                 continue
-            key = (record["name"], int(record["number"]), str(record["defect"]))
+            key = (
+                str(record["name"]),
+                str(record["correction"]),
+                str(record["defect"]),
+            )
             paths = markings.setdefault(key, {})
             for entry in entries:
                 path = entry.get("file")
@@ -1106,7 +1110,7 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
         rows = [
             row
             for row in group.iter_rows(named=True)
-            if f"{row['name']}#{row['number']}" not in existing
+            if f"{row['name']}#{row['correction']}" not in existing
         ]
         if not rows:
             continue
@@ -1130,19 +1134,21 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
         records = []
 
         for row in rows:
-            change = platform.load(int(row["number"]))
-            introducer = str(row["introducer"])
+            correction_sha = str(row["correction"])
+            change = platform.resolve(correction_sha)
+            number = int(change["number"])
+            introducer = str(row["defect"])
             projection = RepositoryProjection(repository)
             correction = projection.transform(change["after"], "correction")
             target = projection.transform(introducer, "defect")
 
             if correction is None or target is None:
                 context.log.warning(
-                    "Skipping %s#%s (missing parent).", row["name"], row["number"]
+                    "Skipping %s#%s (missing parent).", row["name"], number
                 )
                 continue
 
-            marks = markings.get((row["name"], int(row["number"]), introducer), {})
+            marks = markings.get((row["name"], correction_sha, introducer), {})
             # One annotation per file, its lines a flat list of coordinates each carrying
             # its own side (after = a present line, base = a deleted line). The side-by-side
             # component pre-marks each coordinate on the matching editor.
@@ -1169,7 +1175,7 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
                 "context": correction,
                 "targets": [target],
             }
-            bucket.blob(f"{prefix}/{row['number']}.json").upload_from_string(
+            bucket.blob(f"{prefix}/{number}.json").upload_from_string(
                 json.dumps(annotation, sort_keys=True),
                 content_type="application/json",
             )
@@ -1188,15 +1194,15 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
 
             url = (
                 f"https://storage.googleapis.com/{os.environ['CLOUD_BUCKET']}/"
-                f"{prefix}/{row['number']}.json"
+                f"{prefix}/{number}.json"
             )
 
-            entry = outline.get((row["name"], int(row["number"])), {})
+            entry = outline.get((row["name"], number), {})
             after = str(change["after"])
             corrective = (
                 f"### {(entry.get('title') or '').strip()}\n\n"
-                f"[#{row['number']}](https://github.com/{row['name']}/"
-                f"pull/{row['number']}) · "
+                f"[#{number}](https://github.com/{row['name']}/"
+                f"pull/{number}) · "
                 f"[{after[:8]}](https://github.com/{row['name']}/"
                 f"commit/{after})\n\n"
                 f"{(entry.get('markdown') or '').strip()}"
@@ -1226,7 +1232,7 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
 
             records.append(
                 rg.Record(
-                    id=f"{row['name']}#{row['number']}",
+                    id=f"{row['name']}#{correction_sha}",
                     fields={
                         "corrective": corrective,
                         "defective": defective,
@@ -1234,7 +1240,7 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
                     },
                     metadata={
                         "repository": row["name"],
-                        "change": str(row["number"]),
+                        "change": str(number),
                         "introducer": introducer,
                         "rho_bin": str(row["rho_bin"]),
                     },

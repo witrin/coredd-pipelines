@@ -61,7 +61,7 @@ class Shard:
     @classmethod
     def to_token(cls, identifier: Any) -> str:
         # A collision-resistant partition key for a single identifier (e.g. a
-        # "name#number" pull request or a "correction#bic" pair). Unlike a set's
+        # "name#number" pull request or a "correction#introducer" pair). Unlike a set's
         # space, which needs only to name a group, a per-identifier token must stay
         # unique across the whole corpus, so it uses 8 hex characters (32 bits)
         # rather than the 4-hex space width.

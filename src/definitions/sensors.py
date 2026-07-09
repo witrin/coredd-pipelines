@@ -222,11 +222,12 @@ def filter_change_correction_sensor(
 def localization_inducer_sensor(
     context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry
 ):
-    """Synchronize localization inducer partitions over Python-PR inducers.
+    """Synchronize localization inducer partitions over Python-PR corrections.
 
-    One partition per (correction, bic) pair that is a Python pull request. Each pair
-    is encoded as a compact Shard key; non-Python and orphan inducers (python == 0)
-    are reported by the asset but never localized.
+    One partition per (name, correction) whose released defect commit touches
+    Python and has a pull request. Each is encoded as a compact Shard token;
+    corrections whose released defect touches no Python file (python == 0) or is
+    direct (no pull request) are reported by the asset but never localized.
     """
     import polars as pl
 
@@ -237,11 +238,13 @@ def localization_inducer_sensor(
     if table is None or table.num_rows == 0:
         return None
 
-    frame = pl.from_arrow(table).filter(pl.col("python") > 0)
+    frame = pl.from_arrow(table).filter(
+        (pl.col("python") > 0) & ~pl.col("direct")
+    )
     keys = {
-        Shard.to_token(f"{correction}#{bic}")
-        for correction, bic in zip(
-            frame["correction"].to_list(), frame["bic"].to_list()
+        Shard.to_token(f"{name}#{correction}")
+        for name, correction in zip(
+            frame["name"].to_list(), frame["correction"].to_list()
         )
     }
 
