@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { DiffMap, IdentityDiffMap } from "../../src/lib/diff.js";
-import type { LineChange } from "../../src/lib/diff.js";
+import type { Alignment } from "../../src/lib/diff.js";
 
 // A diff with all four line kinds. Base (6 lines) and after (6 lines):
 //
@@ -13,13 +13,14 @@ import type { LineChange } from "../../src/lib/diff.js";
 //    6     5     5     context
 //    7     6     6     context
 //
-// Monaco reports three regions: an edit at (3,3)/(3,3), a pure delete at (4,4)/(0),
-// and a pure insert at (0)/(4,4). A 1:1 edit pairs both sides onto one diff line; a
-// pure deletion carries base only; a pure insertion carries after only.
-const CHANGES: LineChange[] = [
-  { originalStart: 3, originalEnd: 3, modifiedStart: 3, modifiedEnd: 3 }, // edit
-  { originalStart: 4, originalEnd: 4, modifiedStart: 4, modifiedEnd: 0 }, // delete
-  { originalStart: 4, originalEnd: 0, modifiedStart: 4, modifiedEnd: 4 }, // add
+// As rendered aligned blocks (half-open): an edit block base[3,4)↔after[3,4), a pure
+// delete block base[4,5)↔after[4,4), and a pure insert block base[4,4)↔after[4,5).
+// A 1:1 edit block pairs both sides onto one diff line; a pure-deletion block carries
+// base only; a pure-insertion block carries after only.
+const CHANGES: Alignment[] = [
+  { baseStart: 3, baseEnd: 4, afterStart: 3, afterEnd: 4 }, // edit
+  { baseStart: 4, baseEnd: 5, afterStart: 4, afterEnd: 4 }, // delete
+  { baseStart: 4, baseEnd: 4, afterStart: 4, afterEnd: 5 }, // add
 ];
 
 describe("DiffMap over context+edit+delete+add", () => {
@@ -91,7 +92,7 @@ describe("DiffMap over context+edit+delete+add", () => {
 describe("DiffMap pure insertion (add-only file)", () => {
   // base empty of changes, after gains lines 1..3 at the top.
   const map = new DiffMap(
-    [{ originalStart: 0, originalEnd: 0, modifiedStart: 1, modifiedEnd: 3 }],
+    [{ baseStart: 1, baseEnd: 1, afterStart: 1, afterEnd: 4 }],
     0,
     3,
   );
@@ -106,7 +107,7 @@ describe("DiffMap pure insertion (add-only file)", () => {
 
 describe("DiffMap pure deletion (delete-only file)", () => {
   const map = new DiffMap(
-    [{ originalStart: 1, originalEnd: 3, modifiedStart: 0, modifiedEnd: 0 }],
+    [{ baseStart: 1, baseEnd: 4, afterStart: 1, afterEnd: 1 }],
     3,
     0,
   );

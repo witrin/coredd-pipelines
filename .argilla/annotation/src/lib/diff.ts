@@ -13,25 +13,38 @@ import type { Interval } from "./interval.js";
 export type Side = "base" | "after";
 
 // The structural shape of one change entry returned by computeDiff (a
-// DetailedLineRangeMapping): two LineRanges, each 1-based with an exclusive end.
+// DetailedLineRangeMapping): two LineRanges, each 1-based with an exclusive end,
+// plus the per-line `innerChanges` (char ranges) the region was matched on. Monaco's
+// diff editor aligns lines *within* a region from these inner changes, not by position,
+// so we read them too — see `#align`.
+interface InnerRange {
+  startLineNumber: number;
+  startColumn: number;
+  endLineNumber: number;
+  endColumn: number;
+}
+interface InnerChange {
+  originalRange: InnerRange;
+  modifiedRange: InnerRange;
+}
 interface RangeMapping {
   original: { startLineNumber: number; endLineNumberExclusive: number };
   modified: { startLineNumber: number; endLineNumberExclusive: number };
+  innerChanges?: InnerChange[] | null;
 }
 
 /**
- * One change region reported by Monaco's `getLineChanges()`, reduced to the four
- * line numbers we need. Ranges are 1-based inclusive as Monaco reports them; an
- * `End` of 0 means the region has no lines on that side:
- *   - `originalEnd === 0` → a pure insertion (lines added on the after side only)
- *   - `modifiedEnd === 0` → a pure deletion (lines removed from the base side only)
- *   - both nonzero → an edit (lines replaced; both sides carry lines)
+ * One aligned block of the diff, in half-open 1-based line ranges: `[baseStart, baseEnd)`
+ * on the base side lines up with `[afterStart, afterEnd)` on the after side, exactly as
+ * the side-by-side editor stacks them. A block with one line on each side is an edit pair
+ * (they share a diff row); an uneven block stacks the base lines then the after lines.
+ * Context between blocks is implicit (advanced by both cursors together).
  */
-export interface LineChange {
-  originalStart: number;
-  originalEnd: number;
-  modifiedStart: number;
-  modifiedEnd: number;
+export interface Alignment {
+  baseStart: number;
+  baseEnd: number;
+  afterStart: number;
+  afterEnd: number;
 }
 
 /**
@@ -46,7 +59,7 @@ export interface LineChange {
  *
  * The selection core works entirely in diff-line coordinates; this map is the only
  * place base/after ever meet the diff axis. Built once per diff from the ordered
- * `LineChange[]` plus the two models' line counts.
+ * `Alignment[]` (the editor's rendered row groups) plus the two models' line counts.
  */
 export class DiffMap {
   #baseToDiff = new Map<number, number>();
@@ -56,94 +69,121 @@ export class DiffMap {
   #count = 0;
 
   /**
-   * Build a `DiffMap` straight from two file texts using Monaco's headless
-   * line-diff — the one deterministic diff source, independent of any rendered
-   * editor. Splits both texts on `\n`, runs the default line-diff computer, and
-   * translates its `changes` into our `LineChange[]` before constructing the map.
+   * Build a `DiffMap` straight from two file texts, aligned exactly as the rendered
+   * side-by-side editor aligns them. Splits both texts on `\n`, runs the default
+   * (advanced) line-diff computer — the same one the editor uses, carrying `innerChanges`
+   * — and reduces its `changes` to the editor's rendered row groups via `#align` before
+   * constructing the map.
    *
-   * Monaco reports each region as a `DetailedLineRangeMapping` with an `original`
-   * and a `modified` `LineRange` in 1-based `[startLineNumber, endLineNumberExclusive)`
-   * form, where an empty range (`startLineNumber === endLineNumberExclusive`) means
-   * "no lines on this side". `#change` converts each side to our 1-based
-   * inclusive convention where an `End` of 0 marks an empty side.
+   * Monaco reports each region as a `DetailedLineRangeMapping` with an `original` and a
+   * `modified` `LineRange` in 1-based `[startLineNumber, endLineNumberExclusive)` form,
+   * plus per-line `innerChanges`. `#align` walks those to reproduce the editor's line
+   * pairing (see there); this replaces the old positional pairing that could put a base
+   * line next to an unrelated after line.
    */
   static fromText(baseText: string, afterText: string): DiffMap {
     const baseLines = baseText.split("\n");
     const afterLines = afterText.split("\n");
-    // Legacy computer = LCS diff, closer to git/pygit2 (libgit2 xdiff) than the default
-    // computer's newer algorithm, so the on-screen grouping tracks the pipeline's diff.
-    // Line addresses ({line, side}) are absolute either way, so this only aligns the
-    // context/edit grouping, not correctness.
-    const diff = linesDiffComputers.getLegacy().computeDiff(baseLines, afterLines, {
+    // The default (advanced) computer is the one the rendered side-by-side editor uses,
+    // and it carries `innerChanges` — the per-line char alignment. We build our map from
+    // the SAME alignment the editor renders (see `#align`), so a decoration lands on the
+    // exact row the annotator sees. The legacy computer was used here before, but it only
+    // reports region granularity (no inner alignment), so within an edit region it paired
+    // lines by position — putting base:544 next to a comment while the editor rendered it
+    // next to the real line. That mismatch is the bug this fixes.
+    const diff = linesDiffComputers.getDefault().computeDiff(baseLines, afterLines, {
       ignoreTrimWhitespace: false,
       maxComputationTimeMs: 0,
       computeMoves: false,
     });
-    const changes = (diff.changes as RangeMapping[]).map((mapping) =>
-      DiffMap.#change(mapping),
+    const alignments = DiffMap.#align(
+      diff.changes as RangeMapping[],
+      baseLines,
     );
-    return new DiffMap(changes, baseLines.length, afterLines.length);
+    return new DiffMap(alignments, baseLines.length, afterLines.length);
   }
 
   /**
-   * Translate one Monaco line-range mapping into a `LineChange`. Each side's
-   * half-open `[start, endExclusive)` range becomes 1-based inclusive `start..end`;
-   * an empty side (`start === endExclusive`) becomes `end = 0` — a pure insertion
-   * when `original` is empty, a pure deletion when `modified` is empty.
-   */
-  static #change(mapping: RangeMapping): LineChange {
-    const original = mapping.original;
-    const modified = mapping.modified;
-    return {
-      originalStart: original.startLineNumber,
-      originalEnd:
-        original.startLineNumber === original.endLineNumberExclusive
-          ? 0
-          : original.endLineNumberExclusive - 1,
-      modifiedStart: modified.startLineNumber,
-      modifiedEnd:
-        modified.startLineNumber === modified.endLineNumberExclusive
-          ? 0
-          : modified.endLineNumberExclusive - 1,
-    };
-  }
-
-  /**
-   * Build the map by walking the diff in display order. `changes` must be sorted by
-   * ascending line number (Monaco returns them so). `baseLines`/`afterLines` are the
-   * total line counts of the original and modified models.
+   * Turn Monaco's `changes` into the aligned line blocks the side-by-side editor renders.
    *
-   * The walk advances a base cursor and an after cursor together through the
-   * unchanged runs between change regions (context — one shared diff line each), then
-   * emits the region's deletions (base only) followed by its additions (after only),
-   * matching how the side-by-side diff stacks them.
+   * This replicates the inner-hunk alignment of Monaco's own `computeRangeAlignment`
+   * (diffEditorViewZones): for each region it walks the `innerChanges` and splits the
+   * region into blocks at every point where unchanged text meets a change — unchanged
+   * text *before* a change aligns the two lines it starts on, unchanged text *after* a
+   * change aligns the two lines it ends on — then force-aligns the region's end. The
+   * result is the list of `[base) ↔ [after)` row groups the editor stacks, so our map's
+   * pairing matches the rendering line for line. `baseLines` supplies each base line's
+   * max column, exactly as the editor reads it from the original model.
+   */
+  static #align(changes: RangeMapping[], baseLines: string[]): Alignment[] {
+    const alignments: Alignment[] = [];
+    for (const c of changes) {
+      let lastBase = c.original.startLineNumber;
+      let lastAfter = c.modified.startLineNumber;
+      let first = true;
+      const emit = (baseExcl: number, afterExcl: number, force = false): void => {
+        if (baseExcl < lastBase || afterExcl < lastAfter) return;
+        if (first) first = false;
+        else if (!force && (baseExcl === lastBase || afterExcl === lastAfter)) return;
+        if (baseExcl === lastBase && afterExcl === lastAfter) return;
+        alignments.push({
+          baseStart: lastBase,
+          baseEnd: baseExcl,
+          afterStart: lastAfter,
+          afterEnd: afterExcl,
+        });
+        lastBase = baseExcl;
+        lastAfter = afterExcl;
+      };
+      for (const i of c.innerChanges ?? []) {
+        if (i.originalRange.startColumn > 1 && i.modifiedRange.startColumn > 1) {
+          // Unchanged text before the change: the two lines it starts on line up.
+          emit(i.originalRange.startLineNumber, i.modifiedRange.startLineNumber);
+        }
+        // `+ 1` turns a line's character length into its Monaco max column (columns are
+        // 1-based and the max column is one past the last character). An out-of-range
+        // base line (defensive) is treated as always having trailing text.
+        const line = baseLines[i.originalRange.endLineNumber - 1];
+        const maxColumn = line === undefined ? Number.MAX_SAFE_INTEGER : line.length + 1;
+        if (i.originalRange.endColumn < maxColumn) {
+          // Unchanged text after the change: the two lines it ends on line up.
+          emit(i.originalRange.endLineNumber, i.modifiedRange.endLineNumber);
+        }
+      }
+      emit(c.original.endLineNumberExclusive, c.modified.endLineNumberExclusive, true);
+    }
+    return alignments;
+  }
+
+  /**
+   * Build the map by walking the aligned blocks in display order. `alignments` are the
+   * `[base) ↔ [after)` row groups Monaco's editor renders (from `#align`), sorted by
+   * ascending line number. `baseLines`/`afterLines` are the total line counts.
+   *
+   * Between two blocks the base and after cursors advance together through the unchanged
+   * run — each such line is context (one shared diff line). Inside a block the paired
+   * lines (the overlap `min(baseCount, afterCount)`) share one diff line each, exactly
+   * like the editor stacks an edit pair; the surplus on the longer side becomes pure
+   * deletions (base only) or additions (after only).
    */
   constructor(
-    changes: LineChange[],
+    alignments: Alignment[],
     baseLines: number,
     afterLines: number,
   ) {
     let base = 1;
     let after = 1;
-    for (const change of changes) {
-      const deleteStart = change.originalStart;
-      const deleteCount = change.originalEnd === 0 ? 0 : change.originalEnd - deleteStart + 1;
-      const addStart = change.modifiedStart;
-      const addCount = change.modifiedEnd === 0 ? 0 : change.modifiedEnd - addStart + 1;
-
-      // Context run before this region: lines present and unchanged on both sides.
-      // The after cursor reaching `addStart` (or base reaching `deleteStart` for a
-      // pure insertion) marks the end of the shared run.
-      const contextUntilAfter = addCount === 0 ? deleteStart + (after - base) : addStart;
-      while (after < contextUntilAfter) {
+    for (const block of alignments) {
+      // Context run before this block: lines unchanged and present on both sides. The
+      // block's start on either side bounds the run; both cursors move in lockstep.
+      while (base < block.baseStart && after < block.afterStart) {
         this.#context(base, after);
         base++;
         after++;
       }
 
-      // Edit: the paired base/after lines of a replacement share one diff line each
-      // (both numbers), like context. Only the surplus on the longer side becomes a
-      // pure deletion or addition.
+      const deleteCount = block.baseEnd - block.baseStart;
+      const addCount = block.afterEnd - block.afterStart;
       const paired = Math.min(deleteCount, addCount);
       for (let i = 0; i < paired; i++) {
         this.#context(base, after);
@@ -160,7 +200,7 @@ export class DiffMap {
       }
     }
 
-    // Trailing context after the last region.
+    // Trailing context after the last block.
     while (after <= afterLines && base <= baseLines) {
       this.#context(base, after);
       base++;
