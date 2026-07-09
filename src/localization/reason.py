@@ -5,7 +5,8 @@ from typing import Any, TypedDict
 
 from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import ToolNode, create_react_agent
-from pydantic import BaseModel
+from openai import LengthFinishReasonError
+from pydantic import BaseModel, ValidationError
 
 from benchmark.attribution.domain import Change
 from benchmark.attribution.search import (
@@ -14,6 +15,7 @@ from benchmark.attribution.search import (
     TurnBudget,
 )
 from benchmark.localization.agent import LocateTool, LocateToolFactory
+from benchmark.tracing import TraceRuntime
 
 
 class LocateLocationState(TypedDict):
@@ -169,15 +171,19 @@ class LocateNode:
         llm: object | None = None,
         steps: int = 12,
         retries: int = 0,
+        attempts: int = 2,
     ) -> None:
         if steps < 1:
             raise ValueError("LocateNode steps must be positive.")
         if retries < 0:
             raise ValueError("LocateNode retries must be non-negative.")
+        if attempts < 1:
+            raise ValueError("LocateNode attempts must be positive.")
         self._tool = tool
         self._llm = llm
         self._steps = steps
         self._retries = retries
+        self._attempts = attempts
 
     def run(self, input: LocateInput) -> LocateOutput:
         """Mark the defect locations in the inducing change via agentic search.
@@ -242,28 +248,10 @@ class LocateNode:
         correction: Change,
         tool: LocateTool,
     ) -> LocateResponseSchema:
-        node = ToolNode(
-            tool.tools(),
-            handle_tool_errors=lambda error: str(error),
-            wrap_tool_call=DuplicateCallGuard(),
-        )
-        budget = TurnBudget(self._steps, max_errors=3)
         # Each react-agent cycle traverses 4 graph nodes (pre_model_hook, agent,
         # post_model_hook, tools) plus a final cycle to reach the structured
         # response.
-        limit = (self._steps + budget.max_errors + 1) * 4
-        graph = create_react_agent(
-            self._llm,
-            tools=node,
-            prompt=self._prompt(),
-            response_format=(
-                "Return the defect locations as a JSON object with a `locations` "
-                "array of {file, line} and an optional `reason`.",
-                LocateResponseSchema,
-            ),
-            pre_model_hook=ResolvedErrorFilter(),
-            post_model_hook=budget,
-        )
+        limit = (self._steps + 3 + 1) * 4
         state = {
             "messages": [
                 HumanMessage(
@@ -277,8 +265,7 @@ class LocateNode:
             ],
             "remaining_steps": limit,
         }
-        result = graph.invoke(state, config={"recursion_limit": limit})
-        response = self._structured(result)
+        result, response = self._emit(tool, state, limit)
 
         # With retries disabled the locations are returned as the agent reports them,
         # matching the original behaviour so `retries=0` is a clean ablation baseline.
@@ -306,11 +293,9 @@ class LocateNode:
             # references were wrong and why, and ask it to replace only those.
             messages = list(result["messages"])
             messages.append(HumanMessage(content=self._feedback(accepted, bad)))
-            result = graph.invoke(
-                {"messages": messages, "remaining_steps": limit},
-                config={"recursion_limit": limit},
+            result, response = self._emit(
+                tool, {"messages": messages, "remaining_steps": limit}, limit
             )
-            response = self._structured(result)
 
         # Deduplicate the union of accepted markings across attempts.
         seen: set[tuple[str, str]] = set()
@@ -321,6 +306,78 @@ class LocateNode:
                 seen.add(key)
                 unique.append(item)
         return LocateResponseSchema(locations=unique, reason=reason)
+
+    def _graph(self, tool: LocateTool) -> object:
+        # A fresh agent with its own ToolNode and TurnBudget. The budget is
+        # stateful (it decrements per turn), so each attempt gets a new one and
+        # therefore starts with the full turn allowance.
+        node = ToolNode(
+            tool.tools(),
+            handle_tool_errors=lambda error: str(error),
+            wrap_tool_call=DuplicateCallGuard(),
+        )
+        return create_react_agent(
+            self._llm,
+            tools=node,
+            prompt=self._prompt(),
+            response_format=(
+                "Return the defect locations as a JSON object with a `locations` "
+                "array of {file, line} and an optional `reason`.",
+                LocateResponseSchema,
+            ),
+            pre_model_hook=ResolvedErrorFilter(),
+            post_model_hook=TurnBudget(self._steps, max_errors=3),
+        )
+
+    def _invoke(
+        self, tool: LocateTool, state: dict, limit: int
+    ) -> tuple[object, LocateResponseSchema]:
+        # One attempt: build a fresh agent, run it, and extract the structured
+        # response. The invoke and the extraction are kept together so a
+        # `LengthFinishReasonError` (from the agent's structured emit) and a
+        # `ValidationError` (from parsing that emit) are raised inside the same
+        # guarded scope in `_emit`.
+        result = self._graph(tool).invoke(state, config={"recursion_limit": limit})
+        return result, self._structured(result)
+
+    def _emit(
+        self, tool: LocateTool, state: dict, limit: int
+    ) -> tuple[object, LocateResponseSchema]:
+        # GLM-5.2 occasionally degenerates during the structured emit, either
+        # hitting the token limit (`LengthFinishReasonError`) or producing malformed
+        # JSON (`ValidationError`). The degeneration is nondeterministic, so a fresh
+        # whole-agent run usually recovers; retry a bounded number of times and only
+        # then let the failure propagate so the asset marks the trace aborted.
+        error: Exception | None = None
+        for attempt in range(self._attempts):
+            try:
+                return self._invoke(tool, state, limit)
+            except (LengthFinishReasonError, ValidationError) as failure:
+                error = failure
+                self._mark(attempt, failure)
+        raise error
+
+    def _mark(self, attempt: int, failure: Exception) -> None:
+        # Record the failed emit as its own event in the active trace. It both warns
+        # that a further attempt is starting and cleanly separates the runs: every
+        # event before this marker belongs to the failed attempt, everything after to
+        # the next one. No-op when there is no active trace (e.g. unit tests).
+        trace = TraceRuntime.current_trace()
+        if trace is None:
+            return
+        trace.append(
+            node="locate",
+            span=f"emit-attempt-{attempt + 1}",
+            parent=None,
+            event="emit_attempt",
+            payload={
+                "attempt": attempt + 1,
+                "attempts": self._attempts,
+                "retrying": attempt + 1 < self._attempts,
+                "error": str(failure),
+                "error_type": type(failure).__name__,
+            },
+        )
 
     def _structured(self, result: object) -> LocateResponseSchema:
         structured = (

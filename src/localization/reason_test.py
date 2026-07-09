@@ -536,6 +536,136 @@ class TestLocateNodeRetry(unittest.TestCase):
         self.assertEqual(graph.invoke.call_count, 1)
         self.assertEqual([i.line for i in out.locations], ["L5"])
 
+    def _length_error(self):
+        from openai import LengthFinishReasonError
+        from openai.types.chat import ChatCompletion
+        from openai.types.chat.chat_completion import Choice
+        from openai.types.chat.chat_completion_message import ChatCompletionMessage
+
+        completion = ChatCompletion(
+            id="x",
+            created=0,
+            model="m",
+            object="chat.completion",
+            choices=[
+                Choice(
+                    finish_reason="length",
+                    index=0,
+                    message=ChatCompletionMessage(role="assistant", content=""),
+                )
+            ],
+        )
+        return LengthFinishReasonError(completion=completion)
+
+    def _run(self, node, tool):
+        from benchmark.localization import reason as R
+
+        with patch.object(R, "create_react_agent", return_value=self._graph):
+            return node._search(
+                rationale="r",
+                files=["f.py"],
+                defect=Change(number=0, base="db", after="da", description="d"),
+                correction=Change(number=1, base="cb", after="ca", description="c"),
+                tool=tool,
+            )
+
+    def test_emit_retry_recovers_from_length_error(self) -> None:
+        from benchmark.localization import reason as R
+
+        node = R.LocateNode(tool=Mock(), llm=Mock())
+        good = R.LocateResponseSchema(
+            locations=[R.LocateItemSchema(file="f.py", line="L5")]
+        )
+        self._graph = Mock()
+        self._graph.invoke.side_effect = [
+            self._length_error(),
+            {"messages": [], "structured_response": good},
+        ]
+        out = self._run(node, self._tool())
+
+        self.assertEqual(self._graph.invoke.call_count, 2)
+        self.assertEqual([i.line for i in out.locations], ["L5"])
+
+    def test_emit_retry_recovers_from_validation_error(self) -> None:
+        from benchmark.localization import reason as R
+
+        node = R.LocateNode(tool=Mock(), llm=Mock())
+        good = R.LocateResponseSchema(
+            locations=[R.LocateItemSchema(file="f.py", line="L5")]
+        )
+        self._graph = Mock()
+        # `_structured` routes the malformed payload through `model_validate`,
+        # which raises pydantic ValidationError; the retry then succeeds.
+        self._graph.invoke.side_effect = [
+            {"messages": [], "structured_response": {"locations": "not-a-list"}},
+            {"messages": [], "structured_response": good},
+        ]
+        out = self._run(node, self._tool())
+
+        self.assertEqual(self._graph.invoke.call_count, 2)
+        self.assertEqual([i.line for i in out.locations], ["L5"])
+
+    def test_emit_retry_exhausted_reraises(self) -> None:
+        from openai import LengthFinishReasonError
+
+        from benchmark.localization import reason as R
+
+        node = R.LocateNode(tool=Mock(), llm=Mock())
+        self._graph = Mock()
+        self._graph.invoke.side_effect = [
+            self._length_error(),
+            self._length_error(),
+        ]
+        with self.assertRaises(LengthFinishReasonError):
+            self._run(node, self._tool())
+        self.assertEqual(self._graph.invoke.call_count, 2)
+
+    def test_emit_retry_on_feedback_turn(self) -> None:
+        from benchmark.localization import reason as R
+
+        node = R.LocateNode(tool=Mock(), llm=Mock(), retries=1)
+        first = R.LocateResponseSchema(
+            locations=[
+                R.LocateItemSchema(file="f.py", line="L5"),
+                R.LocateItemSchema(file="f.py", line="L999"),
+            ],
+            reason="first",
+        )
+        second = R.LocateResponseSchema(
+            locations=[R.LocateItemSchema(file="f.py", line="L6")],
+            reason="second",
+        )
+        self._graph = Mock()
+        # First turn yields a bad marking forcing the validation-retry path; the
+        # feedback-turn invoke fails once (length) then recovers.
+        self._graph.invoke.side_effect = [
+            {"messages": [], "structured_response": first},
+            self._length_error(),
+            {"messages": [], "structured_response": second},
+        ]
+        out = self._run(node, self._tool())
+
+        self.assertEqual(self._graph.invoke.call_count, 3)
+        self.assertEqual(sorted(item.line for item in out.locations), ["L5", "L6"])
+
+    def test_attempts_one_disables_retry(self) -> None:
+        from openai import LengthFinishReasonError
+
+        from benchmark.localization import reason as R
+
+        node = R.LocateNode(tool=Mock(), llm=Mock(), attempts=1)
+        self._graph = Mock()
+        self._graph.invoke.side_effect = [self._length_error()]
+        with self.assertRaises(LengthFinishReasonError):
+            self._run(node, self._tool())
+        self.assertEqual(self._graph.invoke.call_count, 1)
+
+    def test_attempts_must_be_positive(self) -> None:
+        from benchmark.localization import reason as R
+
+        with self.assertRaises(ValueError):
+            R.LocateNode(tool=Mock(), llm=Mock(), attempts=0)
+
 
 if __name__ == "__main__":
     unittest.main()
