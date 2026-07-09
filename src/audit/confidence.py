@@ -1,32 +1,25 @@
 import pyarrow as pa
 import polars as pl
 
-from google.cloud import storage
-
-from benchmark.attribution.change import PullRequestEnricher
-from benchmark.attribution.history import PlatformCache, VersionControl
-from benchmark.definitions.partitions import Shard
-
 
 class ConfidenceComputation:
     """Change-level attribution confidence from the AgentSZZ runs.
 
-    Each attribution partition is one run of a correction, so predictions are
-    collected one per partition. For every correction the majority introducer
-    across the valid runs is selected, with ties broken by temporal distance
-    (the candidate closest to the correction wins). The selected candidate
-    carries its vote share and its temporal distance. The confidence combines
-    the cohort-rank-normalised vote share (high implies correct) and temporal
+    The released introducer per correction, together with its vote share and
+    temporal distance, is selected upstream in localization_inducer_reference.
+    This computation reads those released candidates, drops the ones whose
+    localization aborted, and derives the confidence by combining the
+    cohort-rank-normalised vote share (high implies correct) and temporal
     distance (high implies wrong, inverted), following the derivation in the
     confidence notebook.
     """
 
     def __init__(
         self,
-        traces: dict[str, pa.Table],
+        released: pa.Table,
         localization: dict[str, pa.Table] | None = None,
     ) -> None:
-        self._traces = traces
+        self._released = released
         self._localization = localization or {}
 
     def _aborted_inducers(self) -> set[tuple[str, int, str]]:
@@ -54,96 +47,31 @@ class ConfidenceComputation:
         return aborted
 
     def _predictions(self) -> pl.DataFrame:
-        rows: list[dict[str, object]] = []
-        for table in self._traces.values():
-            if table.num_rows == 0:
-                continue
-            record = (
-                pl.from_arrow(table)
-                .select("name", "number", "introducer", "aborted")
-                .row(0, named=True)
-            )
-            rows.append(record)
-        if not rows:
-            return pl.DataFrame(
-                schema={
-                    "name": pl.Utf8,
-                    "number": pl.Int64,
-                    "introducer": pl.Utf8,
-                    "aborted": pl.Boolean,
-                }
-            )
-        return pl.DataFrame(rows).filter(
-            ~pl.col("aborted") & pl.col("introducer").is_not_null()
+        # The released winner per correction, already carrying its vote share
+        # and temporal distance. The bug-inducing commit is the introducer.
+        return pl.from_arrow(self._released).select(
+            "name",
+            "number",
+            pl.col("bic").alias("introducer"),
+            "vote",
+            "temporal_distance",
         )
 
-    def _grouped(self, predictions: pl.DataFrame) -> dict[str, pl.DataFrame]:
-        groups: dict[str, pl.DataFrame] = {}
-        for keys, group in predictions.group_by("name"):
-            groups[keys[0]] = group
-        return groups
-
-    def _resolve(
-        self,
-        predictions: pl.DataFrame,
-        reference: pl.DataFrame,
-        names: list[str],
-    ) -> list[dict[str, object]]:
-        rows: list[dict[str, object]] = []
-        for name, frame in self._grouped(predictions).items():
-            enricher = PullRequestEnricher(name)
-            repository = VersionControl.create(
-                storage.Client(project="bug-request"),
-                bucket="bug-request-bucket",
-                key="scope-source-raw",
-                location="main",
-                version="4.0.0",
-                partition=Shard.to_space(names, name),
-                filter=enricher.enrich,
-            )
-            enricher.attach(repository, reference)
-            platform = PlatformCache(
-                enricher.table(), repository=repository, filter=enricher.enrich
-            )
-            for number, group in frame.group_by("number"):
-                change = platform.load(int(number[0]))
-                correction = repository.meta(change["after"]).time
-                counts = group.group_by("introducer").len()
-                candidates = []
-                for record in counts.iter_rows(named=True):
-                    sha = str(record["introducer"])
-                    distance = (
-                        abs(
-                            (correction - repository.meta(sha).time).total_seconds()
-                        )
-                        / 86400.0
-                    )
-                    candidates.append((record["len"], distance, sha))
-                # majority vote, ties broken by smallest temporal distance
-                votes, distance, sha = min(
-                    candidates, key=lambda item: (-item[0], item[1], item[2])
-                )
-                rows.append(
-                    {
-                        "name": name,
-                        "number": int(number[0]),
-                        "introducer": sha,
-                        "vote": votes / group.height,
-                        "temporal_distance": distance,
-                    }
-                )
-        return rows
-
-    def compute(self, reference: pl.DataFrame, names: list[str]) -> pa.Table:
-        rows = self._resolve(self._predictions(), reference, names)
+    def compute(self) -> pa.Table:
+        rows = self._predictions()
         aborted = self._aborted_inducers()
-        rows = [
-            row
-            for row in rows
-            if (str(row["name"]), int(row["number"]), str(row["introducer"]))
-            not in aborted
-        ]
-        if not rows:
+        rows = rows.filter(
+            ~pl.struct("name", "number", "introducer").map_elements(
+                lambda row: (
+                    str(row["name"]),
+                    int(row["number"]),
+                    str(row["introducer"]),
+                )
+                in aborted,
+                return_dtype=pl.Boolean,
+            )
+        )
+        if rows.height == 0:
             return pa.table(
                 {
                     "name": pa.array([], type=pa.string()),
@@ -155,7 +83,7 @@ class ConfidenceComputation:
                 }
             )
 
-        frame = pl.DataFrame(rows)
+        frame = rows
         size = frame.height
         if size == 1:
             frame = frame.with_columns(pl.lit(1.0).alias("rho"))

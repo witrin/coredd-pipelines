@@ -1,41 +1,38 @@
 import dagster as dg
 import pyarrow as pa
-import polars as pl
 
 from components.decorator import asset
 from benchmark.audit.confidence import ConfidenceComputation
-from benchmark.definitions.assets.attribution import BenchmarkConfig
 
 
 @asset(
     metadata={"version": "2.0.0"},
     group_name="confidence",
     ins={
-        "attribution_change_trace": dg.AssetIn(
-            partition_mapping=dg.AllPartitionMapping()
-        ),
         "localization_change_trace": dg.AssetIn(
-            partition_mapping=dg.AllPartitionMapping()
+            partition_mapping=dg.AllPartitionMapping(),
+            # Only the per-run scalar columns are read; pushing them down at the
+            # parquet read keeps the fat `payload` column out of memory (~99.8%
+            # of each trace) and avoids an OOM across all partitions.
+            metadata={
+                "columns": ["name", "number", "defect", "aborted"]
+            },
         ),
     },
 )
 def confidence_change_reliability(
     context: dg.AssetExecutionContext,
-    config: BenchmarkConfig,
-    attribution_change_trace: dict,
+    localization_inducer_reference: pa.Table,
     localization_change_trace: dict,
-    filter_change_reference: pa.Table,
-    scope_repository_stationary: pa.Table,
 ) -> pa.Table:
     """Change-level attribution confidence over every reconstructed correction.
 
-    A correction whose voted introducer aborted localization is excluded here, so
-    it never receives an rho and never enters the audit sample.
+    The released introducer and its vote signals are selected upstream; a
+    correction whose released introducer aborted localization is excluded here,
+    so it never receives an rho and never enters the audit sample.
     """
-    reference = pl.from_arrow(filter_change_reference)
-    names = sorted(pl.from_arrow(scope_repository_stationary)["name"].to_list())
     table = ConfidenceComputation(
-        attribution_change_trace, localization_change_trace
-    ).compute(reference, names)
+        localization_inducer_reference, localization_change_trace
+    ).compute()
     context.log.info("Computed confidence for %d corrections.", table.num_rows)
     return table

@@ -29,7 +29,7 @@ from langchain_openai import ChatOpenAI
 
 
 @asset(
-    metadata={"version": "1.0.0"},
+    metadata={"version": "2.0.0"},
     group_name="localization",
     kinds={"gcs"},
     ins={
@@ -49,30 +49,93 @@ def localization_inducer_reference(
     context: dg.AssetExecutionContext,
     attribution_change_trace: dict,
     filter_change_reference: pa.Table,
+    scope_repository_stationary: pa.Table,
 ) -> pa.Table:
-    """Each attribution inducer (BIC) resolved to its pull request and Python-file count, classified for localization: python>0 is processed, otherwise reported (non-Python PR, or orphan when the SHA belongs to no corpus PR)."""
-    trace = pl.from_arrow(
-        pa.concat_tables(attribution_change_trace.values())
-    )
-    inducers = (
-        trace.filter(~pl.col("aborted"))
+    """The released bug-inducing commit per correction, resolved to its pull request and Python-file count and classified for localization: python>0 is processed, otherwise reported (non-Python PR, or orphan when the SHA belongs to no corpus PR).
+
+    The release is the majority vote across the attribution runs of a correction,
+    ties broken by temporal distance to the correction. Only the released commit
+    is emitted, so localization runs once per correction rather than once per
+    candidate.
+    """
+    runs = (
+        pl.from_arrow(pa.concat_tables(attribution_change_trace.values()))
+        .filter(~pl.col("aborted"))
         .filter(pl.col("introducer").is_not_null())
-        .select("name", "number", pl.col("introducer").alias("bic"))
-        .unique()
-        .with_columns(
-            pl.struct("name", "number")
-            .map_elements(
-                lambda row: Shard.to_token(f"{row['name']}#{row['number']}"),
-                return_dtype=pl.Utf8,
-            )
-            .alias("correction")
-        )
+        .select("name", "number", "introducer")
     )
 
-    # Resolve each BIC SHA to its corpus PR by exploding the reference commit lists.
+    # The vote and the corpus join match introducer SHAs by exact string. The
+    # attribution normalizer accepts 7-40 char SHAs, so a truncated SHA would
+    # silently split a vote or miss the join; guard the assumption explicitly.
+    short = runs.filter(pl.col("introducer").str.len_chars() != 40).height
+    if short:
+        raise ValueError(f"{short} introducer SHAs are not full 40-character")
+
+    reference = pl.from_arrow(filter_change_reference)
+    names = sorted(pl.from_arrow(scope_repository_stationary)["name"].to_list())
+
+    winners = []
+    for name, frame in runs.group_by("name"):
+        name = name[0] if isinstance(name, tuple) else name
+        enricher = PullRequestEnricher(name)
+        repository = VersionControl.create(
+            storage.Client(project="bug-request"),
+            bucket="bug-request-bucket",
+            key="scope-source-raw",
+            location="main",
+            version="4.0.0",
+            partition=Shard.to_space(names, name),
+            filter=enricher.enrich,
+        )
+        enricher.attach(repository, reference)
+        platform = PlatformCache(
+            enricher.table(), repository=repository, filter=enricher.enrich
+        )
+        for number, group in frame.group_by("number"):
+            number = number[0] if isinstance(number, tuple) else number
+            number = int(number)
+            change = platform.load(number)
+            correction = repository.meta(change["after"]).time
+            counts = group.group_by("introducer").len()
+            candidates = []
+            for record in counts.iter_rows(named=True):
+                sha = str(record["introducer"])
+                distance = (
+                    abs((correction - repository.meta(sha).time).total_seconds())
+                    / 86400.0
+                )
+                candidates.append((record["len"], distance, sha))
+            # majority vote, ties broken by smallest temporal distance
+            votes, distance, sha = min(
+                candidates, key=lambda item: (-item[0], item[1], item[2])
+            )
+            winners.append(
+                {
+                    "correction": Shard.to_token(f"{name}#{number}"),
+                    "bic": sha,
+                    "name": name,
+                    "number": number,
+                    "vote": votes / group.height,
+                    "temporal_distance": distance,
+                }
+            )
+
+    inducers = pl.DataFrame(
+        winners,
+        schema={
+            "correction": pl.Utf8,
+            "bic": pl.Utf8,
+            "name": pl.Utf8,
+            "number": pl.Int64,
+            "vote": pl.Float64,
+            "temporal_distance": pl.Float64,
+        },
+    )
+
+    # Resolve each released BIC SHA to its corpus PR by exploding the reference commit lists.
     resolved = (
-        pl.from_arrow(filter_change_reference)
-        .explode("commits")
+        reference.explode("commits")
         .select(
             pl.col("commits").alias("bic"),
             pl.col("number").alias("pr"),
@@ -81,23 +144,32 @@ def localization_inducer_reference(
         .unique(subset=["bic"])
     )
 
-    reference = (
+    released = (
         inducers.join(resolved, on="bic", how="left")
         # Orphans (SHA in no corpus PR) get python=null/0 and a null PR.
         .with_columns(pl.col("python").fill_null(0))
-        .select("correction", "bic", "name", "number", "pr", "python")
+        .select(
+            "correction",
+            "bic",
+            "name",
+            "number",
+            "pr",
+            "python",
+            "vote",
+            "temporal_distance",
+        )
         .sort("correction", "bic")
     )
 
-    processed = reference.filter(pl.col("python") > 0).height
+    processed = released.filter(pl.col("python") > 0).height
     context.log.info(
-        "Resolved %d inducers; %d Python-PR (processed), %d reported.",
-        reference.height,
+        "Released %d inducers; %d Python-PR (processed), %d reported.",
+        released.height,
         processed,
-        reference.height - processed,
+        released.height - processed,
     )
 
-    return reference.to_arrow()
+    return released.to_arrow()
 
 
 @asset(
