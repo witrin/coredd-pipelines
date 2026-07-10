@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from typing import Any, TypeAlias, TypedDict
 
+from openai import LengthFinishReasonError
+from pydantic import ValidationError
+
 from benchmark.attribution.domain import Change, JsonDict
-from benchmark.tracing import TracedRunnable, Trace
+from benchmark.tracing import TracedRunnable, Trace, TraceRuntime
 
 
 NodeState: TypeAlias = JsonDict
@@ -28,6 +31,7 @@ class LocateGraph:
         explain: Any | None = None,
         aggregate: Any | None = None,
         locate: Any | None = None,
+        attempts: int = 2,
     ) -> None:
         if (
             summarize is None
@@ -36,10 +40,13 @@ class LocateGraph:
             or locate is None
         ):
             raise ValueError("LocateGraph requires explicit semantic nodes.")
+        if attempts < 1:
+            raise ValueError("LocateGraph attempts must be positive.")
         self._summarize = summarize
         self._explain = explain
         self._aggregate = aggregate
         self._locate = locate
+        self._attempts = attempts
         self._graph: TracedRunnable | None = None
 
     def build(self) -> object:
@@ -83,15 +90,50 @@ class LocateGraph:
         trace: Trace | None = None,
         **kwargs: object,
     ) -> dict[str, object]:
-        result = self._compiled().invoke(
-            {"correction": correction, "defect": defect, "nodes": {}},
-            trace=trace,
-            **kwargs,
+        # Stage-2 retry: the locate node already retries just its own agent
+        # (LocateNode._emit) against a fixed rationale/file seed. When that seed
+        # itself drives the emit degeneration, every locate-only retry lands in the
+        # same trap, so re-run the WHOLE graph — summarize/explain/aggregate produce
+        # a fresh seed each pass. Each invoke rebuilds the input state, so a re-run
+        # is a genuine restart. Propagate after the attempts are exhausted so the
+        # asset marks the trace aborted exactly as before.
+        error: Exception | None = None
+        for attempt in range(self._attempts):
+            try:
+                result = self._compiled().invoke(
+                    {"correction": correction, "defect": defect, "nodes": {}},
+                    trace=trace,
+                    **kwargs,
+                )
+                return {
+                    "defect": result.get("defect"),
+                    "locations": list(result.get("locations") or []),
+                }
+            except (LengthFinishReasonError, ValidationError) as failure:
+                error = failure
+                self._mark(attempt, failure)
+        raise error
+
+    def _mark(self, attempt: int, failure: Exception) -> None:
+        # Record a failed whole-graph attempt in the active trace: warns that a
+        # further pass is starting and separates the passes (everything before this
+        # marker belongs to the failed pass). No-op when there is no active trace.
+        trace = TraceRuntime.current_trace()
+        if trace is None:
+            return
+        trace.append(
+            node="LocateGraph",
+            span=f"graph-attempt-{attempt + 1}",
+            parent=None,
+            event="graph_attempt",
+            payload={
+                "attempt": attempt + 1,
+                "attempts": self._attempts,
+                "retrying": attempt + 1 < self._attempts,
+                "error": str(failure),
+                "error_type": type(failure).__name__,
+            },
         )
-        return {
-            "defect": result.get("defect"),
-            "locations": list(result.get("locations") or []),
-        }
 
     def _compiled(self) -> TracedRunnable:
         if self._graph is None:

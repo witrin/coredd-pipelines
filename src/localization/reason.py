@@ -348,10 +348,16 @@ class LocateNode:
         # JSON (`ValidationError`). The degeneration is nondeterministic, so a fresh
         # whole-agent run usually recovers; retry a bounded number of times and only
         # then let the failure propagate so the asset marks the trace aborted.
+        #
+        # graph.invoke appends the agent transcript to state["messages"] in place,
+        # so each attempt must run against its own copy of the initial state — else
+        # a retry would inherit the failed attempt's (poisoned) history and start
+        # from a bloated prompt instead of the clean initial message.
         error: Exception | None = None
         for attempt in range(self._attempts):
+            fresh = {**state, "messages": list(state["messages"])}
             try:
-                return self._invoke(tool, state, limit)
+                return self._invoke(tool, fresh, limit)
             except (LengthFinishReasonError, ValidationError) as failure:
                 error = failure
                 self._mark(attempt, failure)

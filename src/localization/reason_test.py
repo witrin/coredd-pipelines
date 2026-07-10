@@ -360,6 +360,137 @@ class TestLocateGraph(unittest.TestCase):
         self.assertEqual(result["nodes"]["locate"], locate.run.return_value)
 
 
+class TestLocateGraphRetry(unittest.TestCase):
+    """Stage-2: re-run the whole graph when the locate emit degenerates."""
+
+    def _graph(self, attempts: int = 2) -> LocateGraph:
+        return LocateGraph(
+            summarize=Mock(spec_set=["run"]),
+            explain=Mock(spec_set=["run"]),
+            aggregate=Mock(spec_set=["run"]),
+            locate=Mock(spec_set=["run"]),
+            attempts=attempts,
+        )
+
+    def _length_error(self):
+        from openai import LengthFinishReasonError
+        from openai.types.chat import ChatCompletion
+        from openai.types.chat.chat_completion import Choice
+        from openai.types.chat.chat_completion_message import ChatCompletionMessage
+
+        completion = ChatCompletion(
+            id="x",
+            created=0,
+            model="m",
+            object="chat.completion",
+            choices=[
+                Choice(
+                    finish_reason="length",
+                    index=0,
+                    message=ChatCompletionMessage(role="assistant", content=""),
+                )
+            ],
+        )
+        return LengthFinishReasonError(completion=completion)
+
+    def _change(self, sha: str):
+        return Change(number=0, base=f"{sha}-b", after=sha, description="d")
+
+    def _invoke(self, graph, compiled):
+        with patch.object(graph, "_compiled", return_value=compiled):
+            return graph.invoke(
+                self._change("correction"), defect=self._change("defect")
+            )
+
+    def test_requires_positive_attempts(self) -> None:
+        with self.assertRaises(ValueError):
+            LocateGraph(
+                summarize=Mock(spec_set=["run"]),
+                explain=Mock(spec_set=["run"]),
+                aggregate=Mock(spec_set=["run"]),
+                locate=Mock(spec_set=["run"]),
+                attempts=0,
+            )
+
+    def test_graph_retry_recovers_from_length_error(self) -> None:
+        graph = self._graph()
+        compiled = Mock(spec_set=["invoke"])
+        compiled.invoke.side_effect = [
+            self._length_error(),
+            {"defect": self._change("defect"), "locations": [{"file": "a.py", "line": "L5"}]},
+        ]
+        out = self._invoke(graph, compiled)
+
+        self.assertEqual(compiled.invoke.call_count, 2)
+        self.assertEqual(out["locations"], [{"file": "a.py", "line": "L5"}])
+
+    def test_graph_retry_recovers_from_validation_error(self) -> None:
+        from pydantic import ValidationError
+
+        from benchmark.localization.reason import LocateResponseSchema
+
+        try:
+            LocateResponseSchema.model_validate({"locations": "not-a-list"})
+        except ValidationError as raised:
+            verror = raised
+
+        graph = self._graph()
+        compiled = Mock(spec_set=["invoke"])
+        compiled.invoke.side_effect = [
+            verror,
+            {"defect": self._change("defect"), "locations": [{"file": "a.py", "line": "L5"}]},
+        ]
+        out = self._invoke(graph, compiled)
+
+        self.assertEqual(compiled.invoke.call_count, 2)
+        self.assertEqual(out["locations"], [{"file": "a.py", "line": "L5"}])
+
+    def test_graph_retry_exhausted_reraises(self) -> None:
+        from openai import LengthFinishReasonError
+
+        graph = self._graph(attempts=2)
+        compiled = Mock(spec_set=["invoke"])
+        compiled.invoke.side_effect = [self._length_error(), self._length_error()]
+        with self.assertRaises(LengthFinishReasonError):
+            self._invoke(graph, compiled)
+        self.assertEqual(compiled.invoke.call_count, 2)
+
+    def test_graph_attempts_one_disables_retry(self) -> None:
+        from openai import LengthFinishReasonError
+
+        graph = self._graph(attempts=1)
+        compiled = Mock(spec_set=["invoke"])
+        compiled.invoke.side_effect = [self._length_error()]
+        with self.assertRaises(LengthFinishReasonError):
+            self._invoke(graph, compiled)
+        self.assertEqual(compiled.invoke.call_count, 1)
+
+    def test_failed_graph_attempt_marks_the_trace(self) -> None:
+        import json
+
+        from benchmark.tracing import Trace, TraceRuntime
+
+        graph = self._graph()
+        compiled = Mock(spec_set=["invoke"])
+        compiled.invoke.side_effect = [
+            self._length_error(),
+            {"defect": self._change("defect"), "locations": []},
+        ]
+        trace = Trace(seed="localization-test")
+        token = TraceRuntime.activate(trace)
+        try:
+            self._invoke(graph, compiled)
+        finally:
+            TraceRuntime.deactivate(token)
+
+        marks = [e for e in trace.events() if e["event"] == "graph_attempt"]
+        self.assertEqual(len(marks), 1)
+        payload = json.loads(marks[0]["payload"])
+        self.assertEqual(payload["attempt"], 1)
+        self.assertEqual(payload["error_type"], "LengthFinishReasonError")
+        self.assertTrue(payload["retrying"])
+
+
 class _Delta:
     def __init__(self, path: str) -> None:
         self.new_file = type("F", (), {"path": path})()
@@ -605,6 +736,38 @@ class TestLocateNodeRetry(unittest.TestCase):
         self.assertEqual(self._graph.invoke.call_count, 2)
         self.assertEqual([i.line for i in out.locations], ["L5"])
 
+    def test_emit_retry_starts_from_fresh_state(self) -> None:
+        # graph.invoke appends the agent transcript to state["messages"] in place.
+        # The retry must run against a fresh copy of the initial state, else it
+        # would inherit the failed attempt's poisoned (bloated) history. Attempt 1
+        # mutates the passed messages and fails; attempt 2 must still see the clean
+        # single-message state.
+        from benchmark.localization import reason as R
+
+        good = R.LocateResponseSchema(
+            locations=[R.LocateItemSchema(file="f.py", line="L5")]
+        )
+        seen_lengths: list[int] = []
+
+        def invoke(state, **kwargs):
+            seen_lengths.append(len(state["messages"]))
+            if len(seen_lengths) == 1:
+                # Poison the passed-in list the way LangGraph would, then fail.
+                state["messages"].append("agent transcript")
+                raise self._length_error()
+            return {"messages": [], "structured_response": good}
+
+        node = R.LocateNode(tool=Mock(), llm=Mock())
+        self._graph = Mock()
+        self._graph.invoke.side_effect = invoke
+        out = self._run(node, self._tool())
+
+        self.assertEqual(self._graph.invoke.call_count, 2)
+        # Both attempts start from the clean initial state (one HumanMessage),
+        # not the mutated 2-message list from attempt 1.
+        self.assertEqual(seen_lengths, [1, 1])
+        self.assertEqual([i.line for i in out.locations], ["L5"])
+
     def test_emit_retry_exhausted_reraises(self) -> None:
         from openai import LengthFinishReasonError
 
@@ -665,6 +828,54 @@ class TestLocateNodeRetry(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             R.LocateNode(tool=Mock(), llm=Mock(), attempts=0)
+
+    def test_failed_attempt_marks_the_trace(self) -> None:
+        import json
+
+        from benchmark.localization import reason as R
+        from benchmark.tracing import Trace, TraceRuntime
+
+        node = R.LocateNode(tool=Mock(), llm=Mock())
+        good = R.LocateResponseSchema(
+            locations=[R.LocateItemSchema(file="f.py", line="L5")]
+        )
+        self._graph = Mock()
+        self._graph.invoke.side_effect = [
+            self._length_error(),
+            {"messages": [], "structured_response": good},
+        ]
+        trace = Trace(seed="localization-test")
+        token = TraceRuntime.activate(trace)
+        try:
+            out = self._run(node, self._tool())
+        finally:
+            TraceRuntime.deactivate(token)
+
+        marks = [e for e in trace.events() if e["event"] == "emit_attempt"]
+        # One marker for the single failed attempt; the successful retry adds none.
+        self.assertEqual(len(marks), 1)
+        payload = json.loads(marks[0]["payload"])
+        self.assertEqual(payload["attempt"], 1)
+        self.assertEqual(payload["error_type"], "LengthFinishReasonError")
+        self.assertTrue(payload["retrying"])
+        self.assertEqual([i.line for i in out.locations], ["L5"])
+
+    def test_marker_noop_without_active_trace(self) -> None:
+        # No active trace (the default in unit tests): the retry still works and
+        # simply records no marker.
+        from benchmark.localization import reason as R
+
+        node = R.LocateNode(tool=Mock(), llm=Mock())
+        good = R.LocateResponseSchema(
+            locations=[R.LocateItemSchema(file="f.py", line="L5")]
+        )
+        self._graph = Mock()
+        self._graph.invoke.side_effect = [
+            self._length_error(),
+            {"messages": [], "structured_response": good},
+        ]
+        out = self._run(node, self._tool())
+        self.assertEqual([i.line for i in out.locations], ["L5"])
 
 
 if __name__ == "__main__":

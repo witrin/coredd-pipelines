@@ -276,6 +276,7 @@ def localization_change_trace(
             llm=llm,
             retries=config.retries,
         ),
+        attempts=2,
     )
     monitor = TraceMonitor(sink=context.log.info)
     trace = Trace(
