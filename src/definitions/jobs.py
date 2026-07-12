@@ -858,6 +858,13 @@ def audit_change_request_op(
     # optional: corrections without a localization run still push without
     # pre-marked lines rather than failing the whole job.
     optional = {"localization-change-trace"}
+    # Only the markings are read off the trace, and the payload column it also
+    # carries is ~99.8% of every row. Loading it across all partitions is what
+    # ran the op out of memory, so the columns are pushed down at the parquet
+    # read. The other assets are small and are loaded whole.
+    projection = {
+        "localization-change-trace": ["name", "correction", "defect", "locations"],
+    }
     for asset in (
         "audit-change-sample",
         "scope-repository-stationary",
@@ -883,7 +890,7 @@ def audit_change_request_op(
                     storage.prefix(resolver.key, version, place, normalized)
                     + "data.parquet"
                 )
-                table = storage.load(blob=blob)
+                table = storage.load(blob=blob, columns=projection.get(asset))
                 if table is not None:
                     tables.append(table)
                     break
