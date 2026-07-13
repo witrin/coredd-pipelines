@@ -1,3 +1,5 @@
+import json
+
 import dagster as dg
 import pyarrow as pa
 import polars as pl
@@ -5,8 +7,13 @@ import polars as pl
 from components.decorator import asset
 
 
+class ConfidenceConfig(dg.Config):
+    limit: int = 100
+    compute: str = "default"
+
+
 @asset(
-    metadata={"version": "4.0.0"},
+    metadata={"version": "5.0.0"},
     group_name="confidence",
     ins={
         "localization_change_trace": dg.AssetIn(
@@ -15,13 +22,14 @@ from components.decorator import asset
             # parquet read keeps the fat `payload` column out of memory (~99.8%
             # of each trace) and avoids an OOM across all partitions.
             metadata={
-                "columns": ["name", "correction", "defect", "aborted"]
+                "columns": ["name", "correction", "defect", "aborted", "locations"]
             },
         ),
     },
 )
 def confidence_change_reliability(
     context: dg.AssetExecutionContext,
+    config: ConfidenceConfig,
     localization_inducer_reference: pa.Table,
     localization_change_trace: dict,
 ) -> pa.Table:
@@ -34,6 +42,11 @@ def confidence_change_reliability(
     the ranking are joined in from the released reference, which alone carries
     them. Reported-only corrections (no python file, or direct) never receive a
     trace, so they never receive an rho and never enter the audit sample.
+
+    A run whose marking set exceeds `limit` is dropped with the aborted ones, before
+    the ranking. rho is a rank over the pool ((rank - 1) / (size - 1)), so the pool
+    is what rho is relative to: a run removed downstream would still have shifted
+    the rho of every run that remains.
     """
     empty = {
         "name": pa.array([], type=pa.string()),
@@ -44,26 +57,44 @@ def confidence_change_reliability(
         "rho": pa.array([], type=pa.float64()),
     }
 
-    # One (name, correction, defect) per localized, non-aborted trace partition.
-    # Each partition is a single localization run, so the aborted flag is uniform
-    # across its rows and the first row identifies the whole partition.
+    # One (name, correction, defect) per localized trace partition, dropping the
+    # runs that aborted and the ones whose marking set is degenerate. Each partition
+    # is a single localization run, so both the aborted flag and the emitted
+    # locations are uniform across its rows and the first row identifies the whole
+    # partition.
     keys = []
+    aborted = 0
+    degenerate = 0
     for table in localization_change_trace.values():
         if table.num_rows == 0:
             continue
         record = (
             pl.from_arrow(table)
-            .select("name", "correction", "defect", "aborted")
+            .select("name", "correction", "defect", "aborted", "locations")
             .row(0, named=True)
         )
-        if not record["aborted"]:
-            keys.append(
-                {
-                    "name": str(record["name"]),
-                    "correction": str(record["correction"]),
-                    "defect": str(record["defect"]),
-                }
-            )
+        if record["aborted"]:
+            aborted += 1
+            continue
+        markings = len(json.loads(record["locations"] or "[]"))
+        if markings > config.limit:
+            degenerate += 1
+            continue
+        keys.append(
+            {
+                "name": str(record["name"]),
+                "correction": str(record["correction"]),
+                "defect": str(record["defect"]),
+            }
+        )
+
+    context.log.info(
+        "Pool: %d runs (%d aborted, %d above the %d-marking limit).",
+        len(keys),
+        aborted,
+        degenerate,
+        config.limit,
+    )
 
     if not keys:
         return pa.table(empty)

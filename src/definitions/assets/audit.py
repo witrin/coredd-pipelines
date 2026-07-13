@@ -54,6 +54,10 @@ def audit_change_sample(
     an empty localization still carries an rho. Auditing such a case is vacuous:
     the audit inspects the markings the rho stands on, and there are none. The
     empty runs are accounted for in the yield, not here.
+
+    Runs whose marking set exceeds the limit are dropped in confidence, before rho
+    is ranked. The audit samples the set confidence released and excludes nothing
+    of its own.
     """
     marked = {
         (str(row["name"]), str(row["correction"]), str(row["defect"]))
