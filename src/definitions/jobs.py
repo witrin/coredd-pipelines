@@ -986,11 +986,17 @@ Where a defect comes from determines how the corrective change is categorized.
 
 **Other.** The change does not correct a defect at all. This covers refactoring, new features, dependency updates without an observed failure, documentation, and configuration.
 
-Observable failure includes any breakage encountered in development or use of the software, such as runtime errors, test failures, build or installation failures, CI failures, and developer-reported behavior. A linked issue or bug ticket is one form of evidence but not a requirement.
+Observable failure includes any breakage encountered in development or use of the software, such as runtime errors, test failures, build or installation failures, CI failures, and developer-reported behavior. A linked issue or bug ticket is one form of evidence but not a requirement. An observed failure evidences the defect but is not required for it. A violated requirement is a defect even without an observed failure.
 
 ## Decision
 
 The audit proceeds through three stages, applied in order. As soon as a change fails one stage, it stops there, and that stage is recorded as the failure label of the change.
+
+**Correction.** For the corrective change, decide which of the three categories Intrinsic, Extrinsic, and Other apply. Multiple categories can apply to a single change. Inspect the file list and the description. For each correction identified, decide where the defect originates. Add Other if the change also contains work that does not correct a defect. The change continues to Attribution if Intrinsic is among the selected categories. Otherwise the audit for the change ends.
+
+**Attribution.** Work from the root cause. State for each intrinsic correction in the corrective change what defect it repairs. Then check whether the marked lines in the defective change carry any of these root causes. If they do, accept, and continue to Localization, which only completes the marking. If they do not, search the lines the defective change modified for these root causes. If you find one, accept, and correct the marking in Localization. If none of the root causes appears in any line the defective change modified, reject, and the audit for the pair ends. You judge only the defective change presented to you.
+
+**Localization.** Review the lines marked in the defective change. A line is defective if it is part of the root cause that the corrective change resolves, and only lines the defective change itself modified qualify. The defect lies at the modified lines that made the correction necessary. The result should be the complete set of lines that carry the root cause, not just a verdict on the lines already marked.
 
 ## Edge Cases
 
@@ -998,7 +1004,7 @@ A corrective change that also contains refactoring, a feature, or documentation 
 
 If the shown defective change introduced one of several intrinsic corrections, Attribution is passed. The other corrections, introduced by different changes, are not a reason to reject it.
 
-If the line that actually causes the defect lies outside the marked region, for example earlier in the same function, add it in Localization.
+If the root cause lies outside the marked region but within lines the defective change modified, for example earlier in the same function, those lines are defect locations too.
 
 A revert receives Intrinsic if the reverted change introduced a defect, and Other if the reverted change introduced a feature that turned out to be premature or unwanted.""",
         fields=[
@@ -1008,12 +1014,12 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
                 name="localization",
                 title="Localization",
                 description=(
-                    "Look at the lines marked as the defect in the defective "
-                    "change and correct the marking in both directions. For each "
-                    "marked line, decide whether it really belongs to the defect "
-                    "that the corrective change fixes. If the defect reaches lines "
-                    "that were not marked, add them. The result should be the "
-                    "complete set of lines that carry the defect, not just a "
+                    "Review the lines marked in the defective change. A line is "
+                    "defective if it is part of the root cause that the corrective "
+                    "change resolves, and only lines the defective change itself "
+                    "modified qualify. The defect lies at the modified lines that "
+                    "made the correction necessary. The result should be the "
+                    "complete set of lines that carry the root cause, not just a "
                     "verdict on the lines already marked."
                 ),
                 template=(
@@ -1051,14 +1057,18 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
                 name="attribution",
                 title="Attribution",
                 description=(
-                    "Check whether the defective change you were shown is "
-                    "actually where the defect was introduced. Accept it if it "
-                    "introduced at least one of the corrections you labeled "
-                    "Intrinsic. A defect can have more than one origin, but you "
-                    "only judge the one change presented to you, so do not go "
-                    "looking for a better candidate. If the shown change is not "
-                    "an origin, the audit for the pair ends. Otherwise it "
-                    "continues to Localization."
+                    "Work from the root cause. State for each intrinsic "
+                    "correction in the corrective change what defect it repairs. "
+                    "Then check whether the marked lines in the defective change "
+                    "carry any of these root causes. If they do, accept, and "
+                    "continue to Localization, which only completes the marking. "
+                    "If they do not, search the lines the defective change "
+                    "modified for these root causes. If you find one, accept, and "
+                    "correct the marking in Localization. If none of the root "
+                    "causes appears in any line the defective change modified, "
+                    "reject, and the audit for the pair ends. You judge only the "
+                    "defective change presented to you, so do not go looking for "
+                    "a better candidate."
                 ),
                 labels={"correct": "Correct", "wrong": "Wrong"},
                 required=False,
