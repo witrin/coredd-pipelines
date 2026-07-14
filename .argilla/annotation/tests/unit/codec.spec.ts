@@ -62,32 +62,48 @@ describe("codec ↔ backend suggestion format", () => {
   it("Prime decodes coordinate suggestions into the Selection", async () => {
     const { selection, maps } = await Prime.run(data, fetch);
     const projected = selection.project("tgt", "src/thing.ts");
-    // The suggestion survives decoding as one annotation (a diff-line interval).
-    expect(projected).toHaveLength(1);
-    expect(projected[0].origin).toBe("suggestion");
+    // The marked lines are a set, not a span. On the diff axis they are {1, 3} — after
+    // line 1 is diff 1, the deleted base line 3 ('gone') is diff 3 — with diff 2 ('b')
+    // unmarked between them. The gap splits the suggestion into two annotations; folding
+    // it to [1, 4) would silently mark 'b'.
+    expect(projected).toHaveLength(2);
+    expect(projected.map((a) => a.lines).sort((x, y) => x[0] - y[0])).toEqual([
+      [1, 2],
+      [3, 4],
+    ]);
+    for (const annotation of projected)
+      expect(annotation.origin).toBe("suggestion");
     expect(maps.has("tgt", "src/thing.ts")).toBe(true);
   });
 
   it("Export round-trips it back to side-tagged coordinates", async () => {
     const { selection, maps } = await Prime.run(data, fetch);
-    // Accept the suggestion so it reaches the output (pending suggestions are dropped).
-    const suggestion = selection.project("tgt", "src/thing.ts")[0];
-    selection.accept(suggestion.identifier);
+    // Accept every run so the whole suggestion reaches the output (pending ones are
+    // dropped). The two runs together carry the set the backend marked.
+    for (const suggestion of selection.project("tgt", "src/thing.ts"))
+      selection.accept(suggestion.identifier);
 
     const output = Export.build(selection, maps);
-    expect(output).toHaveLength(1);
-    const entry = output[0];
-    expect(entry.sha).toBe("tgt");
-    expect(entry.path).toBe("src/thing.ts");
-    // Every exported line is a coordinate; each carries a side; the annotated lines
-    // include the after line 1 and the deleted base line.
-    for (const coordinate of entry.lines) {
-      expect(typeof coordinate.line).toBe("number");
-      expect(coordinate.side === "base" || coordinate.side === "after").toBe(true);
+    expect(output).toHaveLength(2);
+    for (const entry of output) {
+      expect(entry.sha).toBe("tgt");
+      expect(entry.path).toBe("src/thing.ts");
+      // Every exported line is a coordinate carrying its own side.
+      for (const coordinate of entry.lines) {
+        expect(typeof coordinate.line).toBe("number");
+        expect(coordinate.side === "base" || coordinate.side === "after").toBe(
+          true,
+        );
+      }
+      // No legacy `side` field on the annotation itself — the side lives per coordinate.
+      expect("side" in entry).toBe(false);
     }
-    expect(entry.lines.some((c) => c.side === "after")).toBe(true);
-    expect(entry.lines.some((c) => c.side === "base")).toBe(true);
-    // No legacy `side` field on the annotation itself — the side lives per coordinate.
-    expect("side" in entry).toBe(false);
+
+    // The exported coordinates are exactly the set that went in: the after line 1 and the
+    // deleted base line 3. The context line 'b' between them stays unmarked.
+    const coordinates = output.flatMap((entry) => entry.lines);
+    expect(coordinates).toHaveLength(2);
+    expect(coordinates).toContainEqual({ line: 1, side: "after" });
+    expect(coordinates).toContainEqual({ line: 3, side: "base" });
   });
 });

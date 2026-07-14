@@ -51,7 +51,11 @@ The component receives a URL pointing to a JSON file as its sole input. Structur
       "annotations": [
         {
           "path": "<path>",
-          "lines": [10, 15],
+          "lines": [
+            { "line": 10, "side": "after" },
+            { "line": 11, "side": "after" },
+            { "line": 15, "side": "base" }
+          ],
           "description": "<description>"
         }
       ]
@@ -95,9 +99,34 @@ File content is loaded via HTTP GET as plaintext.
 Each entry in `targets[].annotations` describes a model suggestion. The `annotations` field is **optional** — when absent or empty the target has no suggestions but remains annotatable (manual annotations are still possible).
 
 - **`path`** — File path within the commit.
-- **`lines`** — A single line range as a half-open interval `[start, end)` (1-based, start inclusive, end exclusive). Example: `[10, 15)` covers lines 10, 11, 12, 13, 14. A suggestion that spans disjoint passages of the same file is expressed as multiple annotation objects sharing the same `path`.
+- **`lines`** — A **set** of marked lines: a flat list of coordinates, each `{ line, side }`. `line` is a 1-based line number in real file coordinates; `side` (*optional*, `"base"` | `"after"`, absent means `"after"`) names which side of the diff that line lives on — `"base"` a deleted line on the left, `"after"` a present line on the right. The side is carried per coordinate, so one suggestion may mark lines on both sides. The set is a set: it makes no claim about the lines between two marked lines.
 - **`description`** — Description of the suggested location (displayed as label).
-- **`side`** *(optional, `"base"` | `"after"`)* — Which diff side the `lines` refer to. Absent means `"after"`. `"base"` places the suggestion on the left (deleted) side; its `lines` are base-line numbers. Only pure deletions use `"base"`; suggestions on shared (context/edit) lines use `"after"`.
+
+#### 1.4.1 Marked lines → intervals → marked lines
+
+The component works internally in half-open intervals `[start, end)` on the **diff axis** (the single line axis numbered 1..N over context, deletions and additions in display order). A suggestion's coordinate set is translated onto that axis at load, and back to coordinates on export. The translation is fixed in both directions:
+
+**Decode (load).** Each coordinate maps to one diff line. The resulting set of diff lines is cut into its **maximal gap-free runs**, and each run becomes one interval — hence one annotation, judged on its own. A suggestion whose marked lines have gaps therefore enters the selection as **several** annotations sharing the same `path`.
+
+> Example. `L4,L5,L6,L9,L10` plus `R1,R2,R4` (base lines `L`, after lines `R`) map onto the diff axis as `{1,2,4,5,6,9,10}` — note that two of the eight coordinates share a diff line, because an edit pairs a base and an after line on one row. The gaps at 3 and at 7–8 cut the set into three runs: `[1,3)`, `[4,7)`, `[9,11)`.
+
+A deletion sitting *between* two marked after lines needs no special handling: it is a diff line of its own, so the run stays contiguous across it and the interval covers it. Folding the set to its span `[min, max+1)` is **wrong** — it marks every line in the gaps, which the model never named.
+
+This is the same rule Section 5.4 already states for annotations generally — *disjoint marks are never bundled into one object* — applied at the point a suggestion enters the selection.
+
+**Encode (export).** Each interval is walked line by line and every diff line becomes one coordinate in real file coordinates. The side follows from the diff line alone:
+
+| The diff line carries | Exported as |
+| --- | --- |
+| base **and** after (an edit) | `after` |
+| only after (an addition) | `after` |
+| only base (a pure deletion) | `base` |
+
+An unchanged file (identity map) yields after lines with no `side`.
+
+The round trip is therefore **not** identity-preserving for a `base` coordinate on an edit row: marking the base side of an edit pair exports as the after side, since a diff line that has an after side always resolves to it. This is a property of the rule, not a defect.
+
+**Manual annotations are unaffected.** A manual selection is a dragged, contiguous range — a span, not a set — and keeps its existing behavior, including the merging of touching and overlapping intervals (see Section 5.4).
 
 ### 1.5 Optional Targets (Read-Only Mode)
 

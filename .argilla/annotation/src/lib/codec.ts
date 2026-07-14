@@ -105,12 +105,13 @@ export class Prime {
           afterText,
           blobs.isDiff,
         );
-        const diff = Prime.#toDiff(map, suggestion.lines);
-        if (diff)
+        // One item per gap-free run: a suggestion whose marked lines fall into several
+        // runs enters the selection as several annotations, each judged on its own.
+        for (const lines of Prime.#toDiff(map, suggestion.lines))
           items.push({
             sha: target.sha,
             path: suggestion.path,
-            lines: diff,
+            lines,
             description: suggestion.description ?? "",
           });
       }
@@ -119,28 +120,33 @@ export class Prime {
     return { selection: new Selection(items), maps };
   }
 
-  // Translate a suggestion's coordinates onto the diff axis. Each coordinate (a real
-  // base/after line) maps to one diff line; the annotation spans the range from the first
-  // to the last mapped diff line inclusive, so deletions sitting between two selected
-  // lines are covered — the same span the old single-interval translation produced.
-  // Returns null when no coordinate maps into the diff.
+  // Translate a suggestion's coordinates onto the diff axis. A suggestion is a *set* of
+  // marked lines, not a span: each coordinate (a real base/after line) maps to one diff
+  // line, and the set of mapped diff lines is cut into its maximal gap-free runs. A run
+  // becomes one interval, so a suggestion with gaps yields several. Deletions sitting
+  // between two marked after lines need no special handling — they are diff lines of
+  // their own, so the run stays contiguous across them and the interval covers them.
+  // Returns an empty list when no coordinate maps into the diff.
   static #toDiff(
     map: DiffMap | IdentityDiffMap,
     coordinates: Coordinate[],
-  ): Interval | null {
-    let lo = Infinity;
-    let hi = -Infinity;
+  ): Interval[] {
+    const lines = new Set<number>();
     for (const coordinate of coordinates) {
       const diff =
         map instanceof IdentityDiffMap
           ? map.toDiff(coordinate.line)
           : map.toDiff(coordinate.line, coordinate.side ?? "after");
-      if (diff === undefined) continue;
-      if (diff < lo) lo = diff;
-      if (diff > hi) hi = diff;
+      if (diff !== undefined) lines.add(diff);
     }
-    if (hi < lo) return null;
-    return [lo, hi + 1];
+
+    const runs: Interval[] = [];
+    for (const line of [...lines].sort((a, b) => a - b)) {
+      const last = runs[runs.length - 1];
+      if (last && last[1] === line) last[1] = line + 1;
+      else runs.push([line, line + 1]);
+    }
+    return runs;
   }
 
   // The base/after blob SHAs and diff-ness of one file from its change entry. A string

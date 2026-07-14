@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Annotation — case 96 (awslabs/graphstorm)</title>
+        <style>
+            body {
+                margin: 0;
+                background: #131416;
+            }
+            code-annotation {
+                display: block;
+                height: 100vh;
+            }
+        </style>
+    </head>
+    <body>
+        <code-annotation
+            src="/tests/demo/case-96.json"
+            id="annotation"
+        ></code-annotation>
+        <script type="module" src="/src/index.tsx"></script>
+        <script>
+            document
+                .getElementById("annotation")
+                .addEventListener("change", (e) => {
+                    console.log("change", e.detail);
+                });
+        </script>
+    </body>
+</html>
