@@ -823,6 +823,81 @@ def filter_annotation_collect():
     filter_annotation_collect_op()
 
 
+class DefectMarkings:
+    """The localization line markings, keyed by (name, correction, defect).
+
+    A trace writes one row per event, all carrying the same `locations` payload, so the
+    rows must be collapsed to one per run. The key is the run's identity — NOT the payload:
+    two different pairs can emit an identical marking set (the same file and lines), and
+    deduplicating on the payload string drops the second one's markings, pushing that pair
+    to the audit with nothing pre-marked at all.
+    """
+
+    @staticmethod
+    def collect(table) -> dict[tuple[str, str, str], dict[tuple[str, str], list[int]]]:
+        import json
+
+        import polars as pl
+
+        markings: dict[tuple[str, str, str], dict[tuple[str, str], list[int]]] = {}
+        if table is None:
+            return markings
+
+        for record in (
+            pl.from_arrow(table)
+            .select("name", "correction", "defect", "locations")
+            .unique(subset=["name", "correction", "defect"])
+            .iter_rows(named=True)
+        ):
+            payload = record["locations"]
+            if not payload:
+                continue
+            entries = json.loads(payload)
+            if not entries:
+                continue
+            key = (
+                str(record["name"]),
+                str(record["correction"]),
+                str(record["defect"]),
+            )
+            paths = markings.setdefault(key, {})
+            for entry in entries:
+                path = entry.get("file")
+                line = entry.get("line")
+                if path is None or line is None:
+                    continue
+                # Resolve the L<n>/D<n> reference to (side, line). A bare number is
+                # an after line for backward compatibility with pre-2.1.0 data.
+                token = str(line).strip()
+                side = "base" if token[:1] == "D" else "after"
+                number = token[1:] if token[:1] in ("L", "D") else token
+                if not number.isdigit():
+                    continue
+                paths.setdefault((path, side), []).append(int(number))
+
+        return markings
+
+    @staticmethod
+    def annotations(marks: dict[tuple[str, str], list[int]]) -> list[dict[str, object]]:
+        """One annotation per file, its lines a flat list of self-describing coordinates.
+
+        `after` is a present line, `base` a deleted one; the side-by-side component
+        pre-marks each coordinate on the matching editor.
+        """
+        coordinates: dict[str, list[dict[str, object]]] = {}
+        for path, side in sorted(marks):
+            for line in sorted(set(marks[(path, side)])):
+                coordinates.setdefault(path, []).append({"line": line, "side": side})
+        return [
+            {
+                "path": path,
+                "lines": coordinates[path],
+                "description": "Localized by the benchmark.",
+            }
+            for path in sorted(coordinates)
+        ]
+
+
 class AuditPushConfig(dg.Config):
     reset: bool = False
     workspace: str = "audit"
@@ -920,41 +995,7 @@ def audit_change_request_op(
     # deleted base-side line. The side-by-side annotation component pre-marks each on
     # the matching side, so deletions (D) are shown on the base editor. Each marked line
     # becomes one coordinate ({line, side}) in the annotation's line list.
-    markings: dict[tuple[str, str, str], dict[tuple[str, str], list[int]]] = {}
-    localization = pools.get("localization-change-trace")
-    if localization is not None:
-        seen_locations: set[str] = set()
-        for record in (
-            pl.from_arrow(localization)
-            .select("name", "correction", "defect", "locations")
-            .iter_rows(named=True)
-        ):
-            payload = record["locations"]
-            if not payload or payload in seen_locations:
-                continue
-            seen_locations.add(payload)
-            entries = json.loads(payload)
-            if not entries:
-                continue
-            key = (
-                str(record["name"]),
-                str(record["correction"]),
-                str(record["defect"]),
-            )
-            paths = markings.setdefault(key, {})
-            for entry in entries:
-                path = entry.get("file")
-                line = entry.get("line")
-                if path is None or line is None:
-                    continue
-                # Resolve the L<n>/D<n> reference to (side, line). A bare number is
-                # an after line for backward compatibility with pre-2.1.0 data.
-                token = str(line).strip()
-                side = "base" if token[:1] == "D" else "after"
-                number = token[1:] if token[:1] in ("L", "D") else token
-                if not number.isdigit():
-                    continue
-                paths.setdefault((path, side), []).append(int(number))
+    markings = DefectMarkings.collect(pools.get("localization-change-trace"))
 
     if selection.height == 0:
         raise dg.Failure(description="Audit selection is empty")
@@ -1166,23 +1207,7 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
                 continue
 
             marks = markings.get((row["name"], correction_sha, introducer), {})
-            # One annotation per file, its lines a flat list of coordinates each carrying
-            # its own side (after = a present line, base = a deleted line). The side-by-side
-            # component pre-marks each coordinate on the matching editor.
-            coordinates: dict[str, list[dict[str, object]]] = {}
-            for path, side in sorted(marks):
-                for line in sorted(set(marks[(path, side)])):
-                    coordinates.setdefault(path, []).append(
-                        {"line": line, "side": side}
-                    )
-            target_annotations = [
-                {
-                    "path": path,
-                    "lines": coordinates[path],
-                    "description": "Localized by the benchmark.",
-                }
-                for path in sorted(coordinates)
-            ]
+            target_annotations = DefectMarkings.annotations(marks)
             if target_annotations:
                 target["annotations"] = target_annotations
 
@@ -1283,6 +1308,197 @@ A revert receives Intrinsic if the reverted change introduced a defect, and Othe
 @dg.job(name="audit_change_request")
 def audit_change_request():
     audit_change_request_op()
+
+
+class AuditBlobConfig(dg.Config):
+    dry_run: bool = False
+
+
+@dg.op(name="audit_change_blob_op")
+def audit_change_blob_op(
+    context: dg.OpExecutionContext, config: AuditBlobConfig
+) -> dg.Output:
+    """Rewrite the audit meta blobs in cloud storage, without touching Argilla.
+
+    `audit_change_request_op` cannot do this: it filters out every sample row whose record
+    already exists and skips the group, and the blob upload sits inside that loop — so with
+    the records already pushed it rewrites nothing. Regenerating the payload (a new field,
+    a corrected marking) therefore needs its own entry point, and one that cannot reach the
+    annotations: this op imports no Argilla client, creates no dataset, and logs no record.
+    The pushed records address their payload by URL, so they pick the rewritten blob up on
+    the next open and need no update of their own.
+
+    Only `<number>.json` is rewritten. The file blobs beside it are named by their git blob
+    id, which is the hash of their content, so they are already correct and are uploaded
+    only where one is missing.
+    """
+    import polars as pl
+
+    from benchmark.attribution.change import PullRequestEnricher
+    from benchmark.attribution.history import PlatformCache, VersionControl
+    from benchmark.definitions.partitions import Shard
+    from benchmark.evaluation.annotation import RepositoryProjection
+
+    storage = TableAssetStorage()
+    location = Location.load()
+    places = list(dict.fromkeys([location.current, location.default]))
+
+    pools: dict[str, pa.Table] = {}
+    # The outline is not read here: it only feeds the Argilla markdown fields.
+    optional = {"localization-change-trace"}
+    projection = {
+        "localization-change-trace": ["name", "correction", "defect", "locations"],
+    }
+    for asset in (
+        "audit-change-sample",
+        "scope-repository-stationary",
+        "filter-change-reference",
+        "localization-change-trace",
+    ):
+        resolver = AssetResolver(context, asset)
+        version = resolver.version()
+        partitions = resolver.partitions_def()
+        if partitions is None:
+            keys = ["default"]
+        elif isinstance(partitions, dg.DynamicPartitionsDefinition):
+            keys = list(context.instance.get_dynamic_partitions(partitions.name))
+        else:
+            keys = list(partitions.get_partition_keys())
+
+        tables = []
+        for partition in keys:
+            normalized = partition.replace("|", ":").replace("/", "-").replace("_", "-")
+            for place in places:
+                blob = (
+                    storage.prefix(resolver.key, version, place, normalized)
+                    + "data.parquet"
+                )
+                table = storage.load(blob=blob, columns=projection.get(asset))
+                if table is not None:
+                    tables.append(table)
+                    break
+
+        if not tables:
+            if asset in optional:
+                continue
+            raise dg.Failure(description=f"No data found for {asset}")
+        pools[asset] = pa.concat_tables(tables, promote_options="permissive")
+
+    selection = pl.from_arrow(pools["audit-change-sample"])
+    changes = pl.from_arrow(pools["filter-change-reference"])
+    names = sorted(
+        pl.from_arrow(pools["scope-repository-stationary"])["name"].to_list()
+    )
+    markings = DefectMarkings.collect(pools.get("localization-change-trace"))
+
+    if selection.height == 0:
+        raise dg.Failure(description="Audit selection is empty")
+
+    bucket = cloud_storage.Client(
+        project=os.environ.get("CLOUD_PROJECT")
+    ).bucket(os.environ["CLOUD_BUCKET"])
+
+    written = 0
+    uploaded = 0
+
+    for name, group in selection.group_by("name"):
+        enricher = PullRequestEnricher(name[0])
+        repository = VersionControl.create(
+            cloud_storage.Client(project="bug-request"),
+            bucket="bug-request-bucket",
+            key="scope-source-raw",
+            location="main",
+            version="4.0.0",
+            partition=Shard.to_space(names, name[0]),
+            filter=enricher.enrich,
+        )
+        enricher.attach(repository, changes)
+        platform = PlatformCache(
+            enricher.table(), repository=repository, filter=enricher.enrich
+        )
+
+        prefix = f"audit/{name[0].replace('/', '-').lower()}"
+
+        # Every row, not just the ones missing a record — rewriting the payload of the
+        # records that already exist is the whole point.
+        for row in group.iter_rows(named=True):
+            correction_sha = str(row["correction"])
+            change = platform.resolve(correction_sha)
+            number = int(change["number"])
+            introducer = str(row["defect"])
+            # A fresh projection per row: it accumulates the blobs of the two commits it
+            # transformed, and `blobs()`/`fetch()` are only valid for those.
+            projector = RepositoryProjection(repository)
+            correction = projector.transform(change["after"], "correction")
+            target = projector.transform(introducer, "defect")
+
+            if correction is None or target is None:
+                context.log.warning(
+                    "Skipping %s#%s (missing parent).", row["name"], number
+                )
+                continue
+
+            marks = markings.get((row["name"], correction_sha, introducer), {})
+            target_annotations = DefectMarkings.annotations(marks)
+            if target_annotations:
+                target["annotations"] = target_annotations
+
+            annotation = {
+                "model": "benchmark",
+                "repository": row["name"],
+                "context": correction,
+                "targets": [target],
+            }
+            payload = json.dumps(annotation, sort_keys=True)
+
+            if config.dry_run:
+                context.log.info(
+                    "Would rewrite %s/%s.json (%d bytes, %d annotated files).",
+                    prefix,
+                    number,
+                    len(payload),
+                    len(target_annotations),
+                )
+                written += 1
+                continue
+
+            bucket.blob(f"{prefix}/{number}.json").upload_from_string(
+                payload, content_type="application/json"
+            )
+            written += 1
+
+            pending = [
+                blob
+                for blob in projector.blobs()
+                if not bucket.blob(f"{prefix}/{blob}").exists()
+            ]
+            with ThreadPoolExecutor() as pool:
+                pool.map(
+                    lambda blob: bucket.blob(
+                        f"{prefix}/{blob}"
+                    ).upload_from_string(projector.fetch(blob)),
+                    pending,
+                )
+            uploaded += len(pending)
+
+    context.log.info(
+        "Rewrote %d meta blobs; uploaded %d missing file blobs.", written, uploaded
+    )
+
+    return dg.Output(
+        value=None,
+        metadata={
+            "written": dg.MetadataValue.int(written),
+            "uploaded": dg.MetadataValue.int(uploaded),
+            "selected": dg.MetadataValue.int(selection.height),
+            "dry_run": dg.MetadataValue.bool(config.dry_run),
+        },
+    )
+
+
+@dg.job(name="audit_change_blob")
+def audit_change_blob():
+    audit_change_blob_op()
 
 
 class AuditCollectConfig(dg.Config):

@@ -104,6 +104,40 @@ export class DiffMap {
   }
 
   /**
+   * Build a `DiffMap` from the diff the pipeline itself computed, rather than from a
+   * diff recomputed here. `hunks` are libgit2's, as pygit2 reports them:
+   * `[old_start, old_lines, new_start, new_lines]`, 1-based with a length, so a hunk
+   * spans `[start, start + lines)` on each side — exactly the half-open `Alignment`
+   * form. A hunk with `lines === 0` on one side is a pure insertion/deletion and its
+   * range on that side is empty, which the constructor already handles.
+   *
+   * This exists because Monaco's line diff and libgit2's disagree on a moved block:
+   * both are LCS-based, but git compacts hunk boundaries (xdl_change_compact) while
+   * Monaco pairs the moved, textually identical lines across the move. The marking a
+   * localization run emits is validated against libgit2's hunks, so it must be
+   * rendered against them too — otherwise a marked line lands on a row the editor
+   * paints as unchanged, and the annotator is asked to judge a "defect location" that
+   * the diff says was never touched.
+   */
+  static fromHunks(
+    hunks: readonly (readonly number[])[],
+    baseText: string,
+    afterText: string,
+  ): DiffMap {
+    const alignments = hunks.map(([oldStart, oldLines, newStart, newLines]) => ({
+      baseStart: oldStart,
+      baseEnd: oldStart + oldLines,
+      afterStart: newStart,
+      afterEnd: newStart + newLines,
+    }));
+    return new DiffMap(
+      alignments,
+      baseText.split("\n").length,
+      afterText.split("\n").length,
+    );
+  }
+
+  /**
    * Turn Monaco's `changes` into the aligned line blocks the side-by-side editor renders.
    *
    * This replicates the inner-hunk alignment of Monaco's own `computeRangeAlignment`
@@ -336,13 +370,18 @@ export class DiffMaps {
     baseText: string,
     afterText: string,
     isDiff: boolean,
+    hunks?: readonly (readonly number[])[],
   ): DiffMap | IdentityDiffMap {
     const key = DiffMaps.#key(sha, path);
     const existing = this.#maps.get(key);
     if (existing) return existing;
-    const map: DiffMap | IdentityDiffMap = isDiff
-      ? DiffMap.fromText(baseText, afterText)
-      : new IdentityDiffMap(afterText.split("\n").length);
+    // The pipeline's own hunks win when the change entry carries them; a change
+    // entry written before they were emitted falls back to recomputing the diff.
+    const map: DiffMap | IdentityDiffMap = !isDiff
+      ? new IdentityDiffMap(afterText.split("\n").length)
+      : hunks
+        ? DiffMap.fromHunks(hunks, baseText, afterText)
+        : DiffMap.fromText(baseText, afterText);
     this.#maps.set(key, map);
     return map;
   }

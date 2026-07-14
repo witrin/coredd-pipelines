@@ -5,11 +5,17 @@ import { Blobs } from "../lib/blob.js";
 
 /**
  * A file change entry with an explicit action.
+ *
+ * `hunks` is the diff the pipeline computed for this file, as libgit2 reports it:
+ * one `[old_start, old_lines, new_start, new_lines]` per hunk, 1-based. It is present
+ * only on a `change` entry, and only on data written after the pipeline began emitting
+ * it — absent, the diff is recomputed in the browser (see `DiffMaps.ensure`).
  */
 export interface Change {
   action: Action;
   source?: string;
   target?: string;
+  hunks?: number[][];
 }
 
 /**

@@ -1,0 +1,94 @@
+{
+  "repository": "microsoft/Olive",
+  "model": "benchmark",
+  "context": {
+    "sha": "3a96ceabb1a41ee4381d18fb8f8362ff51589fd0",
+    "author": "olive",
+    "message": "fix isolated system validation (#1020)",
+    "time": "2024-01-02T10:00:00+00:00",
+    "labels": [
+      "correction"
+    ],
+    "changes": {
+      "olive/systems/system_config.py": {
+        "action": "change",
+        "source": "hunks-base.txt",
+        "target": "hunks-after.txt",
+        "hunks": [
+          [
+            58,
+            13,
+            57,
+            0
+          ],
+          [
+            75,
+            0,
+            63,
+            20
+          ],
+          [
+            78,
+            1,
+            85,
+            14
+          ]
+        ]
+      }
+    }
+  },
+  "targets": [
+    {
+      "sha": "07bfb4d2dec02723bcf97ec2ca253ac22f072309",
+      "author": "olive",
+      "message": "use sys.executable instead of python (#1017)",
+      "time": "2024-01-01T10:00:00+00:00",
+      "labels": [
+        "defect"
+      ],
+      "changes": {
+        "olive/systems/system_config.py": {
+          "action": "change",
+          "source": "hunks-base.txt",
+          "target": "hunks-after.txt",
+          "hunks": [
+            [
+              58,
+              13,
+              57,
+              0
+            ],
+            [
+              75,
+              0,
+              63,
+              20
+            ],
+            [
+              78,
+              1,
+              85,
+              14
+            ]
+          ]
+        }
+      },
+      "annotations": [
+        {
+          "path": "olive/systems/system_config.py",
+          "lines": [
+            {
+              "line": 86,
+              "side": "after"
+            },
+            {
+              "line": 88,
+              "side": "after"
+            }
+          ],
+          "description": "Localized by the benchmark."
+        }
+      ]
+    }
+  ]
+}

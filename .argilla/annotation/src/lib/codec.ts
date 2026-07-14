@@ -17,8 +17,14 @@ export type { Coordinate };
 // One suggestion resolved to a file's diff axis, ready for the Selection constructor.
 type Item = { sha: string; path: string; lines: Interval; description: string };
 
-// The base/after blob SHAs and diff-ness of one file, read from its change entry.
-type Blobs = { source: string | null; target: string | null; isDiff: boolean };
+// The base/after blob SHAs, diff-ness, and the pipeline's own hunks (when the entry
+// carries them) of one file, read from its change entry.
+type Blobs = {
+  source: string | null;
+  target: string | null;
+  isDiff: boolean;
+  hunks?: number[][];
+};
 
 /**
  * An annotation, in the SAME shape whether it enters as a model suggestion or leaves as
@@ -104,6 +110,7 @@ export class Prime {
           baseText,
           afterText,
           blobs.isDiff,
+          blobs.hunks,
         );
         // One item per gap-free run: a suggestion whose marked lines fall into several
         // runs enters the selection as several annotations, each judged on its own.
@@ -160,6 +167,7 @@ export class Prime {
       source: change.source ?? null,
       target: change.target ?? null,
       isDiff: change.action !== "unchanged",
+      hunks: change.hunks,
     };
   }
 }
