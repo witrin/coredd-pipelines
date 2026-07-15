@@ -13,7 +13,8 @@ import { CacheProvider } from "@emotion/react";
 import type { Side } from "./lib/diff.js";
 import type { Level } from "./lib/toasts.js";
 import type { Selection, SelectionState } from "./lib/selection.js";
-import type { AnnotationRecord } from "./lib/codec.js";
+import type { AnnotationRecord, Blobs as FileBlobs } from "./lib/codec.js";
+import type { Change } from "./hooks/data.js";
 import type { ListItem } from "./lib/listing.js";
 import { Toasts } from "./lib/toasts.js";
 import { useData } from "./hooks/data.js";
@@ -106,18 +107,98 @@ function App({
       selectionRef.current = selection;
       mapsRef.current = maps;
       seed(texts);
+
+      // Restoring a saved checkpoint writes the Selection, which fires the same subscribe
+      // callback a real edit does — so without this guard, loading a record would emit a
+      // `change` and the adapter would PATCH the just-loaded state straight back. That
+      // round-trips on every open (an unsolicited save on load), and any load that raced
+      // ahead of its cleanup left a stale localStorage draft behind. A restore is not an
+      // edit: suppress the outward notification while replaying one, but still bump the
+      // version so the sidebar and editor re-render.
+      let restoring = false;
       selection.subscribe(() => {
-        notify.current?.(Export.record(selection, maps));
+        if (!restoring) notify.current?.(Export.record(selection, maps));
         setVersion((v) => v + 1);
       });
+      const replay = (apply: () => void): void => {
+        restoring = true;
+        try {
+          apply();
+        } finally {
+          restoring = false;
+        }
+      };
+
+      // A restored manual mark lives in a file that may carry NO suggestion (the annotator
+      // marked a defect line the model never proposed). Prime only built maps for
+      // suggestion files, so such a file has no DiffMap — and the sidebar, the export, and
+      // the marker decoration all skip an annotation whose map is missing. Build the map
+      // for every file a restored `add` references, fetching its blobs if Prime did not.
+      // The state is set FIRST (so the add paths are known) and the maps filled in after,
+      // then a version bump re-renders the now-complete sidebar.
+      const hydrateManuals = async (): Promise<void> => {
+        const changesByFile = new Map<string, Change | string | undefined>();
+        for (const target of data.targets ?? [])
+          for (const [path, change] of Object.entries(target.changes ?? {}))
+            changesByFile.set(`${target.sha}\0${path}`, change);
+
+        const files = new Map<
+          string,
+          { sha: string; path: string; blobs: FileBlobs }
+        >();
+        for (const a of selection.project()) {
+          if (a.origin !== "manual") continue;
+          const key = `${a.sha}\0${a.path}`;
+          if (maps.has(a.sha, a.path) || files.has(key)) continue;
+          files.set(key, {
+            sha: a.sha,
+            path: a.path,
+            blobs: Prime.blobs(changesByFile.get(key)),
+          });
+        }
+        if (files.size === 0) return;
+
+        const wanted = new Set<string>();
+        for (const { blobs } of files.values()) {
+          if (blobs.source && !(blobs.source in texts)) wanted.add(blobs.source);
+          if (blobs.target && !(blobs.target in texts)) wanted.add(blobs.target);
+        }
+        await Promise.all(
+          [...wanted].map(async (sha) => {
+            const text = await fetchBlob(sha);
+            if (text !== null) texts[sha] = text;
+          }),
+        );
+        if (!live) return;
+
+        for (const { sha, path, blobs } of files.values())
+          maps.ensure(
+            sha,
+            path,
+            blobs.source ? (texts[blobs.source] ?? "") : "",
+            blobs.target ? (texts[blobs.target] ?? "") : "",
+            blobs.action,
+            blobs.hunks,
+          );
+        seed(texts);
+        setVersion((v) => v + 1);
+      };
+
       manager.current = {
         value: () => Export.record(selection, maps),
         restore: (state) => {
-          selection.state = state;
+          replay(() => {
+            selection.state = state;
+          });
+          void hydrateManuals();
         },
       };
       const pending = drain();
-      if (pending) selection.state = pending.state;
+      if (pending)
+        replay(() => {
+          selection.state = pending.state;
+        });
+      void hydrateManuals();
       setVersion((v) => v + 1);
     });
     return () => {

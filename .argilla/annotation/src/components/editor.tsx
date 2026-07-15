@@ -186,7 +186,7 @@ export function Editor({
     if (!current || !ready) return;
     const lang = language(path);
     if (isDiff && current instanceof DiffEditor) {
-      const map = maps.ensure(sha, path, baseText, afterText, true, hunks);
+      const map = maps.ensure(sha, path, baseText, afterText, action, hunks);
       current.show(map, baseText, afterText, lang, hunks);
     } else if (!isDiff && current instanceof FileEditor) {
       current.show(content, lang);

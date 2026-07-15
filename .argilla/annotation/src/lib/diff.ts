@@ -5,6 +5,7 @@
 import { linesDiffComputers } from "monaco-editor/esm/vs/editor/common/diff/linesDiffComputers.js";
 
 import type { Interval } from "./interval.js";
+import type { Action } from "./tree.js";
 
 /**
  * Which side of a diff a marking belongs to: the base (original, deleted lines) or
@@ -359,17 +360,17 @@ export class DiffMaps {
   }
 
   /**
-   * Builds (once) and returns the map for a file. A changed file (`isDiff`) gets a real
-   * `DiffMap.fromText`; an unchanged file gets an `IdentityDiffMap` sized to the after
-   * text — the same construction the per-file hook did, so identifiers stay stable.
-   * Idempotent: a second call with the same key returns the cached instance.
+   * Builds (once) and returns the map for a file. Only an `unchanged` file gets an
+   * `IdentityDiffMap` sized to the after text; every real change (`change`/`add`/`delete`)
+   * gets a `DiffMap` — an add or delete simply diffs against its empty side. Idempotent: a
+   * second call with the same key returns the cached instance.
    */
   ensure(
     sha: string,
     path: string,
     baseText: string,
     afterText: string,
-    isDiff: boolean,
+    action: Action,
     hunks?: readonly (readonly number[])[],
   ): DiffMap | IdentityDiffMap {
     const key = DiffMaps.#key(sha, path);
@@ -377,11 +378,12 @@ export class DiffMaps {
     if (existing) return existing;
     // The pipeline's own hunks win when the change entry carries them; a change
     // entry written before they were emitted falls back to recomputing the diff.
-    const map: DiffMap | IdentityDiffMap = !isDiff
-      ? new IdentityDiffMap(afterText.split("\n").length)
-      : hunks
-        ? DiffMap.fromHunks(hunks, baseText, afterText)
-        : DiffMap.fromText(baseText, afterText);
+    const map: DiffMap | IdentityDiffMap =
+      action === "unchanged"
+        ? new IdentityDiffMap(afterText.split("\n").length)
+        : hunks
+          ? DiffMap.fromHunks(hunks, baseText, afterText)
+          : DiffMap.fromText(baseText, afterText);
     this.#maps.set(key, map);
     return map;
   }

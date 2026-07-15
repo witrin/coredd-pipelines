@@ -1,4 +1,5 @@
 import type { Data, Change, Coordinate } from "../hooks/data.js";
+import type { Action } from "./tree.js";
 import type { Interval } from "./interval.js";
 import { DiffMap, IdentityDiffMap, DiffMaps } from "./diff.js";
 import { Selection } from "./selection.js";
@@ -17,12 +18,14 @@ export type { Coordinate };
 // One suggestion resolved to a file's diff axis, ready for the Selection constructor.
 type Item = { sha: string; path: string; lines: Interval; description: string };
 
-// The base/after blob SHAs, diff-ness, and the pipeline's own hunks (when the entry
-// carries them) of one file, read from its change entry.
-type Blobs = {
+// The base/after blob SHAs, the change action, and the pipeline's own hunks (when the
+// entry carries them) of one file, read from its change entry. The action — not a derived
+// "is it a diff" flag — drives the map choice: only `unchanged` gets an identity map, and
+// `add`/`delete` (one empty side) are still real diffs against the empty side.
+export type Blobs = {
   source: string | null;
   target: string | null;
-  isDiff: boolean;
+  action: Action;
   hunks?: number[][];
 };
 
@@ -82,7 +85,7 @@ export class Prime {
     const shas = new Set<string>();
     for (const target of data.targets ?? []) {
       for (const suggestion of target.annotations ?? []) {
-        const blobs = Prime.#blobs(target.changes[suggestion.path]);
+        const blobs = Prime.blobs(target.changes[suggestion.path]);
         pending.push({ sha: target.sha, path: suggestion.path, blobs });
         if (blobs.source) shas.add(blobs.source);
         if (blobs.target) shas.add(blobs.target);
@@ -101,7 +104,7 @@ export class Prime {
     // Build each file's map, then translate its suggestions onto the diff axis.
     for (const target of data.targets ?? []) {
       for (const suggestion of target.annotations ?? []) {
-        const blobs = Prime.#blobs(target.changes[suggestion.path]);
+        const blobs = Prime.blobs(target.changes[suggestion.path]);
         const baseText = blobs.source ? (texts.get(blobs.source) ?? "") : "";
         const afterText = blobs.target ? (texts.get(blobs.target) ?? "") : "";
         const map = maps.ensure(
@@ -109,7 +112,7 @@ export class Prime {
           suggestion.path,
           baseText,
           afterText,
-          blobs.isDiff,
+          blobs.action,
           blobs.hunks,
         );
         // One item per gap-free run: a suggestion whose marked lines fall into several
@@ -158,15 +161,16 @@ export class Prime {
 
   // The base/after blob SHAs and diff-ness of one file from its change entry. A string
   // entry is an unchanged path (identity); an object carries the action and blob SHAs. An
-  // add has no source (base empty), a delete no target (after empty).
-  static #blobs(change: string | Change | undefined): Blobs {
+  // add has no source (base empty), a delete no target (after empty). Public so the restore
+  // path can build a map for a manual-mark file the same way Prime builds a suggestion's.
+  static blobs(change: string | Change | undefined): Blobs {
     if (typeof change === "string")
-      return { source: null, target: change, isDiff: false };
-    if (!change) return { source: null, target: null, isDiff: false };
+      return { source: null, target: change, action: "unchanged" };
+    if (!change) return { source: null, target: null, action: "unchanged" };
     return {
       source: change.source ?? null,
       target: change.target ?? null,
-      isDiff: change.action !== "unchanged",
+      action: change.action,
       hunks: change.hunks,
     };
   }

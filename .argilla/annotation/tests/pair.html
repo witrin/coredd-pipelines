@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>code-annotation — two components at once</title>
+    <style>
+      html { height: 100%; }
+      body { margin: 0; height: 100%; display: flex; background: #131416; }
+      code-annotation { display: block; flex: 1 1 50%; min-width: 0; height: 100%; }
+    </style>
+  </head>
+  <body>
+    <!-- Two components mounted at once, each on its own meta blob: the left one carries
+         the pipeline's hunks, the right one does not. Monaco registers its DI services
+         globally and only once, so this page is what proves the diff provider keys its
+         hunks per model pair rather than holding "the current file's" — otherwise the
+         second component to open a file overwrites what the first one renders. -->
+    <code-annotation id="with" src="/tests/fixtures/meta-hunks.json"></code-annotation>
+    <code-annotation id="without" src="/tests/fixtures/meta-hunks-absent.json"></code-annotation>
+    <script type="module" src="/src/index.tsx"></script>
+  </body>
+</html>
