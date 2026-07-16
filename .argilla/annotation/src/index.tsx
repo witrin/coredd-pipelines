@@ -178,7 +178,7 @@ function App({
             blobs.source ? (texts[blobs.source] ?? "") : "",
             blobs.target ? (texts[blobs.target] ?? "") : "",
             blobs.action,
-            blobs.hunks,
+            blobs.diff,
           );
         seed(texts);
         setVersion((v) => v + 1);

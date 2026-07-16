@@ -57,7 +57,7 @@ describe("restore hydrates maps for manual marks in non-suggestion files", () =>
         blobs.source ? (texts.get(blobs.source) ?? "") : "",
         blobs.target ? (texts.get(blobs.target) ?? "") : "",
         blobs.action,
-        blobs.hunks,
+        blobs.diff,
       );
 
     return { selection, maps };
@@ -122,7 +122,7 @@ describe("export includes manual marks after hydration", () => {
       maps.ensure(a.sha, a.path,
         b.source ? (texts.get(b.source) ?? "") : "",
         b.target ? (texts.get(b.target) ?? "") : "",
-        b.action, b.hunks);
+        b.action, b.diff);
     }
     const exported = Export.build(selection, maps).filter((x) => x.origin === "manual");
     expect(exported).toHaveLength(2);

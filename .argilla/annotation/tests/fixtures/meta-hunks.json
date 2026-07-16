@@ -14,24 +14,24 @@
         "action": "change",
         "source": "hunks-base.txt",
         "target": "hunks-after.txt",
-        "hunks": [
+        "diff": [
           [
             58,
-            13,
-            57,
-            0
+            71,
+            58,
+            58
           ],
           [
-            75,
-            0,
+            76,
+            76,
             63,
-            20
+            83
           ],
           [
             78,
-            1,
+            79,
             85,
-            14
+            99
           ]
         ]
       }
@@ -51,24 +51,24 @@
           "action": "change",
           "source": "hunks-base.txt",
           "target": "hunks-after.txt",
-          "hunks": [
+          "diff": [
             [
               58,
-              13,
-              57,
-              0
+              71,
+              58,
+              58
             ],
             [
-              75,
-              0,
+              76,
+              76,
               63,
-              20
+              83
             ],
             [
               78,
-              1,
+              79,
               85,
-              14
+              99
             ]
           ]
         }

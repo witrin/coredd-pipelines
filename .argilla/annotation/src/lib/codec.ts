@@ -18,15 +18,15 @@ export type { Coordinate };
 // One suggestion resolved to a file's diff axis, ready for the Selection constructor.
 type Item = { sha: string; path: string; lines: Interval; description: string };
 
-// The base/after blob SHAs, the change action, and the pipeline's own hunks (when the
-// entry carries them) of one file, read from its change entry. The action — not a derived
+// The base/after blob SHAs, the change action, and the pipeline's line-level diff (when the
+// entry carries it) of one file, read from its change entry. The action — not a derived
 // "is it a diff" flag — drives the map choice: only `unchanged` gets an identity map, and
 // `add`/`delete` (one empty side) are still real diffs against the empty side.
 export type Blobs = {
   source: string | null;
   target: string | null;
   action: Action;
-  hunks?: number[][];
+  diff?: number[][];
 };
 
 /**
@@ -113,7 +113,7 @@ export class Prime {
           baseText,
           afterText,
           blobs.action,
-          blobs.hunks,
+          blobs.diff,
         );
         // One item per gap-free run: a suggestion whose marked lines fall into several
         // runs enters the selection as several annotations, each judged on its own.
@@ -171,7 +171,7 @@ export class Prime {
       source: change.source ?? null,
       target: change.target ?? null,
       action: change.action,
-      hunks: change.hunks,
+      diff: change.diff,
     };
   }
 }

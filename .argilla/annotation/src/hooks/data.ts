@@ -6,16 +6,17 @@ import { Blobs } from "../lib/blob.js";
 /**
  * A file change entry with an explicit action.
  *
- * `hunks` is the diff the pipeline computed for this file, as libgit2 reports it:
- * one `[old_start, old_lines, new_start, new_lines]` per hunk, 1-based. It is present
- * only on a `change` entry, and only on data written after the pipeline began emitting
- * it — absent, the diff is recomputed in the browser (see `DiffMaps.ensure`).
+ * `diff` is the line-level diff the pipeline computed for this file, as git classifies it:
+ * one `[kind, baseLine, afterLine]` cell per changed line — `kind` is -1 for a deletion
+ * (baseLine set, afterLine -1) or +1 for an addition (baseLine -1, afterLine set), in
+ * display order. Present only on a `change` entry; absent, the diff is recomputed in the
+ * browser (see `DiffMaps.ensure`).
  */
 export interface Change {
   action: Action;
   source?: string;
   target?: string;
-  hunks?: number[][];
+  diff?: number[][];
 }
 
 /**

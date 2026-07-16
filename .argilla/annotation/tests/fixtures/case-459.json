@@ -1,0 +1,238 @@
+{
+  "repository": "awslabs/graphstorm",
+  "model": "benchmark",
+  "context": {
+    "sha": "correction",
+    "author": "x",
+    "message": "correction",
+    "time": "2024-01-02T10:00:00+00:00",
+    "labels": [
+      "correction"
+    ],
+    "changes": {
+      "python/graphstorm/config/argument.py": {
+        "action": "change",
+        "source": "debae2cde9217bcd3fed78336cb580e6963ec06e.txt",
+        "target": "a6841daab46f11ad3541e1443260eed555e4810a.txt",
+        "diff": [
+          [
+            23,
+            23,
+            23,
+            24
+          ],
+          [
+            53,
+            54,
+            54,
+            55
+          ],
+          [
+            125,
+            126,
+            126,
+            126
+          ],
+          [
+            127,
+            128,
+            127,
+            127
+          ],
+          [
+            131,
+            131,
+            130,
+            142
+          ],
+          [
+            136,
+            137,
+            147,
+            147
+          ],
+          [
+            206,
+            207,
+            216,
+            216
+          ],
+          [
+            335,
+            337,
+            344,
+            346
+          ],
+          [
+            462,
+            462,
+            471,
+            489
+          ],
+          [
+            1198,
+            1199,
+            1225,
+            1226
+          ],
+          [
+            1313,
+            1317,
+            1340,
+            1344
+          ],
+          [
+            1727,
+            1727,
+            1754,
+            1760
+          ]
+        ]
+      }
+    }
+  },
+  "targets": [
+    {
+      "sha": "6aae70b98ceea62a7bdc3e0ccae86303b3a0d95c",
+      "author": "x",
+      "message": "defect #459",
+      "time": "2024-01-01T10:00:00+00:00",
+      "labels": [
+        "defect"
+      ],
+      "changes": {
+        "python/graphstorm/config/argument.py": {
+          "action": "change",
+          "source": "debae2cde9217bcd3fed78336cb580e6963ec06e.txt",
+          "target": "a6841daab46f11ad3541e1443260eed555e4810a.txt",
+          "diff": [
+            [
+              23,
+              23,
+              23,
+              24
+            ],
+            [
+              53,
+              54,
+              54,
+              55
+            ],
+            [
+              125,
+              126,
+              126,
+              126
+            ],
+            [
+              127,
+              128,
+              127,
+              127
+            ],
+            [
+              131,
+              131,
+              130,
+              142
+            ],
+            [
+              136,
+              137,
+              147,
+              147
+            ],
+            [
+              206,
+              207,
+              216,
+              216
+            ],
+            [
+              335,
+              337,
+              344,
+              346
+            ],
+            [
+              462,
+              462,
+              471,
+              489
+            ],
+            [
+              1198,
+              1199,
+              1225,
+              1226
+            ],
+            [
+              1313,
+              1317,
+              1340,
+              1344
+            ],
+            [
+              1727,
+              1727,
+              1754,
+              1760
+            ]
+          ]
+        }
+      },
+      "annotations": [
+        {
+          "path": "python/graphstorm/config/argument.py",
+          "lines": [
+            {
+              "line": 125,
+              "side": "base"
+            },
+            {
+              "line": 127,
+              "side": "base"
+            },
+            {
+              "line": 136,
+              "side": "base"
+            },
+            {
+              "line": 206,
+              "side": "base"
+            },
+            {
+              "line": 335,
+              "side": "base"
+            },
+            {
+              "line": 336,
+              "side": "base"
+            },
+            {
+              "line": 1198,
+              "side": "base"
+            },
+            {
+              "line": 1313,
+              "side": "base"
+            },
+            {
+              "line": 1314,
+              "side": "base"
+            },
+            {
+              "line": 1315,
+              "side": "base"
+            },
+            {
+              "line": 1316,
+              "side": "base"
+            }
+          ],
+          "description": "Localized by the benchmark."
+        }
+      ]
+    }
+  ]
+}

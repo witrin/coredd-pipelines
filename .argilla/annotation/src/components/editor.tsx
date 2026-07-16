@@ -101,11 +101,11 @@ export function Editor({
         : null;
   const action = typeof change === "string" ? "unchanged" : change.action;
   const deleted = action === "delete";
-  // The pipeline's own diff for this file, when the change entry carries it. It drives
-  // both the DiffMap and what Monaco renders, so the marked lines and the painted diff
-  // come from one source.
-  const hunks =
-    typeof change === "object" && "hunks" in change ? change.hunks : undefined;
+  // The pipeline's own line-level diff for this file, when the change entry carries it. It
+  // drives both the DiffMap and what Monaco renders, so the marked lines and the painted
+  // diff come from one source.
+  const diff =
+    typeof change === "object" && "diff" in change ? change.diff : undefined;
   // Any real change (change/add/delete) is shown as a side-by-side diff so both the
   // deleted (base) and present (after) lines are annotatable. Only an unchanged path
   // (context view, or a file with no diff) opens the plain standalone editor.
@@ -186,12 +186,12 @@ export function Editor({
     if (!current || !ready) return;
     const lang = language(path);
     if (isDiff && current instanceof DiffEditor) {
-      const map = maps.ensure(sha, path, baseText, afterText, action, hunks);
-      current.show(map, baseText, afterText, lang, hunks);
+      const map = maps.ensure(sha, path, baseText, afterText, action, diff);
+      current.show(map, baseText, afterText, lang, diff);
     } else if (!isDiff && current instanceof FileEditor) {
       current.show(content, lang);
     }
-  }, [isDiff, baseText, afterText, content, path, sha, ready, maps, hunks]);
+  }, [isDiff, baseText, afterText, content, path, sha, ready, maps, diff]);
 
   // Update decorations
   useEffect(() => {

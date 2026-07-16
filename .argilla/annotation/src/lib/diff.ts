@@ -105,37 +105,53 @@ export class DiffMap {
   }
 
   /**
-   * Build a `DiffMap` from the diff the pipeline itself computed, rather than from a
-   * diff recomputed here. `hunks` are libgit2's, as pygit2 reports them:
-   * `[old_start, old_lines, new_start, new_lines]`, 1-based with a length, so a hunk
-   * spans `[start, start + lines)` on each side — exactly the half-open `Alignment`
-   * form. A hunk with `lines === 0` on one side is a pure insertion/deletion and its
-   * range on that side is empty, which the constructor already handles.
+   * Build a `DiffMap` from the line-level diff the pipeline computed, rather than from a
+   * diff recomputed here. Each cell is `[kind, baseLine, afterLine]`: a deletion
+   * (`kind === -1`, base set, after `-1`) or an addition (`kind === 1`, base `-1`, after
+   * set), in display order. This is git's own line classification, unambiguous — nothing
+   * is reconstructed or guessed.
    *
-   * This exists because Monaco's line diff and libgit2's disagree on a moved block:
-   * both are LCS-based, but git compacts hunk boundaries (xdl_change_compact) while
-   * Monaco pairs the moved, textually identical lines across the move. The marking a
-   * localization run emits is validated against libgit2's hunks, so it must be
-   * rendered against them too — otherwise a marked line lands on a row the editor
-   * paints as unchanged, and the annotator is asked to judge a "defect location" that
-   * the diff says was never touched.
+   * This exists because Monaco's line diff and git's disagree on a moved block: both are
+   * LCS-based, but git compacts hunk boundaries (xdl_change_compact) while Monaco pairs the
+   * displaced, textually identical lines across the move. The marking a localization run
+   * emits is validated against git's diff, so it must be rendered against it too.
+   *
+   * The walk is driven by the cells' absolute line numbers, not by a lockstep cursor
+   * condition. Context runs before each cell are filled by advancing BOTH cursors to that
+   * cell's own anchor (`baseLine` for a deletion, `afterLine` for an addition, minus the
+   * count of the same-side changes already consumed) — so a base/after drift from an
+   * earlier pure insertion or deletion can never stop a context run one line short. A
+   * deletion becomes a base-only diff line, an addition an after-only one; nothing is ever
+   * shared unless it is genuine unchanged context.
    */
-  static fromHunks(
+  static fromDiff(
     hunks: readonly (readonly number[])[],
     baseText: string,
     afterText: string,
   ): DiffMap {
-    const alignments = hunks.map(([oldStart, oldLines, newStart, newLines]) => ({
-      baseStart: oldStart,
-      baseEnd: oldStart + oldLines,
-      afterStart: newStart,
-      afterEnd: newStart + newLines,
-    }));
-    return new DiffMap(
-      alignments,
-      baseText.split("\n").length,
-      afterText.split("\n").length,
-    );
+    const map = new DiffMap([], baseText.split("\n").length, afterText.split("\n").length);
+    map.#fill(hunks);
+    return map;
+  }
+
+  // Populate the maps from git's hunk ranges — one `[baseStart, baseEnd, afterStart,
+  // afterEnd]` per hunk, half-open. Before each hunk, the unchanged run is filled by
+  // advancing BOTH cursors to the hunk's own absolute starts (`baseStart`/`afterStart`),
+  // not from an accumulated position — so an earlier hunk's net insertion or deletion can
+  // never leave a cursor short. Inside a hunk the base lines become deletions, the after
+  // lines additions; nothing is ever shared, so a base deletion keeps its base side.
+  #fill(hunks: readonly (readonly number[])[]): void {
+    let base = 1;
+    let after = 1;
+    for (const [baseStart, baseEnd, afterStart, afterEnd] of hunks) {
+      while (base < baseStart && after < afterStart) {
+        this.#context(base, after);
+        base++;
+        after++;
+      }
+      for (; base < baseEnd; base++) this.#base(base);
+      for (; after < afterEnd; after++) this.#after(after);
+    }
   }
 
   /**
@@ -360,10 +376,11 @@ export class DiffMaps {
   }
 
   /**
-   * Builds (once) and returns the map for a file. Only an `unchanged` file gets an
-   * `IdentityDiffMap` sized to the after text; every real change (`change`/`add`/`delete`)
-   * gets a `DiffMap` — an add or delete simply diffs against its empty side. Idempotent: a
-   * second call with the same key returns the cached instance.
+   * Builds (once) and returns the map for a file. An `unchanged` file gets an
+   * `IdentityDiffMap`; a change whose entry carries the pipeline's line-level `diff` gets a
+   * `DiffMap.fromDiff` (git's own classification, the authoritative source); anything else
+   * — an add/delete with one empty side, or a change with no diff cells — falls back to
+   * `DiffMap.fromText`, which recomputes the diff with Monaco. Idempotent.
    */
   ensure(
     sha: string,
@@ -371,18 +388,16 @@ export class DiffMaps {
     baseText: string,
     afterText: string,
     action: Action,
-    hunks?: readonly (readonly number[])[],
+    diff?: readonly (readonly number[])[],
   ): DiffMap | IdentityDiffMap {
     const key = DiffMaps.#key(sha, path);
     const existing = this.#maps.get(key);
     if (existing) return existing;
-    // The pipeline's own hunks win when the change entry carries them; a change
-    // entry written before they were emitted falls back to recomputing the diff.
     const map: DiffMap | IdentityDiffMap =
       action === "unchanged"
         ? new IdentityDiffMap(afterText.split("\n").length)
-        : hunks
-          ? DiffMap.fromHunks(hunks, baseText, afterText)
+        : diff
+          ? DiffMap.fromDiff(diff, baseText, afterText)
           : DiffMap.fromText(baseText, afterText);
     this.#maps.set(key, map);
     return map;

@@ -160,43 +160,48 @@ class RepositoryProjection:
                 if identifier not in self._bytes:
                     self._bytes[identifier] = obj.data
 
-    def _hunks(self, base: str, sha: str) -> dict[str, list[list[int]]]:
-        """The changed line ranges per path, as [old_start, old_lines, new_start, new_lines].
+    def _diff(self, base: str, sha: str) -> dict[str, list[list[int]]]:
+        """The diff per path as the ranges the annotation component renders: one
+        `[base_start, base_end, after_start, after_end]` per git hunk, half-open and
+        1-based, so a hunk touches `[base_start, base_end)` on the base side and
+        `[after_start, after_end)` on the after side. This is git's own hunk boundary — the
+        component feeds each range straight to Monaco as a change region and builds its
+        line map from the same ranges, reconstructing nothing.
 
-        This is the diff the annotation component renders and the diff a localization
-        marking was validated against, so it must be the same one: Monaco's own line diff
-        cuts a moved block differently (it pairs the displaced but textually identical
-        lines across the move, where git writes them as a deletion plus an addition), and a
-        marking would then sit on a line the rendered diff paints as unchanged.
+        It is the diff a localization marking was validated against, so it must be the same
+        one the component renders: Monaco's own line diff cuts a moved block differently (it
+        pairs the displaced but textually identical lines across the move, where git writes
+        a deletion plus an addition), and a marking would then land on a line the rendered
+        diff paints as unchanged.
 
         Computed once per commit and looked up per path — `_changes` walks the whole tree,
-        so a diff call per path would be quadratic.
-
-        Rename detection is deliberately NOT enabled here. `_changes` pairs paths by a tree
-        union, under which a rename is an `add` plus a `delete` and never a `change`; a
-        rename-aware diff would key its hunks on a path pairing `_changes` does not have,
-        and they would be dropped. Hunks are only emitted for `change`, so the two agree.
+        so a diff call per path would be quadratic. Rename detection is off (see `_changes`).
         """
         handle = self._repository.handle
         before = handle.get(base).peel(pygit2.Commit).tree
         after = handle.get(sha).peel(pygit2.Commit).tree
         diff = handle.diff(before, after, context_lines=0, interhunk_lines=0)
 
-        hunks: dict[str, list[list[int]]] = {}
+        result: dict[str, list[list[int]]] = {}
         for patch in diff:
             path = patch.delta.new_file.path or patch.delta.old_file.path
             if path is None:
                 continue
-            hunks[path] = [
-                [hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines]
+            result[path] = [
+                [
+                    hunk.old_start,
+                    hunk.old_start + hunk.old_lines,
+                    hunk.new_start,
+                    hunk.new_start + hunk.new_lines,
+                ]
                 for hunk in patch.hunks
             ]
-        return hunks
+        return result
 
     def _changes(self, base: str, sha: str) -> dict[str, object]:
         after = self._tree(sha)
         before = self._tree(base)
-        hunks = self._hunks(base, sha)
+        diff = self._diff(base, sha)
         result: dict[str, object] = {}
 
         for path in sorted(set(after) | set(before)):
@@ -213,11 +218,11 @@ class RepositoryProjection:
                         "source": source,
                         "target": target,
                     }
-                    # Only a change has two sides to align, and only its hunks are read.
-                    # An add or a delete has one empty side, which the component already
+                    # Only a change has two sides to align, so only its line-level diff is
+                    # emitted. An add or a delete has one empty side, which the component
                     # renders as a whole-file addition or deletion.
-                    if path in hunks:
-                        entry["hunks"] = hunks[path]
+                    if path in diff:
+                        entry["diff"] = diff[path]
                     result[path] = entry
                     self._referenced.add(source)
                     self._referenced.add(target)
