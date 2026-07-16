@@ -50,18 +50,19 @@ class TestRepositoryProjection(unittest.TestCase):
             self.assertEqual(result["labels"], ["defect"])
 
             changes = result["changes"]
-            # a.py changed: alpha -> beta. A change carries the hunks the annotation
-            # component renders the diff from; the one line is replaced, so one hunk.
+            # a.py changed: alpha -> beta. A change carries git's hunk ranges as
+            # [base_start, base_end, after_start, after_end], half-open. The one replaced
+            # line is a single hunk spanning base [1,2) and after [1,2).
             self.assertEqual(
                 changes["a.py"],
                 {
                     "action": "change",
                     "source": oids["alpha"],
                     "target": oids["beta"],
-                    "hunks": [[1, 1, 1, 1]],
+                    "diff": [[1, 2, 1, 2]],
                 },
             )
-            # b.py added. An add has one empty side and no diff to align, so no hunks.
+            # b.py added. An add has one empty side and no diff to align, so no ranges.
             self.assertEqual(changes["b.py"], {"action": "add", "target": oids["gamma"]})
 
             # all three blob ids are referenced and fetchable
@@ -78,15 +79,15 @@ class TestRepositoryProjection(unittest.TestCase):
             projection = RepositoryProjection(VersionControl(repository))
             self.assertIsNone(projection.transform(base, "correction"))
 
-    def test_moved_block_hunks_are_gits_not_a_move_pairing(self) -> None:
-        """A moved block must be emitted as git cuts it: a deletion plus an addition.
+    def test_moved_block_diff_is_gits_not_a_move_pairing(self) -> None:
+        """A moved block must be emitted as git cuts it: deletions plus additions.
 
-        This is the whole point of shipping the hunks. Monaco's own line diff pairs the
-        displaced but textually identical lines ACROSS the move and paints them as
-        unchanged; git compacts the hunk boundary and writes the block as removed and
+        This is the whole point of shipping the line-level diff. Monaco's own line diff
+        pairs the displaced but textually identical lines ACROSS the move and paints them
+        as unchanged; git compacts the hunk boundary and writes the block as removed and
         re-added. A localization marking is validated against git's cut, so if the
         component rendered Monaco's, the marking would sit on a line the diff calls
-        untouched. The hunks in the payload are what keeps the two in step.
+        untouched. The diff cells in the payload are what keeps the two in step.
         """
         with tempfile.TemporaryDirectory() as directory:
             repository = pygit2.init_repository(str(directory), bare=False)
@@ -115,16 +116,16 @@ class TestRepositoryProjection(unittest.TestCase):
 
             projection = RepositoryProjection(VersionControl(repository))
             changes = projection.transform(str(head), "defect")["changes"]
-            hunks = changes["a.py"]["hunks"]
+            ranges = changes["a.py"]["diff"]
 
-            # Every hunk is one-sided: lines only leave, or only arrive. A move pairing
-            # would instead produce a hunk with a non-zero count on BOTH sides.
-            self.assertTrue(
-                all(old == 0 or new == 0 for _, old, _, new in hunks),
-                f"a moved block must not be paired across the move: {hunks}",
-            )
-            self.assertTrue(any(old > 0 for _, old, _, _ in hunks), hunks)
-            self.assertTrue(any(new > 0 for _, _, _, new in hunks), hunks)
+            # git writes a moved block as a deletion hunk plus a separate addition hunk, each
+            # one-sided (an empty range on the unchanged side). Monaco would instead pair the
+            # displaced lines and leave one side empty across the move. So every range here is
+            # one-sided, and both a pure deletion and a pure addition are present.
+            for bs, be, as_, ae in ranges:
+                self.assertTrue(bs == be or as_ == ae, ranges)
+            self.assertTrue(any(bs < be and as_ == ae for bs, be, as_, ae in ranges), ranges)
+            self.assertTrue(any(as_ < ae and bs == be for bs, be, as_, ae in ranges), ranges)
 
 
 if __name__ == "__main__":

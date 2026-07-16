@@ -187,15 +187,26 @@ class RepositoryProjection:
             path = patch.delta.new_file.path or patch.delta.old_file.path
             if path is None:
                 continue
-            result[path] = [
-                [
-                    hunk.old_start,
-                    hunk.old_start + hunk.old_lines,
-                    hunk.new_start,
-                    hunk.new_start + hunk.new_lines,
-                ]
-                for hunk in patch.hunks
-            ]
+            cells: list[list[int]] = []
+            for hunk in patch.hunks:
+                # Unified-diff convention: when a side has zero lines, its `*_start` points
+                # at the line BEFORE the change, not the first changed line. So a pure
+                # addition (`old_lines == 0`) begins on the base side one past `old_start`,
+                # and a pure deletion (`new_lines == 0`) one past `new_start`. Normalising to
+                # this half-open form keeps the ranges internally consistent — the base and
+                # after context between two hunks then have equal length, which the map's
+                # forward walk relies on.
+                base_start = hunk.old_start + (1 if hunk.old_lines == 0 else 0)
+                after_start = hunk.new_start + (1 if hunk.new_lines == 0 else 0)
+                cells.append(
+                    [
+                        base_start,
+                        base_start + hunk.old_lines,
+                        after_start,
+                        after_start + hunk.new_lines,
+                    ]
+                )
+            result[path] = cells
         return result
 
     def _changes(self, base: str, sha: str) -> dict[str, object]:
