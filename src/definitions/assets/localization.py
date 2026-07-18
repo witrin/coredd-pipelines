@@ -24,6 +24,7 @@ from benchmark.attribution.reason import (
 from benchmark.tracing import Trace
 from benchmark.localization.agent import LocateToolFactory
 from benchmark.localization.graph import LocateGraph
+from benchmark.localization.projection import NodeProjection
 from benchmark.localization.reason import LocateNode
 from langchain_openai import ChatOpenAI
 
@@ -312,3 +313,131 @@ def localization_change_trace(
     context.log.info("Localized %s/%s defect %s", name, number, sha[:8])
 
     return table
+
+
+@asset(
+    metadata={"version": "1.0.0"},
+    group_name="localization",
+    kinds={"gcs"},
+    ins={
+        "localization_change_trace": dg.AssetIn(
+            partition_mapping=dg.AllPartitionMapping(),
+            metadata={
+                "columns": ["name", "correction", "defect", "locations", "aborted"]
+            },
+        ),
+    },
+)
+def localization_change_label(
+    context: dg.AssetExecutionContext,
+    localization_change_trace: dict,
+    confidence_change_reliability: pa.Table,
+    scope_repository_stationary: pa.Table,
+) -> pa.Table:
+    """The released line markings lifted to the syntax nodes of N(c), one row per defect.
+
+    Each released (correction, defect) pair with a non-empty localization and a
+    scored rho contributes its markings; every marking is lifted to the node that
+    carries it and the covering lines are recorded per node in the R/L convention.
+    The same filters as the audit sample select the pairs, but no rho aggregation or
+    sampling is applied -- every qualifying pair is kept with its own rho.
+    """
+    runs = (
+        pl.from_arrow(pa.concat_tables(localization_change_trace.values()))
+        .filter(~pl.col("aborted"))
+        .unique(subset=["name", "correction", "defect"])
+        .filter(
+            pl.col("locations").map_elements(
+                lambda value: bool(value) and bool(json.loads(value)),
+                return_dtype=pl.Boolean,
+            )
+        )
+        .select("name", "correction", "defect", "locations")
+    )
+
+    scored = (
+        pl.from_arrow(confidence_change_reliability)
+        .filter(pl.col("rho").is_not_null())
+        .select("name", "correction", "defect", "rho")
+    )
+    pairs = runs.join(scored, on=["name", "correction", "defect"], how="inner")
+
+    # Each marking is lifted to the node that carries it; markings that share a node
+    # are grouped and their covering lines recorded in the R/L convention (R for the
+    # base/deleted side, L for the after side). A marking that maps to no node is
+    # dropped. Nodes are keyed per defect, so a defect localized by several
+    # corrections collects the nodes of each with that correction's own rho.
+    names = sorted(pl.from_arrow(scope_repository_stationary)["name"].to_list())
+    defects: dict[str, list[dict]] = {}
+    for name, frame in pairs.group_by("name"):
+        name = name[0] if isinstance(name, tuple) else name
+        projection = NodeProjection(
+            VersionControl.create(
+                storage.Client(project="bug-request"),
+                bucket="bug-request-bucket",
+                key="scope-source-raw",
+                location="main",
+                version="4.0.0",
+                partition=Shard.to_space(names, name),
+            )
+        )
+        for pair in frame.iter_rows(named=True):
+            nodes: dict[tuple, dict] = {}
+            for marking in json.loads(pair["locations"] or "[]"):
+                path = marking.get("file")
+                token = str(marking.get("line"))
+                if path is None or not token:
+                    continue
+                side = "base" if token[:1] == "D" else "after"
+                number = token[1:] if token[:1] in ("L", "D") else token
+                if not number.isdigit():
+                    continue
+                node = projection.project(pair["defect"], path, int(number), side)
+                if node is None:
+                    continue
+                identity = (node.path, node.start, node.end, node.type)
+                line = f"R{number}" if side == "base" else f"L{number}"
+                entry = nodes.get(identity)
+                if entry is None:
+                    nodes[identity] = {
+                        "name": pair["name"],
+                        "correction": pair["correction"],
+                        "rho": pair["rho"],
+                        "path": node.path,
+                        "start": list(node.start),
+                        "end": list(node.end),
+                        "type": node.type,
+                        "lines": [line],
+                    }
+                elif line not in entry["lines"]:
+                    entry["lines"].append(line)
+            if nodes:
+                defects.setdefault(pair["defect"], []).extend(nodes.values())
+    rows = [{"defect": defect, "label": label} for defect, label in defects.items()]
+
+    schema = pa.schema(
+        [
+            ("defect", pa.string()),
+            (
+                "label",
+                pa.list_(
+                    pa.struct(
+                        [
+                            ("name", pa.string()),
+                            ("correction", pa.string()),
+                            ("rho", pa.float64()),
+                            ("path", pa.string()),
+                            ("start", pa.list_(pa.int64())),
+                            ("end", pa.list_(pa.int64())),
+                            ("type", pa.string()),
+                            ("lines", pa.list_(pa.string())),
+                        ]
+                    )
+                ),
+            ),
+        ]
+    )
+    context.log.info(
+        "Labeled %d defects from %d released pairs.", len(rows), pairs.height
+    )
+    return pa.Table.from_pylist(rows, schema=schema)
