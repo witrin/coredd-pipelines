@@ -110,6 +110,7 @@ services:
             - ./:/usr/local/src
 
     console:
+        platform: linux/amd64
         build:
             context: .
             target: console

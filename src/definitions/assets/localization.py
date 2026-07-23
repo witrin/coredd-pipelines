@@ -4,6 +4,7 @@ import os
 import dagster as dg
 import pyarrow as pa
 import polars as pl
+import pygit2
 
 from google.cloud import storage
 
@@ -341,6 +342,12 @@ def localization_change_label(
     carries it and the covering lines are recorded per node in the R/L convention.
     The same filters as the audit sample select the pairs, but no rho aggregation or
     sampling is applied -- every qualifying pair is kept with its own rho.
+
+    Two restrictions make this the released population. A pair whose defect is off
+    the reconstructed integration branch is dropped, since the single-branch
+    assumption the noise model rests on does not hold for it. A marking naming a
+    file outside the analysed language is dropped, since it has no syntax node to
+    lift to; a pair losing all of its markings this way contributes no label.
     """
     runs = (
         pl.from_arrow(pa.concat_tables(localization_change_trace.values()))
@@ -367,8 +374,15 @@ def localization_change_label(
     # base/deleted side, L for the after side). A marking that maps to no node is
     # dropped. Nodes are keyed per defect, so a defect localized by several
     # corrections collects the nodes of each with that correction's own rho.
-    names = sorted(pl.from_arrow(scope_repository_stationary)["name"].to_list())
+    stationary = pl.from_arrow(scope_repository_stationary)
+    names = sorted(stationary["name"].to_list())
+    trunks = {
+        row["name"]: list(row["trunks"] or [])
+        for row in stationary.iter_rows(named=True)
+    }
     defects: dict[str, list[dict]] = {}
+    off_trunk = 0
+    non_python = 0
     for name, frame in pairs.group_by("name"):
         name = name[0] if isinstance(name, tuple) else name
         projection = NodeProjection(
@@ -381,12 +395,42 @@ def localization_change_label(
                 partition=Shard.to_space(names, name),
             )
         )
+        # The benchmark conditions on a single integration branch per repository, but
+        # nothing upstream verified that property for the defect itself. A defect off
+        # the first-parent chain of every trunk tip was reached through a merge and
+        # falls outside the branch the noise model is defined over, so it never
+        # becomes a released label.
+        handle = projection._repository.handle  # noqa: SLF001
+        trunk: set[str] = set()
+        for branch in trunks.get(name, []):
+            for reference in (
+                f"refs/heads/{branch}",
+                f"refs/remotes/origin/{branch}",
+            ):
+                try:
+                    tip = handle.lookup_reference(reference).peel(pygit2.Commit).id
+                except KeyError:
+                    continue
+                walker = handle.walk(tip, pygit2.GIT_SORT_TOPOLOGICAL)
+                walker.simplify_first_parent()
+                trunk.update(str(commit.id) for commit in walker)
+                break
+
         for pair in frame.iter_rows(named=True):
+            if pair["defect"] not in trunk:
+                off_trunk += 1
+                continue
             nodes: dict[tuple, dict] = {}
             for marking in json.loads(pair["locations"] or "[]"):
                 path = marking.get("file")
                 token = str(marking.get("line"))
                 if path is None or not token:
+                    continue
+                # The localizer may name a file outside the analysed language; such a
+                # marking has no syntax node to lift to and is dropped here rather
+                # than silently at projection time.
+                if not path.endswith(".py"):
+                    non_python += 1
                     continue
                 side = "base" if token[:1] == "D" else "after"
                 number = token[1:] if token[:1] in ("L", "D") else token
@@ -438,6 +482,11 @@ def localization_change_label(
         ]
     )
     context.log.info(
-        "Labeled %d defects from %d released pairs.", len(rows), pairs.height
+        "Labeled %d defects from %d released pairs; "
+        "dropped %d off-trunk pairs and %d markings outside Python.",
+        len(rows),
+        pairs.height,
+        off_trunk,
+        non_python,
     )
     return pa.Table.from_pylist(rows, schema=schema)

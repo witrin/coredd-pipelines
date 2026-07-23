@@ -47,7 +47,7 @@ notebooks = [
     "nbformat==5.10.4",
     "widgetsnbextension==4.0.15",
     "jupyterlab_widgets==3.0.16",
-    "anywidget==7.6.0"
+    "anywidget==0.11.0"
 ]
 
 [build-system]
