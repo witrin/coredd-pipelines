@@ -197,3 +197,4 @@
 {"name": "awslabs/graphstorm", "number": 257, "labels": ["Intrinsic"]}
 {"name": "awslabs/graphstorm", "number": 179, "labels": ["Other"]}
 {"name": "kedro-org/kedro-plugins", "number": 766, "error": "Expecting ':' delimiter: line 1021 column 2 (char 6130)"}
+{"name": "kedro-org/kedro-plugins", "number": 766, "labels": ["Other"]}

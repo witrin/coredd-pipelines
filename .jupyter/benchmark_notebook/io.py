@@ -3,6 +3,8 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from collections.abc import Iterator
 from pathlib import Path
@@ -242,6 +244,7 @@ class CloudStorage:
             f"assets/{key}/" f"version={version}/" f"location={location}/" "partition="
         )
 
+        matched = []
         for blob in self._bucket.list_blobs(prefix=prefix):
             parts = self._parse_blob_name(blob.name)
 
@@ -254,17 +257,27 @@ class CloudStorage:
             if not fnmatch.fnmatch(parts["partition"], partition):
                 continue
 
+            matched.append(blob)
+
+        # Each partition is an independent GCS reload/download plus a parquet read;
+        # the per-blob work is I/O-bound, so fan it out across a thread pool. The
+        # cache read/write is per-blob (distinct paths), so the workers do not race.
+        def load(blob):
             blob.reload()
             path, meta_path = self._cache_path(blob)
-            if self._is_cache_valid(blob, path, meta_path):
-                yield pq.read_table(path, columns=columns, filters=filters)
-                continue
-            path.parent.mkdir(parents=True, exist_ok=True)
-            temp = path.parent / f".{path.name}.tmp"
-            blob.download_to_filename(str(temp))
-            temp.replace(path)
-            self._write_cache_meta(blob, path, meta_path)
-            yield pq.read_table(path, columns=columns, filters=filters)
+            if not self._is_cache_valid(blob, path, meta_path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temp = path.parent / f".{path.name}.{threading.get_ident()}.tmp"
+                blob.download_to_filename(str(temp))
+                temp.replace(path)
+                self._write_cache_meta(blob, path, meta_path)
+            return pq.read_table(path, columns=columns, filters=filters)
+
+        if not matched:
+            return
+        workers = min(32, len(matched))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            yield from pool.map(load, matched)
 
     def _list_blobs(
         self,

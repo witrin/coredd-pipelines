@@ -20,7 +20,13 @@ thesis = go.layout.Template(
             "#666666",
         ],
         colorscale=dict(
-            sequential="Viridis",
+            sequential=[
+                [0.0,  "#BFBFBF"],
+                [0.25, "#808080"],
+                [0.5,  "#666666"],
+                [0.75, "#404040"],
+                [1.0,  "#1A1A1A"],
+            ],
             diverging="RdBu",
         ),
         xaxis=dict(
@@ -39,7 +45,13 @@ thesis = go.layout.Template(
             showgrid=True,
             gridcolor="#E8E8E8",
             gridwidth=0.5,
+            automargin=True, 
         ),
+        coloraxis=dict(colorbar=dict(
+            outlinewidth=0,
+            title=dict(font=dict(size=12)),
+            tickfont=dict(size=11),       # sonst erbt die Leiste die 11
+        )),
         legend=dict(
             orientation="h",
             yanchor="top",
