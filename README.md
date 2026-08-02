@@ -1,4 +1,4 @@
-# Bug Request Benchmark
+# CoReDD Pipelines
 
 Containerized environment of the benchmark pipelines across development and production scenarios.
 
