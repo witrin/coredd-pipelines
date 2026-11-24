@@ -449,7 +449,7 @@ export function Editor({
         }}
       >
         <a
-          href={`https://github.com/${repository}/blob/${sha}/${path}`}
+          href={`https://mirror.bug-request.dev/${repository}/blob/${sha}/${path}`}
           target="_blank"
           rel="noopener noreferrer"
           style={{

@@ -122,6 +122,34 @@ class Adapter {
   }
 }
 
+// Some collected repositories are no longer on GitHub, so the record page opens
+// GitHub links in the repository mirror instead. Only the links on the page are
+// rewritten; the record fields keep the original URLs, and the adapter reads
+// the record through the API, never from the page.
+class Mirror {
+  #origin;
+
+  constructor(origin) {
+    this.#origin = origin;
+  }
+
+  rewrite(root) {
+    for (const anchor of root.querySelectorAll('a[href^="https://github.com/"]')) {
+      anchor.href = this.#origin + anchor.getAttribute("href").slice("https://github.com".length);
+    }
+  }
+
+  // Argilla renders the record fields outside this iframe and replaces them on
+  // every record change, so the parent page is rewritten again on each change.
+  watch(page) {
+    this.rewrite(page);
+    new MutationObserver(() => this.rewrite(page)).observe(page.body, {
+      childList: true,
+      subtree: true,
+    });
+  }
+}
+
 // `record` is the global Argilla injects into the custom field iframe; it is
 // referenced only here and handed to the adapter, which stays free of globals.
 const element = document.querySelector("code-annotation");
@@ -129,6 +157,7 @@ const field = element.getAttribute("field");
 const adapter = new Adapter(parent.localStorage, record, field);
 
 element.setAttribute("src", record.fields[field].url);
+new Mirror("https://mirror.bug-request.dev").watch(parent.document);
 
 adapter.identify().then(
   () => {

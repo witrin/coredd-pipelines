@@ -20,6 +20,8 @@ Each annotator owns one entry in the record field, keyed by the user id from `/a
 
 Before each save the adapter re-reads the record and replaces only the signed-in user's entry, because `PATCH /api/v1/records/{id}` replaces the whole fields dict.
 
+The adapter also points every `https://github.com/` link on the record page at the repository mirror (`https://mirror.bug-request.dev`), since some collected repositories are no longer on GitHub. It changes only the links in the page, never the record fields; the mirror sends pages outside its repositories on to GitHub.
+
 ### Build
 
 ```sh
