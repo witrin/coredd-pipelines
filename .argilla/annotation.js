@@ -1,8 +1,12 @@
+// The localization field exists once per record, but every annotator marks it
+// independently. Each annotator therefore owns one entry under
+// `fields[field].annotators[<user id>]`, and the adapter only ever reads and
+// writes the entry of the signed-in user.
 class Adapter {
   #storage;
   #record;
   #field;
-  #key;
+  #user = null;
   #inflight = false;
   #dirty = null;
 
@@ -10,52 +14,75 @@ class Adapter {
     this.#storage = storage;
     this.#record = record;
     this.#field = field;
-    this.#key = `${field}:${record.id}`;
   }
 
   get #token() {
     return this.#storage.getItem("auth._token.local");
   }
 
+  get #key() {
+    return `${this.#field}:${this.#record.id}:${this.#user}`;
+  }
+
+  async #request(method, body) {
+    const response = await fetch(`/api/v1/records/${this.#record.id}`, {
+      method,
+      headers: {
+        Authorization: this.#token,
+        "Content-Type": "application/json",
+      },
+      body: body && JSON.stringify(body),
+    });
+    if (!response.ok) {
+      throw new Error(`${method} failed (${response.status})`);
+    }
+    return response.json();
+  }
+
+  async identify() {
+    const response = await fetch("/api/v1/me", {
+      headers: { Authorization: this.#token },
+    });
+    if (!response.ok) {
+      throw new Error(`Sign-in check failed (${response.status})`);
+    }
+    this.#user = (await response.json()).id;
+  }
+
   async save(selection) {
     this.#inflight = true;
-    this.#storage.setItem(this.#key, JSON.stringify({
-      selection,
+    const entry = {
+      state: selection.state,
+      annotation: selection.annotation,
       timestamp: Date.now(),
-    }));
+    };
+    this.#storage.setItem(this.#key, JSON.stringify(entry));
 
     try {
-      const response = await fetch(`/api/v1/records/${this.#record.id}`, {
-        method: "PATCH",
-        headers: {
-          Authorization: this.#token,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          // PATCH /records replaces the whole fields dict, it does not merge.
-          // Resend every field, mutating only annotation, or the server rejects
-          // the request with 422 "missing required value for field: ...".
-          // `state` is the raw checkpoint restored verbatim on reload; the
-          // `annotation` projection is what the backend consumes.
-          fields: {
-            ...this.#record.fields,
-            [this.#field]: {
-              url: this.#record.fields[this.#field].url,
-              state: selection.state,
-              annotation: selection.annotation,
-            },
+      // Re-read the record right before writing so entries other annotators
+      // saved since this page loaded are carried over instead of overwritten.
+      // PATCH /records replaces the whole fields dict, it does not merge, so
+      // every field is resent and only this user's entry is replaced.
+      const { fields } = await this.#request("GET");
+      const current = fields[this.#field];
+      await this.#request("PATCH", {
+        fields: {
+          ...fields,
+          [this.#field]: {
+            url: current.url,
+            annotators: { ...current.annotators, [this.#user]: entry },
           },
-        }),
+        },
       });
-
-      if (response.ok) {
-        this.#storage.removeItem(this.#key);
-        element.status("info", "Saved");
+      this.#storage.removeItem(this.#key);
+      element.status("info", "Saved");
+    } catch (error) {
+      // fetch rejects with a TypeError only when the server is unreachable.
+      if (error instanceof TypeError) {
+        element.status("warning", "Saved locally");
       } else {
-        element.status("error", `Save failed (${response.status})`);
+        element.status("error", `Save failed: ${error.message}`);
       }
-    } catch {
-      element.status("warning", "Saved locally");
     } finally {
       this.#inflight = false;
       if (this.#dirty) {
@@ -74,22 +101,20 @@ class Adapter {
     }
   }
 
+  // A local entry only survives a save that never reached the server. It wins
+  // over the server entry when it is newer; both timestamps come from this
+  // user's own browser, so other annotators' saves never discard it.
   restore() {
-    const stored = this.#record.fields[this.#field];
-    const server = stored.state
-      ? { state: stored.state, annotation: stored.annotation ?? [] }
-      : null;
+    const server = this.#record.fields[this.#field].annotators?.[this.#user] ?? null;
     const raw = this.#storage.getItem(this.#key);
 
     if (!raw) {
       return server;
     }
 
-    const { selection, timestamp } = JSON.parse(raw);
-    const updated = new Date(this.#record.updated_at).getTime();
-
-    if (timestamp > updated) {
-      return selection;
+    const local = JSON.parse(raw);
+    if (local.timestamp > (server?.timestamp ?? 0)) {
+      return local;
     }
 
     this.#storage.removeItem(this.#key);
@@ -105,9 +130,13 @@ const adapter = new Adapter(parent.localStorage, record, field);
 
 element.setAttribute("src", record.fields[field].url);
 
-const restored = adapter.restore();
-if (restored) {
-  element.value = restored;
-}
-
-element.addEventListener("change", (e) => adapter.push(e.detail));
+adapter.identify().then(
+  () => {
+    const restored = adapter.restore();
+    if (restored) {
+      element.value = { state: restored.state, annotation: restored.annotation ?? [] };
+    }
+    element.addEventListener("change", (e) => adapter.push(e.detail));
+  },
+  (error) => element.status("error", error.message),
+);

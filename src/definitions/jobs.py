@@ -1526,7 +1526,9 @@ def audit_change_collect_op(
 
     rows: list[dict[str, object]] = []
     for record in dataset.records(query=query, with_responses=True):
-        selections = (record.fields.get("localization") or {}).get("annotation") or []
+        # Every annotator marks the localization independently and owns the
+        # entry keyed by their user id; the record-level field is shared.
+        localizations = (record.fields.get("localization") or {}).get("annotators") or {}
 
         # Group every submitted response by its annotator so each person's
         # answers stay together. One output row per (record x annotator) keeps
@@ -1566,7 +1568,10 @@ def audit_change_collect_op(
                         int(confidence) if confidence is not None else None
                     ),
                     "verdict": verdict,
-                    "selections": json.dumps(selections, sort_keys=True),
+                    "selections": json.dumps(
+                        localizations.get(str(user_id), {}).get("annotation") or [],
+                        sort_keys=True,
+                    ),
                     "comment": "\n".join(
                         note for note in answers.get("comment", []) if note
                     ),

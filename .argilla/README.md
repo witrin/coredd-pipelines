@@ -12,6 +12,14 @@ Annotation tooling and Argilla integration.
 
 `annotation.js` connects the `<code-annotation>` web component to the Argilla record API. It persists selections on change, restores them on load (comparing server vs. localStorage timestamps), and reports save outcomes via `element.status()`.
 
+Each annotator owns one entry in the record field, keyed by the user id from `/api/v1/me`, so annotators never see or overwrite each other's markings:
+
+```json
+{"url": "...", "annotators": {"<user id>": {"state": {}, "annotation": [], "timestamp": 0}}}
+```
+
+Before each save the adapter re-reads the record and replaces only the signed-in user's entry, because `PATCH /api/v1/records/{id}` replaces the whole fields dict.
+
 ### Build
 
 ```sh
