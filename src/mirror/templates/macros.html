@@ -1,0 +1,234 @@
+{% macro row(line, anchor) %}
+<tr class="{{ 'add' if line.origin == '+' else ('del' if line.origin == '-' else '') }}">
+  <td class="num" {% if line.old %}id="{{ anchor }}L{{ line.old }}" data-line="{{ line.old }}"{% endif %}></td>
+  <td class="num" {% if line.new %}id="{{ anchor }}R{{ line.new }}" data-line="{{ line.new }}"{% endif %}></td>
+  <td class="sign">{{ line.origin if line.origin != ' ' else '' }}</td>
+  <td>{{ line.html|safe }}</td>
+</tr>
+{% endmacro %}
+
+{% macro diffstat(additions, deletions, blocks=true) %}
+<span class="diffstat"><span class="plus">+{{ additions }}</span> <span class="minus">−{{ deletions }}</span>
+{%- if blocks %}
+{%- set total = additions + deletions %}
+{%- if total <= 5 %}{% set green, red = additions, deletions %}{% else %}{% set green = (additions * 5 / total)|round|int %}{% set red = [(deletions * 5 / total)|round|int, 5 - green]|min %}{% endif %}
+<span class="blocks" aria-hidden="true">{% for index in range(5) %}<i class="{{ 'a' if index < green else ('d' if index < green + red else '') }}"></i>{% endfor %}</span>
+{%- endif %}</span>
+{% endmacro %}
+
+{% macro diff(files, tree, repo, head, here) %}
+{% if files is none %}
+<div class="notice">{{ icon('alert') }}<span>The commits of this pull request are not part of the collected repository, so its diff cannot be shown.</span></div>
+{% else %}
+<div class="diff-toolbar">
+  <span>Showing <strong>{{ files|length }} changed file{{ 's' if files|length != 1 }}</strong> with <strong>{{ files|sum(attribute='additions') }} addition{{ 's' if files|sum(attribute='additions') != 1 }}</strong> and <strong>{{ files|sum(attribute='deletions') }} deletion{{ 's' if files|sum(attribute='deletions') != 1 }}</strong>.</span>
+</div>
+<div class="diff-layout {{ 'single' if files|length < 2 }}">
+  {% if files|length > 1 %}
+  <nav class="filetree" aria-label="Changed files">
+    {% for node in tree %}
+      {% if node.folder %}
+      <div class="node" style="padding-left:{{ 8 + node.depth * 16 }}px">{{ icon('chevron-down') }}{{ icon('file-directory-fill') }}<span class="name">{{ node.name }}</span></div>
+      {% else %}
+      <a class="node" href="#{{ node.anchor }}" style="padding-left:{{ 24 + node.depth * 16 }}px" title="{{ node.name }}">{{ icon('file') }}<span class="name">{{ node.name }}</span><span class="status {{ node.status }}" title="{{ node.status }}">{{ icon({'added': 'diff-added', 'removed': 'diff-removed', 'renamed': 'diff-renamed'}.get(node.status, 'diff-modified')) }}</span></a>
+      {% endif %}
+    {% endfor %}
+  </nav>
+  {% endif %}
+  <div>
+  {% for file in files %}
+  {% set anchor = file.path|anchor %}
+  <details class="file" id="{{ anchor }}" open>
+    <summary class="head">
+      {{ icon('chevron-down', 16, 'chevron') }}
+      {{ diffstat(file.additions, file.deletions) }}
+      <span class="grow"><a class="name" href="#{{ anchor }}">{% if file.old %}{{ file.old }} → {% endif %}{{ file.path }}</a>
+        {% if file.status in ('added', 'removed', 'renamed') %}<span class="badge">{{ file.status }}</span>{% endif %}</span>
+      {% if file.status != 'removed' %}<span class="actions"><a class="button small" href="/{{ repo.name }}/blob/{{ head.id }}/{{ file.path }}">View file</a></span>{% endif %}
+    </summary>
+    {% if file.binary %}
+      <div class="body">Binary file not shown.</div>
+    {% elif file.deferred %}
+      <div class="body">Large diffs are not rendered by default. <a href="{{ here }}?path={{ file.path|urlencode }}#{{ anchor }}">Load diff</a></div>
+    {% elif not file.hunks %}
+      <div class="body">File {{ 'renamed' if file.old else 'mode changed' }} without changes.</div>
+    {% else %}
+    <div class="scroll">
+    <table class="diff code">
+      {% set source = '/' ~ repo.name ~ '/expand/' ~ head.id ~ '/' ~ file.path %}
+      {% for hunk in file.hunks %}
+      <tr class="hunk">{% if hunk.gap %}<td class="num expand" colspan="2" title="Expand {{ hunk.gap.end - hunk.gap.start + 1 }} hidden lines" data-src="{{ source }}?start={{ hunk.gap.start }}&end={{ hunk.gap.end }}&shift={{ hunk.gap.shift }}">{{ icon('unfold') }}</td>{% else %}<td class="num" colspan="2"></td>{% endif %}<td colspan="2">{{ hunk.header }}</td></tr>
+      {% for line in hunk.lines %}{{ row(line, anchor) }}{% endfor %}
+      {% endfor %}
+      {% if file.tail %}<tr class="hunk"><td class="num expand" colspan="2" title="Expand {{ file.tail.end - file.tail.start + 1 }} hidden lines" data-src="{{ source }}?start={{ file.tail.start }}&end={{ file.tail.end }}&shift={{ file.tail.shift }}">{{ icon('unfold') }}</td><td colspan="2"></td></tr>{% endif %}
+    </table>
+    </div>
+    {% endif %}
+  </details>
+  {% endfor %}
+  </div>
+</div>
+{% endif %}
+{% endmacro %}
+
+{% macro hunk(thread, repo) %}
+<div class="thread">
+  <div class="file">{{ icon('file') }}<span class="grow">{% if thread.commit %}<a href="/{{ repo.name }}/blob/{{ thread.commit }}/{{ thread.path }}{% if thread.line %}#L{{ thread.line }}{% endif %}">{{ thread.path }}</a>{% else %}{{ thread.path }}{% endif %}</span>{% if thread.outdated %}<span class="badge">Outdated</span>{% endif %}</div>
+  {% if thread.hunk %}
+  <div class="scroll"><table class="diff code">
+  {% for line in thread.hunk %}
+    <tr class="{{ 'add' if line.origin == '+' else ('del' if line.origin == '-' else '') }}">
+      <td class="num" data-line="{{ line.old or '' }}"></td><td class="num" data-line="{{ line.new or '' }}"></td>
+      <td class="sign">{{ line.origin if line.origin != ' ' else '' }}</td><td>{{ line.text }}</td>
+    </tr>
+  {% endfor %}
+  </table></div>
+  {% endif %}
+  {% for comment in thread.comments %}
+  <div class="reply">
+    {{ avatar(comment.user, 24) }}
+    <div class="grow"><div class="who"><span class="author">{{ comment.user }}</span> {{ comment.time|date }}</div><div class="markdown">{{ comment.html }}</div></div>
+  </div>
+  {% endfor %}
+</div>
+{% endmacro %}
+
+{% macro card(user, verb, time, html, association, author, anchor) %}
+<div class="comment" {% if anchor %}id="{{ anchor }}"{% endif %}>
+  {{ avatar(user, 40) }}
+  <div class="card">
+    <div class="head"><span class="author">{{ user }}</span> <span>{{ verb }} {% if time %}on {{ time|date }}{% endif %}</span>
+      <span class="badges">{% if user == author %}<span class="badge">Author</span>{% endif %}{% if association and association not in ('NONE', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER') %}<span class="badge">{{ association|capitalize }}</span>{% endif %}</span></div>
+    <div class="body markdown">{{ html or '' }}{% if not html %}<span class="muted"><em>No description provided.</em></span>{% endif %}</div>
+  </div>
+</div>
+{% endmacro %}
+
+{% macro conversation(items, repo, author, pull=none) %}
+{% set icons = {
+  'labeled': 'tag', 'unlabeled': 'tag', 'renamed': 'pencil', 'review_requested': 'eye', 'review_request_removed': 'eye',
+  'assigned': 'person', 'unassigned': 'person', 'milestoned': 'milestone', 'demilestoned': 'milestone', 'merged': 'git-merge',
+  'closed': 'circle-slash', 'reopened': 'dot-fill', 'referenced': 'git-commit', 'cross-referenced': 'cross-reference',
+  'head_ref_force_pushed': 'repo-push', 'head_ref_deleted': 'git-branch', 'head_ref_restored': 'git-branch',
+  'locked': 'lock', 'unlocked': 'unlock', 'pinned': 'pin', 'connected': 'link', 'disconnected': 'link',
+  'convert_to_draft': 'git-pull-request', 'ready_for_review': 'eye', 'mentioned': 'bookmark', 'subscribed': 'bookmark',
+} %}
+{% for item in items %}
+  {% if item.kind == 'comment' %}
+  {{ card(item.user, 'commented', item.time, item.html, item.association, author, 'issuecomment-' ~ item.id) }}
+  {% elif item.kind == 'review' %}
+  {% set verb = {'approved': 'approved these changes', 'changes_requested': 'requested changes', 'dismissed': 'reviewed (dismissed)'}.get(item.state, 'reviewed') %}
+  <div class="event" {% if item.id %}id="pullrequestreview-{{ item.id }}"{% endif %}>
+    <span class="badge-icon {{ item.state }}">{{ icon({'approved': 'check', 'changes_requested': 'file-diff'}.get(item.state, 'eye')) }}</span>
+    <div class="text">{{ avatar(item.user, 20) }}<span class="author">{{ item.user }}</span> {{ verb }} {{ item.time|date }}
+      {% if item.commit %}<a class="sha mono" href="/{{ repo.name }}/commit/{{ item.commit }}">{{ item.commit[:7] }}</a>{% endif %}</div>
+  </div>
+  {% if item.html or item.threads %}
+  <div class="comment review-body">
+    {{ avatar(item.user, 40) }}
+    <div class="card">
+      <div class="head"><span class="author">{{ item.user }}</span> <span>left a comment</span><span class="badges">{% if item.user == author %}<span class="badge">Author</span>{% endif %}</span></div>
+      <div class="body">
+        {% if item.html %}<div class="markdown">{{ item.html }}</div>{% endif %}
+        {% for thread in item.threads %}{{ hunk(thread, repo) }}{% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
+  {% elif item.kind == 'commits' %}
+  <div class="event">
+    <span class="badge-icon">{{ icon('repo-push') }}</span>
+    <div class="text">{{ avatar(item.user, 20) }}<span class="author">{{ item.user }}</span> added {{ item.commits|length }} commit{{ 's' if item.commits|length != 1 }} {{ item.time|date }}</div>
+  </div>
+  {% for commit in item.commits %}
+  <div class="event condensed commit">
+    <span class="badge-icon">{{ icon('git-commit') }}</span>
+    <div class="text">{{ avatar(commit.user, 16) }}<span class="message"><a href="/{{ repo.name }}/commit/{{ commit.sha }}">{{ commit.headline }}</a></span><a class="sha mono" href="/{{ repo.name }}/commit/{{ commit.sha }}">{{ commit.sha[:7] }}</a></div>
+  </div>
+  {% endfor %}
+  {% else %}
+  {% if not (pull and pull.state == 'merged' and item.event == 'closed') %}
+  {% if item.event == 'closed' %}
+    {% set state, glyph = ('closed', 'git-pull-request-closed') if pull else (('not_planned', 'skip') if 'not planned' in item.html else ('completed', 'issue-closed')) %}
+  {% else %}
+    {% set state = 'merged' if item.event == 'merged' else ('open' if item.event == 'reopened' else '') %}
+    {% set glyph = icons.get(item.event, 'dot-fill') %}
+  {% endif %}
+  <div class="event {{ 'condensed' if not state }}">
+    <span class="badge-icon {{ state }}">{{ icon(glyph) }}</span>
+    <div class="text">{{ avatar(item.user, 20) }}<span class="author">{{ item.user }}</span> {{ item.html }} {{ item.time|date }}</div>
+  </div>
+  {% endif %}
+  {% endif %}
+{% endfor %}
+{% endmacro %}
+
+{% macro sidebar(payload, links, repo, pull=false, reviewers=[]) %}
+<aside class="sidebar">
+  {% if pull %}
+  {% set looks = {'approved': ('check', 'icon-open', 'Approved these changes'), 'changes_requested': ('file-diff', 'icon-closed', 'Requested changes'), 'commented': ('comment', 'muted', 'Left review comments'), 'dismissed': ('x', 'muted', 'Review dismissed'), 'requested': ('dot-fill', 'icon-pending', 'Awaiting requested review')} %}
+  <div class="item"><h3>Reviewers</h3>{% for reviewer in reviewers %}{% set look = looks.get(reviewer.state, looks['commented']) %}<div class="person">{{ avatar(reviewer.login, 20) }}<span class="grow">{{ reviewer.login }}</span><span class="{{ look[1] }}" title="{{ look[2] }}">{{ icon(look[0]) }}</span></div>{% else %}No reviews{% endfor %}</div>
+  {% endif %}
+  <div class="item"><h3>Assignees</h3>{% for user in payload.assignees %}<div class="person">{{ avatar(user.login, 20) }}{{ user.login }}</div>{% else %}No one assigned{% endfor %}</div>
+  <div class="item"><h3>Labels</h3>{% if payload.labels %}<div class="labels">{% for label in payload.labels %}<span class="label" style="--label:#{{ label.color }}">{{ label.name }}</span>{% endfor %}</div>{% else %}None yet{% endif %}</div>
+  <div class="item"><h3>Milestone</h3>{% if payload.milestone %}<span class="person">{{ icon('milestone') }}{{ payload.milestone.title }}</span>{% else %}No milestone{% endif %}</div>
+  <div class="item"><h3>Development</h3>
+    {% for edge in links %}
+    <div class="linked">{{ icon('cross-reference') }}<span><a href="{{ edge.href }}">{% if edge.repo != repo.name %}{{ edge.repo }}{% endif %}#{{ edge.number }}</a>{% if edge.title %} {{ edge.title }}{% endif %}<br>{{ edge.kinds|join(' · ') }}{{ ' · closes' if edge.close and 'closing' not in edge.kinds }}{{ '' if edge.outgoing else ' · incoming' }}</span></div>
+    {% else %}No linked issues or pull requests{% endfor %}
+  </div>
+  {% if pull %}
+  <div class="item"><h3>Commits</h3>
+    <div class="shas">
+      <span>base</span><a class="sha mono" href="/{{ repo.name }}/commit/{{ payload.base.sha }}">{{ payload.base.sha[:7] }}</a>
+      <span>head</span><a class="sha mono" href="/{{ repo.name }}/commit/{{ payload.head.sha }}">{{ payload.head.sha[:7] }}</a>
+      {% if payload.merge_commit_sha and payload.merged_at %}<span>merge</span><a class="sha mono" href="/{{ repo.name }}/commit/{{ payload.merge_commit_sha }}">{{ payload.merge_commit_sha[:7] }}</a>{% endif %}
+    </div>
+  </div>
+  {% endif %}
+  <div class="item"><h3>Original</h3><a href="{{ payload.html_url }}" class="muted" target="_blank" rel="noopener noreferrer">{{ payload.html_url }} {{ icon('link-external', 12) }}</a></div>
+</aside>
+{% endmacro %}
+
+{% macro history(commits, repo, path='') %}
+<div class="days">
+{% for day, group in commits|days %}
+  <div class="day">
+    <h2>{{ icon('git-commit') }}Commits on {{ day }}</h2>
+    <div class="box">
+    {% for commit in group %}
+      {% if commit is mapping %}
+        {% set sha, headline, who, when = commit.sha, commit.commit.message.split('\n')[0], (commit.author or {}).login or commit.commit.author.name, commit.commit.author.date|date %}
+      {% else %}
+        {% set sha, headline, who, when = commit.id|string, commit.message.split('\n')[0], commit.author.name, commit.commit_time|stamp %}
+      {% endif %}
+      <div class="commit-row">
+        <div class="grow">
+          <a class="title" href="/{{ repo.name }}/commit/{{ sha }}">{{ headline }}</a>
+          <div class="info">{{ avatar(who, 16) }}<strong>{{ who }}</strong> committed {{ when }}</div>
+        </div>
+        <span class="group">
+          <a class="button small sha" href="/{{ repo.name }}/commit/{{ sha }}">{{ sha[:7] }}</a>
+          <a class="button small" href="/{{ repo.name }}/tree/{{ sha }}{% if path %}/{{ path }}{% endif %}" title="Browse the repository at this point in the history">{{ icon('code') }}</a>
+        </span>
+      </div>
+    {% endfor %}
+    </div>
+  </div>
+{% endfor %}
+</div>
+{% endmacro %}
+
+{% macro pager(page, pages, query) %}
+{% if pages > 1 %}
+<nav class="pager" aria-label="Pagination">
+  {% if page > 1 %}<a href="?{{ query }}page={{ page - 1 }}">‹ Previous</a>{% else %}<span class="disabled">‹ Previous</span>{% endif %}
+  {% for number in page|window(pages) %}
+    {% if number is none %}<span class="disabled">…</span>
+    {% elif number == page %}<span class="current" aria-current="page">{{ number }}</span>
+    {% else %}<a href="?{{ query }}page={{ number }}">{{ number }}</a>{% endif %}
+  {% endfor %}
+  {% if page < pages %}<a href="?{{ query }}page={{ page + 1 }}">Next ›</a>{% else %}<span class="disabled">Next ›</span>{% endif %}
+</nav>
+{% endif %}
+{% endmacro %}

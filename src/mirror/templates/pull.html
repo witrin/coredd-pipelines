@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% from "macros.html" import conversation, card, sidebar, diff, diffstat, history %}
+{% block title %}{{ entry.title }} · Pull Request #{{ entry.number }} · {{ repo.name }}{% endblock %}
+{% block content %}
+{% set count = payload.commits or commits|length %}
+<div class="gh-header">
+  <h1>{{ entry.title }} <span class="number">#{{ entry.number }}</span></h1>
+  <div class="meta">
+    <span class="state {{ entry.state }}">{{ icon({'open': 'git-pull-request', 'merged': 'git-merge', 'closed': 'git-pull-request-closed'}[entry.state]) }}{{ entry.state|capitalize }}</span>
+    <span><span class="author">{{ entry.author or 'ghost' }}</span>
+    {% if entry.state == 'merged' %}merged {{ count }} commit{{ 's' if count != 1 }} into{% else %}wants to merge {{ count }} commit{{ 's' if count != 1 }} into{% endif %}
+    <span class="ref">{{ payload.base.ref }}</span> from <span class="ref">{{ payload.head.label }}</span>
+    {% if entry.closed %}{{ entry.closed|date }}{% endif %}</span>
+  </div>
+</div>
+<nav class="tabnav" aria-label="Pull request">
+  <a href="/{{ repo.name }}/pull/{{ entry.number }}" class="{{ 'selected' if view == 'conversation' }}">{{ icon('comment-discussion') }}Conversation<span class="counter">{{ entry.comments + (payload.review_comments or 0) }}</span></a>
+  <a href="/{{ repo.name }}/pull/{{ entry.number }}/commits" class="{{ 'selected' if view == 'commits' }}">{{ icon('git-commit') }}Commits<span class="counter">{{ commits|length }}</span></a>
+  <a href="/{{ repo.name }}/pull/{{ entry.number }}/files" class="{{ 'selected' if view == 'files' }}">{{ icon('file-diff') }}Files changed<span class="counter">{{ payload.changed_files }}</span></a>
+  {% if payload.additions is not none %}<span class="stat">{{ diffstat(payload.additions or 0, payload.deletions or 0) }}</span>{% endif %}
+</nav>
+{% if view == 'conversation' %}
+<div class="layout">
+  <div>
+    <div class="discussion">
+      {{ card(entry.author or 'ghost', 'commented', entry.created, body, payload.author_association, entry.author, '') }}
+      {{ conversation(items, repo, entry.author, entry) }}
+      {% if entry.state == 'merged' %}
+      <div class="closing"><span class="bubble merged">{{ icon('git-merge', 24) }}</span><div><h3>Pull request successfully merged and closed</h3><p>Merged into <span class="ref">{{ payload.base.ref }}</span>{% if payload.merge_commit_sha %} as <a class="sha mono" href="/{{ repo.name }}/commit/{{ payload.merge_commit_sha }}">{{ payload.merge_commit_sha[:7] }}</a>{% endif %}.</p></div></div>
+      {% elif entry.state == 'closed' %}
+      <div class="closing"><span class="bubble closed">{{ icon('git-pull-request-closed', 24) }}</span><div><h3>Closed with unmerged commits</h3><p>This pull request is closed.</p></div></div>
+      {% endif %}
+    </div>
+    {% if truncated %}<div class="notice" style="margin-top:16px">{{ icon('info') }}<span>Only the first page of timeline events (labels, review requests, force pushes) was collected for this pull request. Comments, reviews, review threads and commits are complete.</span></div>{% endif %}
+  </div>
+  {{ sidebar(payload, links, repo, true, reviewers) }}
+</div>
+{% elif view == 'commits' %}
+{% if commits %}{{ history(commits, repo) }}{% else %}<div class="box"><div class="blankslate">{{ icon('git-commit', 24) }}<h3>No commits</h3><p>No commits were collected for this pull request.</p></div></div>{% endif %}
+{% else %}
+{% if base %}<div class="notice info">{{ icon('info') }}<span>Comparing <a class="sha mono" href="/{{ repo.name }}/commit/{{ base.id }}">{{ (base.id|string)[:7] }}</a> (merge base) with <a class="sha mono" href="/{{ repo.name }}/commit/{{ head.id }}">{{ (head.id|string)[:7] }}</a>{% if only %} · showing {{ only }} only, <a href="/{{ repo.name }}/pull/{{ entry.number }}/files">show all files</a>{% endif %}</span></div>{% endif %}
+{{ diff(files, tree, repo, head, '/' ~ repo.name ~ '/pull/' ~ entry.number ~ '/files') }}
+{% endif %}
+{% endblock %}

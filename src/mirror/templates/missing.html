@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Not in the mirror{% endblock %}
+{% block content %}
+<div class="lost">
+  {{ icon('alert', 32) }}
+  <h1>Not in the mirror</h1>
+  <p>{{ message }}</p>
+  <p>The mirror only contains what was collected: the repository clone, and the issues and pull requests closed within the collection window, with their comments, reviews and commits.</p>
+  <p><a class="button" href="/">Back to the repository list</a></p>
+</div>
+{% endblock %}

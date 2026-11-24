@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% from "macros.html" import conversation, card, sidebar %}
+{% block title %}{{ entry.title }} · Issue #{{ entry.number }} · {{ repo.name }}{% endblock %}
+{% block content %}
+{% set state = 'open' if entry.state == 'open' else (payload.state_reason if payload.state_reason in ('completed', 'not_planned') else 'completed') %}
+<div class="gh-header">
+  <h1>{{ entry.title }} <span class="number">#{{ entry.number }}</span></h1>
+  <div class="meta">
+    <span class="state {{ state }}">{{ icon({'open': 'issue-opened', 'completed': 'issue-closed', 'not_planned': 'skip'}[state]) }}{{ 'Open' if state == 'open' else 'Closed' }}</span>
+    <span><span class="author">{{ entry.author or 'ghost' }}</span> opened this issue {{ entry.created|date }} · {{ entry.comments }} comment{{ 's' if entry.comments != 1 }}</span>
+  </div>
+</div>
+<div class="layout">
+  <div>
+    <div class="discussion">
+      {{ card(entry.author or 'ghost', 'opened', entry.created, body, payload.author_association, entry.author, '') }}
+      {{ conversation(items, repo, entry.author) }}
+    </div>
+    {% if truncated %}<div class="notice">{{ icon('info') }}<span>Only the first page of timeline events (labels, assignments, references) was collected for this issue. Comments are complete.</span></div>{% endif %}
+  </div>
+  {{ sidebar(payload, links, repo) }}
+</div>
+{% endblock %}

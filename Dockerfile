@@ -104,3 +104,30 @@ RUN rm /usr/local/lib/python3.13/site-packages/99-logging.pth \
     && uv pip install --system ".[notebooks]"
 
 ENTRYPOINT ["/bin/bash"]
+
+FROM python:3.13-slim AS mirror
+
+# Build with the mirror root as a named context:
+#   docker buildx build --target mirror --build-context archive=<mirror root> .
+WORKDIR /usr/local/src/
+
+COPY requirements.lock ./
+
+RUN pip install uv \
+    && grep -E '^(anyio|click|h11|idna|jinja2|markdown-it-py|markupsafe|mdurl|pygit2|pygments|sniffio|starlette|typing-extensions|uvicorn\[standard\]|cffi|pycparser)==' requirements.lock > mirror.txt \
+    && uv pip install --system -r mirror.txt \
+    && pip uninstall -y uv \
+    && adduser --disabled-password --gecos "" mirror
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/usr/local/src
+
+COPY src/mirror/ ./benchmark/mirror/
+COPY --from=archive --chown=mirror:mirror . /srv/mirror/
+
+USER mirror
+
+EXPOSE 8080
+
+CMD ["python", "-m", "benchmark.mirror.server", "/srv/mirror", "--host", "0.0.0.0"]

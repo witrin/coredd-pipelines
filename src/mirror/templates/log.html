@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% from "macros.html" import history %}
+{% block title %}History for {{ path or repo.name }} · {{ repo.name }}{% endblock %}
+{% block content %}
+<div class="toolbar">
+  <a class="button" href="/{{ repo.name }}/tree/{{ ref }}">{{ icon('git-branch') }}{{ ref if ref|length < 40 else ref[:7] }}</a>
+  <span class="path">History for <a href="/{{ repo.name }}/tree/{{ ref }}">{{ repo.name.split('/')[1] }}</a>{% if path %}<span class="slash">/</span><strong>{{ path }}</strong>{% endif %}</span>
+</div>
+{% if commits %}{{ history(commits, repo, path) }}{% else %}<div class="box"><div class="blankslate">{{ icon('git-commit', 24) }}<h3>No commits</h3></div></div>{% endif %}
+<nav class="pager">
+  {% if page > 1 %}<a href="?page={{ page - 1 }}">‹ Newer</a>{% else %}<span class="disabled">‹ Newer</span>{% endif %}
+  {% if more %}<a href="?page={{ page + 1 }}">Older ›</a>{% else %}<span class="disabled">Older ›</span>{% endif %}
+</nav>
+{% endblock %}

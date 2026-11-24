@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}{{ path }} at {{ ref }} · {{ repo.name }}{% endblock %}
+{% block content %}
+<div class="toolbar">
+  <a class="button" href="/{{ repo.name }}/commits/{{ ref }}">{{ icon('git-branch') }}<strong>{{ ref if ref|length < 40 else ref[:7] }}</strong></a>
+  <span class="path"><a href="/{{ repo.name }}/tree/{{ ref }}"><strong>{{ repo.name.split('/')[1] }}</strong></a>{% for name, part in crumbs %}<span class="slash">/</span>{% if loop.last %}<strong>{{ name }}</strong>{% else %}<a href="/{{ repo.name }}/tree/{{ ref }}/{{ part }}">{{ name }}</a>{% endif %}{% endfor %}</span>
+</div>
+<div class="box">
+  <div class="latest">
+    {{ avatar(latest.author.name, 20) }}<span class="author">{{ latest.author.name }}</span>
+    <a class="message grow" href="/{{ repo.name }}/commit/{{ latest.id }}">{{ latest.message.split('\n')[0] }}</a>
+    <span class="side"><a class="sha mono" href="/{{ repo.name }}/commit/{{ latest.id }}">{{ (latest.id|string)[:7] }}</a><span>· {{ latest.commit_time|stamp }}</span>
+      <a href="/{{ repo.name }}/commits/{{ ref }}/{{ path }}" class="nowrap">{{ icon('history') }} <strong>History</strong></a></span>
+  </div>
+  <div class="blob-head">
+    {% if path.lower().endswith(('.md', '.markdown')) %}
+    <span class="group"><a class="button small {{ 'selected' if rendered }}" href="?">Preview</a><a class="button small {{ 'selected' if not rendered }}" href="?plain=1">Code</a></span>
+    {% else %}
+    <span class="group"><span class="button small selected">Code</span></span>
+    {% endif %}
+    <span>{% if lines is not none %}{{ lines|length }} lines · {% endif %}{{ size|size }}</span>
+    <span class="actions"><a class="button small" href="/{{ repo.name }}/raw/{{ ref }}/{{ path }}">Raw</a></span>
+  </div>
+  {% if rendered %}
+    <div class="body markdown" style="padding:32px">{{ rendered }}</div>
+  {% elif image %}
+    <div class="body" style="text-align:center"><img src="/{{ repo.name }}/raw/{{ ref }}/{{ path }}" alt="{{ path }}"></div>
+  {% elif lines is none %}
+    <div class="blankslate">Binary file not shown.</div>
+  {% else %}
+  <div class="scroll"><table class="code">
+  {% for line in lines %}<tr><td class="num" id="L{{ loop.index }}" data-line="{{ loop.index }}"></td><td>{{ line }}</td></tr>
+  {% endfor %}</table></div>
+  {% endif %}
+</div>
+{% endblock %}

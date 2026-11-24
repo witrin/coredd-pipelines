@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}{{ repo.name }}{% if path %}/{{ path }}{% endif %} at {{ ref }}{% endblock %}
+{% block content %}
+{% set short = ref if ref|length < 40 else ref[:7] %}
+<div class="{{ 'layout' if not path }}">
+<div>
+  <div class="toolbar">
+    <a class="button" href="/{{ repo.name }}/commits/{{ ref }}" title="Switch branches is not available in the mirror">{{ icon('git-branch') }}<strong>{{ short }}</strong></a>
+    {% if path %}<span class="path"><a href="/{{ repo.name }}/tree/{{ ref }}"><strong>{{ repo.name.split('/')[1] }}</strong></a>{% for name, part in crumbs %}<span class="slash">/</span>{% if loop.last %}<strong>{{ name }}</strong>{% else %}<a href="/{{ repo.name }}/tree/{{ ref }}/{{ part }}">{{ name }}</a>{% endif %}{% endfor %}<span class="slash">/</span></span>{% endif %}
+  </div>
+  <div class="box files">
+    <div class="latest">
+      {{ avatar(latest.author.name, 20) }}<span class="author">{{ latest.author.name }}</span>
+      <a class="message grow" href="/{{ repo.name }}/commit/{{ latest.id }}">{{ latest.message.split('\n')[0] }}</a>
+      <span class="side"><a class="sha mono" href="/{{ repo.name }}/commit/{{ latest.id }}">{{ (latest.id|string)[:7] }}</a><span>· {{ latest.commit_time|stamp }}</span>
+        <a href="/{{ repo.name }}/commits/{{ ref }}{% if path %}/{{ path }}{% endif %}" class="nowrap">{{ icon('history') }} <strong>History</strong></a></span>
+    </div>
+    {% if path %}<div class="entry">{{ icon('file-directory-fill') }}<a href="/{{ repo.name }}/tree/{{ ref }}{% if crumbs|length > 1 %}/{{ crumbs[-2][1] }}{% endif %}">..</a></div>{% endif %}
+    {% for entry in entries %}
+    <div class="entry">{{ icon('file-directory-fill' if entry.kind == 'tree' else 'file') }}<a class="grow" href="/{{ repo.name }}/{{ 'tree' if entry.kind == 'tree' else 'blob' }}/{{ ref }}/{{ entry.path }}">{{ entry.name }}</a></div>
+    {% endfor %}
+  </div>
+  {% if readme %}
+  <div class="box readme" id="readme">
+    <div class="head"><span class="tab">{{ icon('book') }}{{ readme[0] }}</span></div>
+    <div class="body markdown">{{ readme[1] }}</div>
+  </div>
+  {% endif %}
+</div>
+{% if not path %}
+<aside class="sidebar about">
+  <h2>About</h2>
+  <p>{{ repo.description or 'No description, website, or topics provided.' }}</p>
+  {% if readme %}<div class="fact">{{ icon('book') }}<a href="#readme">Readme</a></div>{% endif %}
+  <div class="fact">{{ icon('git-pull-request') }}<a href="/{{ repo.name }}/pulls"><strong>{{ repo.pulls }}</strong> pull requests</a></div>
+  <div class="fact">{{ icon('issue-opened') }}<a href="/{{ repo.name }}/issues"><strong>{{ repo.issues }}</strong> issues</a></div>
+  <div class="fact">{{ icon('git-branch') }}<a href="/{{ repo.name }}/commits/{{ repo.branch }}">{{ repo.branch }}</a></div>
+  <div class="fact">{{ icon('link-external') }}<a href="https://github.com/{{ repo.name }}" target="_blank" rel="noopener noreferrer">Original on GitHub</a></div>
+</aside>
+{% endif %}
+</div>
+{% endblock %}

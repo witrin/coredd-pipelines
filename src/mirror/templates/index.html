@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Mirror{% endblock %}
+{% block content %}
+<form class="search-row" method="get" action="/">
+  <label class="input">{{ icon('link') }}<input type="text" name="url" value="{{ url }}" placeholder="Paste a github.com link of a mirrored repository to open it here" aria-label="GitHub link"></label>
+  <button class="button" type="submit">Open</button>
+</form>
+{% if url %}<div class="notice">{{ icon('alert') }}<span><code>{{ url }}</code> does not point into a mirrored repository.</span></div>{% endif %}
+<h1 class="page-title">Repositories</h1>
+{% for item in repositories %}
+{% set owner, name = item.name.split('/') %}
+<div class="repo-row">
+  {{ avatar(owner, 40, true) }}
+  <div class="grow">
+    <h3><a href="/{{ item.name }}"><span class="owner">{{ owner }} / </span>{{ name }}</a></h3>
+    {% if item.description %}<p>{{ item.description }}</p>{% endif %}
+    <div class="facts">
+      <a href="/{{ item.name }}/pulls">{{ icon('git-pull-request') }}{{ item.pulls }} pull requests</a>
+      <a href="/{{ item.name }}/issues">{{ icon('issue-opened') }}{{ item.issues }} issues</a>
+      <a href="/{{ item.name }}/commits/{{ item.branch }}">{{ icon('git-branch') }}{{ item.branch }}</a>
+    </div>
+  </div>
+</div>
+{% endfor %}
+{% endblock %}

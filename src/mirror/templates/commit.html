@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% from "macros.html" import diff %}
+{% block title %}{{ headline }} · {{ repo.name }}@{{ (commit.id|string)[:7] }}{% endblock %}
+{% block content %}
+<div class="full-commit">
+  <div class="title">
+    <h1>{{ headline }}{% if body %}<div class="description markdown">{{ body }}</div>{% endif %}</h1>
+    <a class="button" href="/{{ repo.name }}/tree/{{ commit.id }}">Browse files</a>
+  </div>
+  <div class="branches">
+    {% if pulls %}{{ icon('git-pull-request') }}<span>This commit is part of {% for pull in pulls %}<a href="/{{ repo.name }}/pull/{{ pull.number }}">#{{ pull.number }}</a> {{ pull.title }}{% if not loop.last %}, {% endif %}{% endfor %}</span>
+    {% else %}{{ icon('git-commit') }}<span>Not part of a collected pull request</span>{% endif %}
+  </div>
+  <div class="meta">
+    {{ avatar(commit.author.name, 20) }}<span><span class="author">{{ commit.author.name }}</span> authored {{ commit.author.time|stamp }}{% if commit.committer.name != commit.author.name %} · <span class="author">{{ commit.committer.name }}</span> committed {{ commit.committer.time|stamp }}{% endif %}</span>
+    <span class="side">
+      <span>{{ commit.parents|length }} parent{{ 's' if commit.parents|length != 1 }} {% for parent in commit.parents %}<a class="sha mono" href="/{{ repo.name }}/commit/{{ parent.id }}">{{ (parent.id|string)[:7] }}</a>{% if not loop.last %} + {% endif %}{% endfor %}</span>
+      <span>commit <span class="sha mono">{{ commit.id }}</span></span>
+    </span>
+  </div>
+</div>
+{% if only %}<div class="notice info">{{ icon('info') }}<span>Showing {{ only }} only · <a href="/{{ repo.name }}/commit/{{ commit.id }}">show all files</a></span></div>{% endif %}
+{{ diff(files, tree, repo, commit, '/' ~ repo.name ~ '/commit/' ~ commit.id) }}
+{% endblock %}

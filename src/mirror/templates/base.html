@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{% block title %}Mirror{% endblock %}</title>
+<link rel="stylesheet" href="/static/mirror.css">
+</head>
+<body>
+<header class="header">
+  <div class="bar">
+    <a class="home" href="/" title="All mirrored repositories">{{ icon('repo') }}</a>
+    <div class="crumb">
+      {% if repo %}
+      {% set owner, name = repo.name.split('/') %}
+      {{ avatar(owner, 20, true) }}
+      <a href="/">{{ owner }}</a><span class="slash">/</span><strong><a href="/{{ repo.name }}">{{ name }}</a></strong>
+      {% else %}
+      <strong><a href="/">Mirror</a></strong>
+      {% endif %}
+    </div>
+    {% if repo %}
+    <form class="search" method="get" action="/{{ repo.name }}/{{ 'issues' if tab == 'issues' else 'pulls' }}" role="search">
+      {{ icon('search') }}<input type="text" name="q" placeholder="Search {{ 'issues' if tab == 'issues' else 'pull requests' }}" aria-label="Search">
+    </form>
+    {% endif %}
+  </div>
+  {% if repo %}
+  <nav aria-label="Repository">
+    <a href="/{{ repo.name }}" class="{{ 'active' if tab == 'code' }}">{{ icon('code') }}<span>Code</span></a>
+    <a href="/{{ repo.name }}/issues" class="{{ 'active' if tab == 'issues' }}">{{ icon('issue-opened') }}<span>Issues</span><span class="counter">{{ repo.issues }}</span></a>
+    <a href="/{{ repo.name }}/pulls" class="{{ 'active' if tab == 'pulls' }}">{{ icon('git-pull-request') }}<span>Pull requests</span><span class="counter">{{ repo.pulls }}</span></a>
+  </nav>
+  {% else %}
+  <div style="height:16px"></div>
+  {% endif %}
+</header>
+<div class="flash">{{ icon('alert') }}Read-only mirror of the collected repository data, built {{ meta.built[:10] }}. Only issues and pull requests closed within the collection window are included.</div>
+<main>
+{% block content %}{% endblock %}
+</main>
+<script>
+(function () {
+  function mark() {
+    document.querySelectorAll("tr.marked").forEach(function (row) { row.classList.remove("marked"); });
+    var hash = decodeURIComponent(location.hash.slice(1));
+    var range = hash.match(/^L(\d+)(?:-L(\d+))?$/);
+    if (range) {
+      var from = +range[1], to = +(range[2] || range[1]);
+      for (var line = Math.min(from, to); line <= Math.max(from, to); line++) {
+        var row = document.getElementById("L" + line);
+        if (row) row.classList.add("marked");
+      }
+      var first = document.getElementById("L" + Math.min(from, to));
+      if (first) first.scrollIntoView({block: "center"});
+      return;
+    }
+    var target = hash && document.getElementById(hash);
+    if (target && target.tagName === "TD") {
+      target.parentNode.classList.add("marked");
+      target.scrollIntoView({block: "center"});
+    }
+  }
+  var anchor = null;
+  document.addEventListener("click", function (event) {
+    var expander = event.target.closest("td.expand[data-src]");
+    if (expander) {
+      var source = expander.getAttribute("data-src");
+      var hunk = expander.parentNode;
+      expander.removeAttribute("data-src");
+      expander.classList.add("loading");
+      fetch(source).then(function (response) {
+        if (!response.ok) throw new Error(response.status);
+        return response.text();
+      }).then(function (rows) {
+        hunk.insertAdjacentHTML("beforebegin", rows);
+        if (hunk.querySelector("td:last-child").textContent.trim()) {
+          expander.classList.remove("expand", "loading");
+          expander.innerHTML = "";
+        } else {
+          hunk.remove();
+        }
+      }).catch(function () {
+        expander.classList.remove("loading");
+        expander.setAttribute("data-src", source);
+      });
+      return;
+    }
+    var cell = event.target.closest("td.num[id]");
+    if (!cell) return;
+    var id = cell.id;
+    var plain = id.match(/^L(\d+)$/);
+    if (plain && event.shiftKey && anchor) {
+      var a = Math.min(anchor, +plain[1]), b = Math.max(anchor, +plain[1]);
+      history.replaceState(null, "", "#L" + a + "-L" + b);
+    } else {
+      anchor = plain ? +plain[1] : null;
+      history.replaceState(null, "", "#" + id);
+    }
+    mark();
+  });
+  window.addEventListener("hashchange", mark);
+  mark();
+})();
+</script>
+</body>
+</html>

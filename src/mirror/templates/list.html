@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% from "macros.html" import pager %}
+{% set noun = 'pull requests' if kind == 'pull' else 'issues' %}
+{% block title %}{{ noun|capitalize }} · {{ repo.name }}{% endblock %}
+{% block content %}
+<form class="search-row" method="get">
+  <label class="input">{{ icon('search') }}<input type="text" name="q" value="{{ query }}" placeholder="Search all {{ noun }} by title, author or #number" aria-label="Search {{ noun }}"></label>
+  <input type="hidden" name="state" value="{{ state }}">
+  <button class="button" type="submit">Search</button>
+</form>
+<div class="box">
+  <div class="head slim">
+    <div class="states">
+      <a class="{{ 'selected' if state == 'open' }}" href="?state=open&q={{ query|urlencode }}">{{ icon('git-pull-request' if kind == 'pull' else 'issue-opened') }}{{ counts.open }} Open</a>
+      <a class="{{ 'selected' if state == 'closed' }}" href="?state=closed&q={{ query|urlencode }}">{{ icon('check') }}{{ counts.closed }} Closed</a>
+      {% if kind == 'pull' %}<a class="{{ 'selected' if state == 'merged' }}" href="?state=merged&q={{ query|urlencode }}">{{ icon('git-merge') }}{{ counts.merged }} Merged</a>{% endif %}
+      {% if state %}<a href="?q={{ query|urlencode }}">{{ icon('x') }}Clear filter</a>{% endif %}
+    </div>
+  </div>
+  {% for row in rows %}
+  {% if kind == 'pull' %}
+    {% set look = {'open': ('git-pull-request', 'open'), 'merged': ('git-merge', 'merged'), 'closed': ('git-pull-request-closed', 'closed')}[row.state] %}
+  {% else %}
+    {% set look = ('issue-opened', 'open') if row.state == 'open' else (('skip', 'not_planned') if row.reason == 'not_planned' else ('issue-closed', 'completed')) %}
+  {% endif %}
+  <div class="issue-row">
+    <span class="icon-{{ look[1] }}" title="{{ row.state }}">{{ icon(look[0]) }}</span>
+    <div class="grow">
+      <a class="title" href="/{{ repo.name }}/{{ 'pull' if kind == 'pull' else 'issues' }}/{{ row.number }}">{{ row.title }}</a>
+      {% for label in row.labels %}<span class="label" style="--label:#{{ label.color }}">{{ label.name }}</span> {% endfor %}
+      <div class="info">#{{ row.number }} by {{ row.author or 'ghost' }} {% if row.state == 'merged' %}was merged {{ row.closed|date }}{% elif row.closed %}was closed {{ row.closed|date }}{% else %}opened {{ row.created|date }}{% endif %}</div>
+    </div>
+    {% if row.comments %}<a class="side" href="/{{ repo.name }}/{{ 'pull' if kind == 'pull' else 'issues' }}/{{ row.number }}">{{ icon('comment') }}{{ row.comments }}</a>{% endif %}
+  </div>
+  {% else %}
+  <div class="blankslate">{{ icon('issue-opened' if kind == 'issue' else 'git-pull-request', 24) }}<h3>No results matched your search.</h3><p>The mirror only contains {{ noun }} closed within the collection window.</p></div>
+  {% endfor %}
+</div>
+{{ pager(page, pages, 'state=' ~ state ~ '&q=' ~ (query|urlencode) ~ '&') }}
+{% endblock %}
