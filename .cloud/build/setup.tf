@@ -22,7 +22,7 @@ terraform {
 variable "cloudbuild_repository" {
   description = "Full resource name of the Cloud Build repository to watch for tag pushes."
   type        = string
-  default     = "projects/bug-request/locations/europe-west1/connections/bug-request/repositories/bug-request-benchmark"
+  default     = "projects/bug-request/locations/europe-west1/connections/github/repositories/coredd-pipelines"
 }
 
 variable "github_org" {
